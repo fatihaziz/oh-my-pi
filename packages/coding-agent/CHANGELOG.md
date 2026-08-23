@@ -786,6 +786,10 @@
 - Fixed self-update misclassifying glibc Linux hosts with an installed musl loader as musl hosts, which could download an unusable musl binary instead of the glibc release.
 - Fixed a crash where opening the Agent Hub after a resume and moving the selection triggered an unbounded `ExtensionExitError` unhandled-rejection storm and exit 129. The postmortem module bound the native hard-exit at first evaluation; when the bundler deferred that evaluation into a `withHostGuard` window it froze the guard's throwing replacement, poisoning every later signal/fatal exit. The native exit is now resolved per call, and the guard stamps its replacement with the native primitive it shadows so mid-guard signals still exit ([#7393](https://github.com/can1357/oh-my-pi/issues/7393)).
 
+### Fixed
+
+- Fixed the `/guided-goal` interview questioning the user from a blank slate: the kickoff prompt banned every tool call for the whole interview, so the agent spent its six-question budget on answers a read, a grep, or a search would have produced, and could not obey the same prompt's instruction to ground its questions in the project's real stack. Recon is now required before the first question, findings are stated before the first ask, and questions the repository already answers are prohibited. Only side-effecting calls stay banned during the interview.
+
 ## [17.2.8] - 2026-08-04
 
 ### Changed
