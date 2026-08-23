@@ -2791,7 +2791,7 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 	}
 }
 
-function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {
+function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" | "json" | "toml" | "text" {
 	if (path.endsWith(".tsx")) {
 		return "tsx";
 	}
@@ -2800,6 +2800,17 @@ function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {
 	}
 	if (path.endsWith(".ts") || path.endsWith(".mts") || path.endsWith(".cts")) {
 		return "ts";
+	}
+	// Local patch (P1): legacy plugins import JSON, TOML, and text assets;
+	// falling back to "js" makes Bun parse them as JavaScript and crash.
+	if (path.endsWith(".json")) {
+		return "json";
+	}
+	if (path.endsWith(".toml")) {
+		return "toml";
+	}
+	if (path.endsWith(".txt") || path.endsWith(".md")) {
+		return "text";
 	}
 	return "js";
 }
