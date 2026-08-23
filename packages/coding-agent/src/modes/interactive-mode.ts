@@ -718,6 +718,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #startupChangelog: StartupChangelogSelection | undefined;
 	#planModePreviousTools: string[] | undefined;
 	#goalModePreviousTools: string[] | undefined;
+	#guidedGoalInterviewActive = false;
+	#guidedGoalInterviewCleanup: Promise<void> | undefined;
+	#guidedGoalQueuedKickoff: string | undefined;
 	#vibeModePreviousTools: string[] | undefined;
 	#vibeModeOwnerScope: VibeOwnerScope | undefined;
 	#vibeScopeSuspendedForSwitch = false;
@@ -2753,6 +2756,27 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			return;
 		}
+		if (
+			event.type === "tool_execution_end" &&
+			event.toolName === "ask" &&
+			event.result?.details?.chatRedirect === true
+		) {
+			// Plain-chat handoff remains an active guided interview: keep goal
+			// available for its eventual create, and let goal exit restore tools.
+			this.#guidedGoalInterviewActive = false;
+			this.#guidedGoalQueuedKickoff = undefined;
+			return;
+		}
+		const queuedKickoff = this.#guidedGoalQueuedKickoff;
+		if (
+			event.type === "message_start" &&
+			queuedKickoff !== undefined &&
+			event.message.role === "developer" &&
+			Array.isArray(event.message.content) &&
+			event.message.content.some(part => part.type === "text" && part.text === queuedKickoff)
+		) {
+			this.#guidedGoalQueuedKickoff = undefined;
+		}
 		if (event.type === "message_start" && event.message.role === "user" && !event.message.synthetic) {
 			this.#resetGoalContinuationSuppression();
 			return;
@@ -2772,9 +2796,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#updateGoalModeStatus();
 			return;
 		}
-		if (event.type !== "agent_end") {
+		if (event.type !== "agent_end" || event.isTerminal === false) {
 			return;
 		}
+		await this.#finishGuidedGoalInterview();
 		if (this.#goalContinuationTurnInFlight) {
 			this.#goalSuppressNextContinuation = !this.#goalTurnHadToolCalls;
 			this.#goalContinuationTurnInFlight = false;
@@ -3199,6 +3224,51 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.sessionManager.appendModeChange(paused ? "plan_paused" : "none");
 		if (!options?.silent) {
 			this.showStatus(paused ? "Plan mode paused." : "Plan mode disabled.");
+		}
+	}
+
+	async #queueGuidedGoalKickoff(kickoff: string, images?: ImageContent[]): Promise<void> {
+		this.#guidedGoalQueuedKickoff = kickoff;
+		try {
+			await this.session.followUp(kickoff, images, { synthetic: true });
+		} catch (error) {
+			this.#guidedGoalQueuedKickoff = undefined;
+			throw error;
+		}
+	}
+
+	async #finishGuidedGoalInterview(): Promise<void> {
+		if (!this.#guidedGoalInterviewActive) return;
+		const queuedKickoff = this.#guidedGoalQueuedKickoff;
+		if (queuedKickoff !== undefined) {
+			if (this.session.hasQueuedAgentFollowUp(queuedKickoff)) return;
+			this.#guidedGoalQueuedKickoff = undefined;
+		}
+		if (this.#guidedGoalInterviewCleanup) {
+			await this.#guidedGoalInterviewCleanup;
+			return;
+		}
+		if (this.session.getGoalModeState()?.enabled) {
+			this.#guidedGoalInterviewActive = false;
+			return;
+		}
+		const previousTools = this.#goalModePreviousTools;
+		if (!previousTools) {
+			this.#guidedGoalInterviewActive = false;
+			return;
+		}
+		const cleanup = this.session.setActiveToolsByName(previousTools).then(() => {
+			this.#guidedGoalInterviewActive = false;
+			this.#guidedGoalQueuedKickoff = undefined;
+			this.#goalModePreviousTools = undefined;
+		});
+		this.#guidedGoalInterviewCleanup = cleanup;
+		try {
+			await cleanup;
+		} finally {
+			if (this.#guidedGoalInterviewCleanup === cleanup) {
+				this.#guidedGoalInterviewCleanup = undefined;
+			}
 		}
 	}
 
@@ -4028,14 +4098,24 @@ export class InteractiveMode implements InteractiveModeContext {
 				return false;
 			}
 
+			if (!this.session.hasBuiltInTool("ask")) {
+				this.showWarning("Guided goal requires the ask tool. Enable ask.enabled and include ask in --tools.");
+				return false;
+			}
+
 			// Expose the goal tool for the interview so the agent can finish by
 			// calling `goal create`. Record the pre-interview toolset first: the
 			// tool-driven create flips goalModeEnabled via `goal_updated`, and the
 			// eventual goal exit restores this set (dropping the goal tool again).
 			const enabledTools = this.session.getEnabledToolNames();
-			this.#goalModePreviousTools = enabledTools.filter(name => name !== "goal");
-			if (!enabledTools.includes("goal")) {
-				await this.session.setActiveToolsByName([...enabledTools, "goal"]);
+			this.#goalModePreviousTools ??= enabledTools;
+			this.#guidedGoalInterviewActive = true;
+			this.#guidedGoalQueuedKickoff = undefined;
+			const interviewTools = [...enabledTools];
+			if (!interviewTools.includes("ask")) interviewTools.push("ask");
+			if (!interviewTools.includes("goal")) interviewTools.push("goal");
+			if (interviewTools.length !== enabledTools.length) {
+				await this.session.setActiveToolsByName(interviewTools);
 			}
 
 			// The interview is a normal conversation: the kickoff rides in as a
@@ -4045,18 +4125,26 @@ export class InteractiveMode implements InteractiveModeContext {
 			const kickoff = prompt.render(guidedGoalInterviewPrompt, { initial: rest?.trim() || undefined });
 			const images = input?.images?.length ? input.images : undefined;
 			if (this.session.isStreaming) {
-				await this.session.followUp(kickoff, images, { synthetic: true });
-			} else {
-				try {
-					await this.session.prompt(kickoff, images ? { synthetic: true, images } : { synthetic: true });
-				} catch (error) {
-					if (!(error instanceof AgentBusyError)) throw error;
-					await this.session.followUp(kickoff, images, { synthetic: true });
-				}
+				await this.#queueGuidedGoalKickoff(kickoff, images);
+				return true;
 			}
+			try {
+				await this.session.prompt(kickoff, images ? { synthetic: true, images } : { synthetic: true });
+			} catch (error) {
+				if (!(error instanceof AgentBusyError)) throw error;
+				await this.#queueGuidedGoalKickoff(kickoff, images);
+				return true;
+			}
+			await this.#finishGuidedGoalInterview();
 			return true;
 		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
+			let reportedError = error;
+			try {
+				await this.#finishGuidedGoalInterview();
+			} catch (cleanupError) {
+				reportedError = cleanupError;
+			}
+			this.showError(reportedError instanceof Error ? reportedError.message : String(reportedError));
 			return false;
 		}
 	}
