@@ -30,6 +30,27 @@ Unless user tells you exactly what to write:
 - **Never comment on GitHub** (issues, PRs, discussions).
 - **Never create issues on GitHub**.
 
+## Fatih Fork Patch Registry
+
+This checkout carries ONE unified source-level patch for behavior not yet in upstream. The single source of truth is `scripts/omp-unified.patch` (a `git diff v<base>..unified-patch`), driven by `scripts/omp-reapply-patches.py`: the engine applies the patch to the installed Bun-managed package source, embeds the local stats client payload, rebuilds `dist/cli.js` transactionally, and verifies the bundle markers. External sync/config repositories MAY invoke that script but MUST NOT copy its patch logic. Patch base: upstream release `18.0.3` (`UNIFIED_BASE_VERSION` in the engine).
+
+Behaviors carried by the unified patch (marker IDs, verification-only):
+
+| ID | Behavior | Origin | Upstream plan |
+|---|---|---|---|
+| S1 | `/switch` and Alt+P show and apply session-only thinking effort | upstream PR [#8029](https://github.com/can1357/oh-my-pi/pull/8029), open | retire when merged |
+| P1 | Legacy plugin loader accepts JSON, TOML, and text assets (`legacy-pi-compat.ts:getLoader`) | local only; no PR | keep |
+| P6 | `/guided-goal` interview uses the ask tool | upstream PR [#8187](https://github.com/can1357/oh-my-pi/pull/8187), open | retire when merged |
+| P7 | `/guided-goal` performs recon and asks only unresolved questions | fork PR [fatihaziz/oh-my-pi#1](https://github.com/fatihaziz/oh-my-pi/pull/1) | never upstream |
+| P8 | Windows external editor hides the `cmd.exe` shell window (`external-editor.ts:openInEditor`) | local only; user-reported | keep until upstream sets `Bun.spawn` `windowsHide` |
+| P9 | External editor rejects a launcher that exits 0 without ever opening the file, instead of silently keeping the unchanged draft (`external-editor.ts:openInEditor`) | local only; upstreamable | offer upstream; drop when upstream validates the launch |
+
+Retired: P3 (`max` thinking label) — upstream-native since 17.3.x. P5 (fresh-session vibe autostart) — retired by user decision on 2026-08-20; fresh sessions start in normal mode and vibe is `/vibe` only.
+
+The merge worktree `tmp/upstream-unified-18.0.3` (branch `unified-patch-18.0.3`, base `v18.0.3`) is where upstream releases and the PR branches get merged and conflicts resolved; the patch file is regenerated from it. The exact regeneration procedure lives in the engine's module docstring. On a new upstream release: regenerate the patch there, bump `UNIFIED_BASE_VERSION`, bump `ompInstall.version` in the vault's `env.yml`, then run the vault sync (`uv run scripts/sync-to-global.py --only omp-local,omp-cli-patches --force`).
+
+After every Bun-managed OMP update, run `uv run scripts/omp-reapply-patches.py`; then `--dry-run` must report every marker `[present]`. `[conflict]` means STOP: follow the printed `source:`/`resolve:` guidance (usually regenerate the unified patch from a fresh merge worktree), update the registry and `scripts/test_omp_reapply_patches.py`, then retry. Before preparing an upstream PR, remove this local-only section plus `scripts/omp-reapply-patches.py`, `scripts/omp-unified.patch`, and `scripts/test_omp_reapply_patches.py` from that PR branch unless the PR explicitly upstreams one named behavior.
+
 ## Code Quality
 
 - No `any` unless absolutely necessary.
