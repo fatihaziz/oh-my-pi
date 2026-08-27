@@ -44,6 +44,7 @@ Behaviors carried by the unified patch (marker IDs, verification-only):
 | P7 | `/guided-goal` performs recon and asks only unresolved questions | fork PR [fatihaziz/oh-my-pi#1](https://github.com/fatihaziz/oh-my-pi/pull/1) | never upstream |
 | P8 | Windows external editor hides the `cmd.exe` shell window (`external-editor.ts:openInEditor`) | local only; user-reported | keep until upstream sets `Bun.spawn` `windowsHide` |
 | P9 | External editor rejects a launcher that exits 0 without ever opening the file, instead of silently keeping the unchanged draft (`external-editor.ts:openInEditor`) | local only; upstreamable | offer upstream; drop when upstream validates the launch |
+| P10 | Optional `OMP_GIT_MAX_CONCURRENCY` FIFO limiter caps concurrent `git` subprocess launches (`utils/git.ts:git`) | fork PR [fatihaziz/oh-my-pi#2](https://github.com/fatihaziz/oh-my-pi/pull/2); upstream [#9936](https://github.com/can1357/oh-my-pi/pull/9936) | retire marker once upstream merges |
 
 Retired: P3 (`max` thinking label) — upstream-native since 17.3.x. P5 (fresh-session vibe autostart) — retired by user decision on 2026-08-20; fresh sessions start in normal mode and vibe is `/vibe` only.
 

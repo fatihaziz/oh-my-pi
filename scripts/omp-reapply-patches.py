@@ -154,7 +154,14 @@ MARKERS = [
         "source": "packages/coding-agent/src/utils/external-editor.ts:openInEditor",
         "resolution": "Local only; upstreamable. Regenerate the unified patch; drop this marker once upstream rejects a launcher that exits 0 without ever opening the file.",
         "applied": lambda t: "without opening the file" in t,
-    },
+	},
+	{
+		"id": "P10",
+		"name": "P10 git concurrency limiter",
+		"source": "packages/coding-agent/src/utils/git.ts:git (acquireGitSlot)",
+		"resolution": "Fork PR fatihaziz/oh-my-pi#2; upstream can1357/oh-my-pi#9936. Regenerate the unified patch; drop this marker once upstream merges OMP_GIT_MAX_CONCURRENCY.",
+		"applied": lambda t: "OMP_GIT_MAX_CONCURRENCY" in t,
+	},
 ]
 
 
