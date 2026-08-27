@@ -35,7 +35,7 @@ describe("ModelRegistry runtime provider registration", () => {
 		tempDir = path.join(os.tmpdir(), `pi-test-model-registry-runtime-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		modelsJsonPath = path.join(tempDir, "models.json");
-		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+		authStorage = await AuthStorage.create(":memory:");
 		registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch });
 	});
 
@@ -301,6 +301,30 @@ describe("ModelRegistry runtime provider registration", () => {
 			model: "model-compact",
 		});
 	});
+	test("combines static fallback models with dynamic provider discovery", async () => {
+		const providerName = "combined-runtime-provider";
+		let dynamicFetches = 0;
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [{ ...baseModel, id: "fallback-model" }],
+				fetchDynamicModels: async () => {
+					dynamicFetches++;
+					return [{ ...baseModel, id: "dynamic-model" }];
+				},
+			},
+			"ext://runtime",
+		);
+
+		await registry.refreshRuntimeProviders("online");
+
+		expect(dynamicFetches).toBe(1);
+		expect(registry.find(providerName, "dynamic-model")).toBeDefined();
+		expect(registry.find(providerName, "fallback-model")).toBeDefined();
+	});
 
 	test("configured discovery suppresses extension fetchDynamicModels for the same provider", async () => {
 		const providerName = "runtime-configured-provider";
@@ -418,6 +442,34 @@ describe("ModelRegistry runtime provider registration", () => {
 		});
 	});
 
+	test("registerProvider preserves a standalone Codex WebSocket opt-out across refresh", async () => {
+		const config: ProviderConfigInput = {
+			baseUrl: "https://chatgpt.com/backend-api/codex",
+			apiKey: "RUNTIME_KEY",
+			api: "openai-codex-responses",
+			models: [{ ...baseModel, id: "gpt-5.6-sol", preferWebsockets: false }],
+		};
+
+		registry.registerProvider("runtime-codex", config, "ext://runtime");
+		expect(registry.find("runtime-codex", "gpt-5.6-sol")?.preferWebsockets).toBe(false);
+
+		await registry.refresh("offline");
+		expect(registry.find("runtime-codex", "gpt-5.6-sol")?.preferWebsockets).toBe(false);
+	});
+
+	test("registerProvider lets an extension disable WebSockets on a bundled Codex model", () => {
+		const config: ProviderConfigInput = {
+			baseUrl: "https://chatgpt.com/backend-api/codex",
+			apiKey: "RUNTIME_KEY",
+			api: "openai-codex-responses",
+			models: [{ ...baseModel, id: "gpt-5.4", preferWebsockets: false }],
+		};
+
+		registry.registerProvider("openai-codex", config, "ext://runtime");
+
+		expect(registry.find("openai-codex", "gpt-5.4")?.preferWebsockets).toBe(false);
+	});
+
 	test("extension-registered models survive refresh('offline') cycle", async () => {
 		const config: ProviderConfigInput = {
 			baseUrl: "https://runtime.example.com/v1",
@@ -521,6 +573,42 @@ describe("ModelRegistry runtime provider registration", () => {
 
 		configuredRegistry.clearSourceRegistrations("ext://runtime");
 		expect(configuredRegistry.find("anthropic", modelId)?.headers?.[sharedHeader]).toBe(configHeaderValue);
+	});
+
+	test("runtime-registered models inherit configured provider guardrails", () => {
+		const providerName = "amazon-bedrock";
+		const modelId = "runtime-bedrock-model";
+		const guardrailIdentifier = "arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234";
+
+		fs.writeFileSync(
+			modelsJsonPath,
+			JSON.stringify({
+				providers: {
+					[providerName]: {
+						guardrailIdentifier,
+						guardrailVersion: "1",
+						guardrailTrace: "enabled",
+					},
+				},
+			}),
+		);
+		const configuredRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch });
+
+		configuredRegistry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+				apiKey: "RUNTIME_KEY",
+				api: "bedrock-converse-stream",
+				models: [{ ...baseModel, id: modelId }],
+			},
+			"ext://runtime",
+		);
+
+		const model = configuredRegistry.find(providerName, modelId);
+		expect(model?.guardrailIdentifier).toBe(guardrailIdentifier);
+		expect(model?.guardrailVersion).toBe("1");
+		expect(model?.guardrailTrace).toBe("enabled");
 	});
 
 	test("extension-registered API keys survive refresh cycle for auth resolution", async () => {
