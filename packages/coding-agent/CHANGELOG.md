@@ -1082,6 +1082,13 @@
 - Removed the `resolveAgentModelSource` model-resolver export, whose only use was being fed to `resolveExplicitModelRole`. Replaced by `resolveAgentModelSelection`, which returns the expanded `patterns` and the pre-expansion `role` together so a spawn path cannot derive one without the other ([#7910](https://github.com/can1357/oh-my-pi/pull/7910) by [@enieuwy](https://github.com/enieuwy)).
 - A run is now attributed to the model that actually produced its output, not whichever model the session was last pointed at. A retry fallback that errored on its first request — an exhausted quota, a hard provider error — was credited with the whole run in the Agent Hub row and the settled task result, even when the previous model did every turn. Sessions expose the serving model directly, holding the last model that produced output while a candidate is armed but unproven, and transcript-derived history stops at the newest turn that produced output.
 
+### Added
+
+- Added a thinking-effort picker to the session-only model switch (alt+p / `/switch`): after choosing a reasoning model, a follow-up selector offers `off`, `auto`, and the model's supported effort levels before the switch applies. Esc keeps the previous behavior (the role-configured or model-default level). Non-reasoning models switch immediately as before.
+### Fixed
+
+- Fixed `/guided-goal` interviewing from assumptions and asking in prose; the TUI command now requires the `ask` tool, allows read-only recon before questions, and abandons missing or timed-out input instead of inventing an objective.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed
@@ -1227,6 +1234,10 @@
 - Fixed `omp setup python` to validate the same configured or discovered interpreter used by the Python eval runtime.
 - Fixed self-update misclassifying glibc Linux hosts with an installed musl loader as musl hosts, which could download an unusable musl binary instead of the glibc release.
 - Fixed a crash where opening the Agent Hub after a resume and moving the selection triggered an unbounded `ExtensionExitError` unhandled-rejection storm and exit 129. The postmortem module bound the native hard-exit at first evaluation; when the bundler deferred that evaluation into a `withHostGuard` window it froze the guard's throwing replacement, poisoning every later signal/fatal exit. The native exit is now resolved per call, and the guard stamps its replacement with the native primitive it shadows so mid-guard signals still exit ([#7393](https://github.com/can1357/oh-my-pi/issues/7393)).
+
+### Fixed
+
+- Fixed the `/guided-goal` interview questioning the user from a blank slate: the kickoff prompt banned every tool call for the whole interview, so the agent spent its six-question budget on answers a read, a grep, or a search would have produced, and could not obey the same prompt's instruction to ground its questions in the project's real stack. Recon is now required before the first question, findings are stated before the first ask, and questions the repository already answers are prohibited. Only side-effecting calls stay banned during the interview.
 
 ## [17.2.8] - 2026-08-04
 

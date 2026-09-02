@@ -8,6 +8,7 @@
  * - Prompt-style (ask): Enter submits, Shift+Enter inserts newline, legacy ask chrome
  */
 import { Editor, type Focusable, matchesKey, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
+import { logger } from "@oh-my-pi/pi-utils";
 import { getEditorTheme, theme } from "../../modes/theme/theme";
 import {
 	matchesAppExternalEditor,
@@ -203,6 +204,10 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 			if (result !== null) {
 				this.#editor.setText(result);
 			}
+		} catch (error) {
+			// A launcher that reports success without opening the file throws; keep
+			// the draft and record why instead of letting it reject unhandled.
+			logger.warn("External editor failed", { editorCmd, error: String(error) });
 		} finally {
 			this.#tui.start();
 			this.#tui.requestRender(true);

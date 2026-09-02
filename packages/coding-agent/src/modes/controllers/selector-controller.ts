@@ -2,7 +2,7 @@ import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-p
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import { getDailyActivity } from "@oh-my-pi/omp-stats/db";
-import { PASTE_CODE_LOGIN_PROVIDERS, type UsageReport } from "@oh-my-pi/pi-ai";
+import { PASTE_CODE_LOGIN_PROVIDERS, type Model, type UsageReport } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -71,6 +71,7 @@ import {
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
 	parseConfiguredThinkingLevel,
+	sessionSwitchThinkingOptions,
 } from "../../thinking";
 import {
 	isSearchProviderId,
@@ -106,6 +107,7 @@ import { renderSegmentTrack } from "../components/segment-track";
 import { SessionAccountSelectorComponent } from "../components/session-account-selector";
 import { SessionSelectorComponent, type SessionSelectorOptions } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
+import { ThinkingStripComponent } from "../components/thinking-strip";
 import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
@@ -825,11 +827,18 @@ export class SelectorController {
 		// else the session model (the bundled task agent inherits it by default).
 		const taskOverride = this.ctx.settings.get("task.agentModelOverrides").task;
 		const taskSelector = (Array.isArray(taskOverride) ? taskOverride[0] : taskOverride) ?? currentSelector;
+		let overlayHandle: OverlayHandle | undefined;
+		let pickerHidden = false;
 		let closed = false;
+		const hidePicker = () => {
+			if (pickerHidden) return;
+			pickerHidden = true;
+			overlayHandle?.hide();
+		};
 		const done = () => {
 			if (closed) return;
 			closed = true;
-			overlayHandle?.hide();
+			hidePicker();
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
@@ -840,10 +849,10 @@ export class SelectorController {
 			this.ctx.session.scopedModels,
 			{
 				onPick: async (model, selector, { overContext }) => {
+					picker.lockInput();
 					// Session-only: update agent state but don't persist the model to settings.
-					const applySessionModel = async () => {
-						const roleThinkingLevel = this.ctx.session.resolveTemporaryModelThinkingLevel(model);
-						await this.ctx.session.setModelTemporary(model, roleThinkingLevel);
+					const applySessionModel = async (thinkingLevel: ConfiguredThinkingLevel | undefined) => {
+						await this.ctx.session.setModelTemporary(model, thinkingLevel);
 						this.ctx.statusLine.invalidate();
 						this.ctx.updateEditorBorderColor();
 						const roleSelectorHint = this.ctx.keybindings.getKeys("app.model.select")[0] ?? "Alt+M";
@@ -860,19 +869,21 @@ export class SelectorController {
 							// compaction keeps the current model — the target still cannot
 							// fit the transcript.
 							done();
+							const thinkingLevel = await this.#pickSessionThinkingLevel(model);
 							let switched = false;
 							const switchAfterCompaction = async (outcome: CompactionOutcome) => {
 								if (switched || outcome !== "ok") return;
 								switched = true;
-								await applySessionModel();
+								await applySessionModel(thinkingLevel);
 							};
 							const outcome = await this.ctx.handleCompactCommand(undefined, undefined, switchAfterCompaction);
 							await switchAfterCompaction(outcome);
 							return;
 						}
-						await applySessionModel();
+						await this.#pickSessionThinkingLevel(model, applySessionModel, hidePicker);
 						done();
 					} catch (error) {
+						done();
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
 				},
@@ -923,6 +934,71 @@ export class SelectorController {
 		});
 		this.ctx.ui.setFocus(picker);
 		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Effort strip shown after a session-only model pick (alt+p / `/switch`),
+	 * hosted as a bottom-anchored overlay like the model picker itself so it
+	 * never displaces whatever occupies the editor slot (e.g. an extension
+	 * approval dialog). Resolves with the chosen thinking level for the target
+	 * model. A non-reasoning model skips the strip; Esc keeps the previous
+	 * behavior by resolving with the role-configured level for the model (or
+	 * the model's default when none is configured).
+	 */
+	#pickSessionThinkingLevel(
+		model: Model,
+		apply?: (thinkingLevel: ConfiguredThinkingLevel | undefined) => Promise<void>,
+		beforeShow?: () => void,
+	): Promise<ConfiguredThinkingLevel | undefined> {
+		const fallback = this.ctx.session.resolveTemporaryModelThinkingLevel(model);
+		const options = sessionSwitchThinkingOptions(model, fallback);
+		if (!options) {
+			return apply ? apply(fallback).then(() => fallback) : Promise.resolve(fallback);
+		}
+		beforeShow?.();
+		const { promise, resolve, reject } = Promise.withResolvers<ConfiguredThinkingLevel | undefined>();
+		let overlayHandle: OverlayHandle | undefined;
+		let closed = false;
+		const close = () => {
+			overlayHandle?.hide();
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+		};
+		const finish = (level: ConfiguredThinkingLevel | undefined) => {
+			if (closed) return;
+			closed = true;
+			if (!apply) {
+				close();
+				resolve(level);
+				return;
+			}
+			void apply(level).then(
+				() => {
+					close();
+					resolve(level);
+				},
+				error => {
+					close();
+					reject(error);
+				},
+			);
+		};
+		const strip = new ThinkingStripComponent(
+			`${model.provider}/${model.id}`,
+			options.levels,
+			options.preselect,
+			level => finish(level),
+			() => finish(fallback),
+		);
+		overlayHandle = this.ctx.ui.showOverlay(strip, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		this.ctx.ui.setFocus(strip);
+		this.ctx.ui.requestRender();
+		return promise;
 	}
 
 	/**

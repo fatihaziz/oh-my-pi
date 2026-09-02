@@ -6973,6 +6973,14 @@ export class AgentSession {
 	 *  non-user steer (hidden goal/plan/budget, IRC/extension asides) is dropped, so abort()'s
 	 *  #drainStrandedQueuedMessages can't auto-resume the run the user just interrupted (the drain only
 	 *  fires while agent.hasQueuedMessages()). Plain Alt+Up dequeue preserves those non-user steers. */
+	hasQueuedAgentFollowUp(text: string): boolean {
+		return this.agent.peekFollowUpQueue().some(message => {
+			if (message.role !== "developer" || message.attribution !== "agent") return false;
+			if (typeof message.content === "string") return message.content === text;
+			return message.content.some(part => part.type === "text" && part.text === text);
+		});
+	}
+
 	clearQueue(options?: { forInterrupt?: boolean }): {
 		steering: RestoredQueuedMessage[];
 		followUp: RestoredQueuedMessage[];

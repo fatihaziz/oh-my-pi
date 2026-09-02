@@ -66,7 +66,7 @@ describe("getEditorCommand", () => {
 });
 
 describe("openInEditor", () => {
-	it("always inherits the pane stdio", async () => {
+	it("inherits pane stdio and hides the Windows shell", async () => {
 		const spawn = spyOn(Bun, "spawn").mockReturnValue({
 			exited: Promise.resolve(1),
 		} as never);
@@ -81,6 +81,7 @@ describe("openInEditor", () => {
 				stdin: "inherit",
 				stdout: "inherit",
 				stderr: "inherit",
+				windowsHide: process.platform === "win32",
 			});
 		} finally {
 			spawn.mockRestore();
@@ -116,5 +117,15 @@ describe("openInEditor", () => {
 		} finally {
 			await tempDir.remove();
 		}
+	});
+
+	it("rejects a launcher that reports success without opening the file", async () => {
+		// `rem`/`true` accept the file argument, exit 0 immediately and touch
+		// nothing — the signature of a non-blocking editor or a corrupt install
+		// whose CLI wrapper lies. Silent success there is what makes the
+		// external-editor keybinding look completely dead.
+		const instantNoop = process.platform === "win32" ? "rem" : "true";
+
+		await expect(openInEditor(instantNoop, "original draft")).rejects.toThrow(/without opening the file/);
 	});
 });
