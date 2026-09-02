@@ -62,7 +62,7 @@ function createSessionSwitchHarness(model: Model, fallback: ConfiguredThinkingLe
 		editor,
 		editorContainer: { children: [activeDialog] },
 		settings: Settings.isolated({}),
-		keybindings: { getKeys: () => [] },
+		keybindings: { getKeys: () => [], getDisplayString: () => "alt+p" },
 		session: {
 			model,
 			scopedModels: [{ model }],

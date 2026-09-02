@@ -827,7 +827,6 @@ export class SelectorController {
 		// else the session model (the bundled task agent inherits it by default).
 		const taskOverride = this.ctx.settings.get("task.agentModelOverrides").task;
 		const taskSelector = (Array.isArray(taskOverride) ? taskOverride[0] : taskOverride) ?? currentSelector;
-		let overlayHandle: OverlayHandle | undefined;
 		let pickerHidden = false;
 		let closed = false;
 		const hidePicker = () => {
@@ -957,7 +956,6 @@ export class SelectorController {
 		}
 		beforeShow?.();
 		const { promise, resolve, reject } = Promise.withResolvers<ConfiguredThinkingLevel | undefined>();
-		let overlayHandle: OverlayHandle | undefined;
 		let closed = false;
 		const close = () => {
 			overlayHandle?.hide();
@@ -990,7 +988,7 @@ export class SelectorController {
 			level => finish(level),
 			() => finish(fallback),
 		);
-		overlayHandle = this.ctx.ui.showOverlay(strip, {
+		const overlayHandle = this.ctx.ui.showOverlay(strip, {
 			anchor: "bottom-center",
 			width: "100%",
 			maxHeight: "100%",
