@@ -15,15 +15,15 @@ Single source of truth
       P6  guided-goal ask-tool interview   upstream PR #8187
       P7  guided-goal recon-first          fork PR fatihaziz/oh-my-pi#1
       P9  guard lying editor launcher    local only; upstreamable
-      P10 git concurrency limiter        DEFERRED at 18.1.4 rebase: upstream
-                                         removed utils/git.ts (VCS moved to
-                                         @oh-my-pi/pi-natives/vcs); re-home
-                                         pending; upstream PR #9936 closed
-                                         unmerged by owner 2026-09-03
-
     Retired: P3 (thinking label "max") — upstream-native since 17.3.x.
     Retired: P5 (fresh-session vibe autostart) — removed 2026-08-20 by user
     decision: fresh sessions must start in normal mode; vibe is /vibe only.
+    Retired: P10 (git concurrency limiter) — retired 2026-09-03 by owner
+    decision: upstream 18.0.9 removed utils/git.ts (VCS moved in-process to
+    @oh-my-pi/pi-natives/vcs via gix/jj-lib), so the TS FIFO limiter has no
+    anchor; upstream PR #9936 was closed unmerged by the owner the same day.
+    If concurrent-launch capping is needed again, implement it as a tokio
+    semaphore inside the pi-vcs crate.
 
 MARKERS below only VERIFY the rebuilt bundle; they never rewrite bytes.
 
