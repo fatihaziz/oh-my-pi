@@ -5,6 +5,8 @@ import {
 	buildRedactionMap,
 	collectUnreportedAccounts,
 	computeProviderWindowStats,
+	fetchOpenRouterUsageReport,
+	parseOpenRouterKeyUsage,
 	formatUsageBreakdown,
 	formatUsageHistory,
 	type UsageAccountIdentity,
@@ -296,6 +298,101 @@ describe("collectUnreportedAccounts", () => {
 		expect(collectUnreportedAccounts([legacyReport, freshReport], [legacy, fresh])).toEqual([]);
 		// The org-attributed sibling alone still does NOT cover the legacy row.
 		expect(collectUnreportedAccounts([freshReport], [legacy, fresh])).toEqual([legacy]);
+	});
+});
+
+describe("OpenRouter current-key usage", () => {
+	it("normalizes spend with no configured limit", () => {
+		const report = parseOpenRouterKeyUsage(
+			{
+				data: {
+					usage: 12.345,
+					limit: null,
+					limit_remaining: null,
+					limit_reset: null,
+					usage_daily: 1.25,
+				},
+			},
+			123,
+		);
+		expect(report).toMatchObject({
+			provider: "openrouter",
+			fetchedAt: 123,
+			limits: [
+				{
+					id: "openrouter:key-spend",
+					amount: { used: 12.345, unit: "usd" },
+					notes: ["No spending limit configured for this API key."],
+				},
+			],
+			metadata: {
+				source: "omp-fork:P11-openrouter-usage",
+				limitReset: null,
+				usageDaily: 1.25,
+				usageWeekly: null,
+				usageMonthly: null,
+			},
+		});
+		expect(report.limits[0].amount.limit).toBeUndefined();
+		expect(report.limits[0].amount.remaining).toBeUndefined();
+	});
+
+	it("normalizes configured USD limit and reset window", () => {
+		const report = parseOpenRouterKeyUsage(
+			{
+				data: {
+					usage: 25.5,
+					limit: 100,
+					limit_remaining: 74.5,
+					limit_reset: "monthly",
+				},
+			},
+			456,
+		);
+		expect(report.limits[0]).toMatchObject({
+			window: { id: "monthly", label: "Monthly" },
+			amount: { used: 25.5, limit: 100, remaining: 74.5, unit: "usd" },
+		});
+	});
+
+	it("uses the resolved key only as an authorization header", async () => {
+		let authorization = "";
+		const report = await fetchOpenRouterUsageReport(
+			"secret-openrouter-key",
+			async (input, init) => {
+				expect(String(input)).toBe("https://openrouter.ai/api/v1/key");
+				authorization = new Headers(init?.headers).get("authorization") ?? "";
+				return new Response(
+					JSON.stringify({
+						data: { usage: 3.5, limit: 10, limit_remaining: 6.5, limit_reset: "monthly" },
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			},
+			789,
+		);
+		expect(authorization).toBe("Bearer secret-openrouter-key");
+		expect(report?.limits[0].amount.used).toBe(3.5);
+		expect(JSON.stringify(report)).not.toContain("secret-openrouter-key");
+	});
+	it("adds the available credit balance with a management key", async () => {
+		const urls: string[] = [];
+		const report = await fetchOpenRouterUsageReport(
+			"usage-key",
+			async input => {
+				const url = String(input);
+				urls.push(url);
+				const data = url.endsWith("/credits")
+					? { data: { total_credits: 20, total_usage: 2.47 } }
+					: { data: { usage: 3.5, limit: 10, limit_remaining: 6.5, limit_reset: "monthly" } };
+				return new Response(JSON.stringify(data), { status: 200 });
+			},
+			789,
+			"management-key",
+		);
+		expect(urls).toEqual(["https://openrouter.ai/api/v1/key", "https://openrouter.ai/api/v1/credits"]);
+		expect(report?.metadata?.availableUSD).toBe(17.53);
+		expect(JSON.stringify(report)).not.toContain("management-key");
 	});
 });
 

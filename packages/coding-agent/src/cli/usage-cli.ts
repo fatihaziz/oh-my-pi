@@ -38,6 +38,128 @@ export interface UsageCommandArgs {
 	days?: number;
 }
 
+const OPENROUTER_KEY_USAGE_URL = "https://openrouter.ai/api/v1/key";
+const OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits";
+const OPENROUTER_USAGE_MARKER = "omp-fork:P11-openrouter-usage";
+const OPENROUTER_USAGE_TIMEOUT_MS = 10_000;
+
+async function fetchOpenRouterAvailableCredits(
+	apiKey: string,
+	fetchImpl: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): Promise<number | undefined> {
+	const response = await fetchImpl(OPENROUTER_CREDITS_URL, {
+		headers: {
+			Accept: "application/json",
+			Authorization: `Bearer ${apiKey}`,
+		},
+		signal: AbortSignal.timeout(OPENROUTER_USAGE_TIMEOUT_MS),
+	});
+	if (!response.ok) return undefined; // credits need a management key; key spend still stands alone
+	const payload: unknown = await response.json();
+	if (!payload || typeof payload !== "object" || !("data" in payload)) return undefined;
+	const data: unknown = payload.data;
+
+	if (!data || typeof data !== "object" || !("total_credits" in data) || !("total_usage" in data)) return undefined;
+	const totalCredits = data.total_credits;
+	const totalUsage = data.total_usage;
+	if (typeof totalCredits !== "number" || !Number.isFinite(totalCredits) || totalCredits < 0) return undefined;
+	if (typeof totalUsage !== "number" || !Number.isFinite(totalUsage) || totalUsage < 0) return undefined;
+	return Math.max(0, totalCredits - totalUsage);
+}
+
+function openRouterAmount(value: unknown, field: string, nullable = false): number | undefined {
+	if ((value === null || value === undefined) && nullable) return undefined;
+	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+		throw new Error(`OpenRouter ${field} must be a non-negative number${nullable ? " or null" : ""}`);
+	}
+	return value;
+}
+
+export function parseOpenRouterKeyUsage(payload: unknown, fetchedAt = Date.now()): UsageReport {
+	if (
+		!payload ||
+		typeof payload !== "object" ||
+		!("data" in payload) ||
+		!payload.data ||
+		typeof payload.data !== "object"
+	) {
+		throw new Error("OpenRouter key usage response is missing data");
+	}
+	const data = payload.data as Record<string, unknown>;
+	const used = openRouterAmount(data.usage, "usage")!;
+	const limit = openRouterAmount(data.limit, "limit", true);
+	const reportedRemaining = openRouterAmount(data.limit_remaining, "limit_remaining", true);
+	const remaining = limit === undefined ? undefined : (reportedRemaining ?? Math.max(0, limit - used));
+	const reset =
+		typeof data.limit_reset === "string" && data.limit_reset.trim()
+			? data.limit_reset.trim().toLowerCase()
+			: undefined;
+	const amount: UsageLimit["amount"] = { used, unit: "usd" };
+	if (limit !== undefined) amount.limit = limit;
+	if (remaining !== undefined) amount.remaining = remaining;
+	const window = reset ? { id: reset, label: reset[0].toUpperCase() + reset.slice(1) } : undefined;
+	return {
+		provider: "openrouter",
+		fetchedAt,
+		limits: [
+			{
+				id: "openrouter:key-spend",
+				label: "API key spend",
+				scope: { provider: "openrouter", windowId: reset },
+				window,
+				amount,
+				notes: limit === undefined ? ["No spending limit configured for this API key."] : undefined,
+			},
+		],
+		notes: [
+			"Spend and limit come from OpenRouter's current API key endpoint.",
+			"Per-model totals are not available from this endpoint.",
+		],
+		metadata: {
+			source: OPENROUTER_USAGE_MARKER,
+			limitReset: reset ?? null,
+			usageDaily: openRouterAmount(data.usage_daily, "usage_daily", true) ?? null,
+			usageWeekly: openRouterAmount(data.usage_weekly, "usage_weekly", true) ?? null,
+			usageMonthly: openRouterAmount(data.usage_monthly, "usage_monthly", true) ?? null,
+		},
+	};
+}
+
+export async function fetchOpenRouterUsageReport(
+	apiKey: string | undefined,
+	fetchImpl: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = fetch,
+	fetchedAt = Date.now(),
+	/** Explicit management key override; credentials stay inside OMP either way. */
+	envManagementKey?: string,
+): Promise<UsageReport | undefined> {
+	if (!apiKey?.trim()) return undefined;
+	const response = await fetchImpl(OPENROUTER_KEY_USAGE_URL, {
+		headers: {
+			Accept: "application/json",
+			Authorization: `Bearer ${apiKey}`,
+		},
+		signal: AbortSignal.timeout(OPENROUTER_USAGE_TIMEOUT_MS),
+	});
+	if (!response.ok) {
+		throw new Error(`OpenRouter key usage request failed with HTTP ${response.status}`);
+	}
+	const report = parseOpenRouterKeyUsage(await response.json(), fetchedAt);
+	// Pay-as-you-go balance rides only when a management key is configured;
+	// the plain /key endpoint never reports account credits.
+	const managementKey = envManagementKey?.trim();
+	if (managementKey) {
+		try {
+			const available = await fetchOpenRouterAvailableCredits(managementKey, fetchImpl);
+			if (available !== undefined && report.metadata) {
+				(report.metadata as Record<string, unknown>).availableUSD = available;
+			}
+		} catch {
+			// Credits are optional enrichment; key spend is already complete.
+		}
+	}
+	return report;
+}
+
 /** Identity slice of a stored credential, for "every account" coverage. */
 export interface UsageAccountIdentity {
 	provider: string;
@@ -1101,10 +1223,30 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			return;
 		}
 		const modelRegistry = new ModelRegistry(authStorage);
-		const reports =
-			(await authStorage.fetchUsageReports({
+		const reports = [
+			...((await authStorage.fetchUsageReports({
 				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),
-			})) ?? [];
+			})) ?? []),
+		];
+		if (
+			(!cmd.provider || cmd.provider.toLowerCase() === "openrouter") &&
+			!reports.some(report => report.provider === "openrouter")
+		) {
+			try {
+				const managementKey =
+					Bun.env.OPENROUTER_MANAGEMENT_KEY?.trim() || (await authStorage.getApiKey("openrouter-management"));
+				const report = await fetchOpenRouterUsageReport(
+					await authStorage.getApiKey("openrouter"),
+					fetch,
+					Date.now(),
+					managementKey,
+				);
+				if (report) reports.push(report);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				process.stderr.write(chalk.yellow(`OpenRouter usage unavailable: ${sanitizeText(message)}\n`));
+			}
+		}
 		// Reports are always fresh (broker-side fetch) but the account list can
 		// come from a disk-cached snapshot up to an hour old — revalidate so a
 		// just-logged-in (or just-rotated-identity) credential isn't rendered
