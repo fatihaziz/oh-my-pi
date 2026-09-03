@@ -99,7 +99,6 @@ import { renderSegmentTrack } from "../components/segment-track";
 import { SessionAccountSelectorComponent } from "../components/session-account-selector";
 import { SessionSelectorComponent, type SessionSelectorOptions } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
-import { StrippedToolCallsPlaceholder } from "../components/stripped-tool-calls-placeholder";
 import { ThinkingStripComponent } from "../components/thinking-strip";
 import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
@@ -481,6 +480,11 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply vision mode: ${err}`);
 				});
 				break;
+			case "externalThinking":
+				void this.ctx.session.setThinkToolEnabled(value as boolean).catch(err => {
+					this.ctx.showError(`Failed to apply external thinking: ${err}`);
+				});
+				break;
 
 			case "autocompleteMaxVisible":
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
@@ -492,15 +496,13 @@ export class SelectorController {
 				this.ctx.hideToolActivity = hidden;
 				if (!hidden) this.ctx.toolOutputExpanded = false;
 				for (const child of this.ctx.chatContainer.children) {
-					if (child instanceof ToolExecutionComponent || child instanceof ReadToolGroupComponent) {
-						if (!hidden) child.setExpanded(false);
-						child.setToolActivityVisible(!hidden);
+					if (!hidden && (child instanceof ToolExecutionComponent || child instanceof ReadToolGroupComponent)) {
+						child.setExpanded(false);
 					} else if (child instanceof AssistantMessageComponent) {
 						child.setToolResultImagesVisible(!hidden);
-					} else if (child instanceof StrippedToolCallsPlaceholder) {
-						child.setToolActivityVisible(!hidden);
 					}
 				}
+				this.ctx.chatContainer.setToolActivityVisible(!hidden);
 				if (hidden) this.ctx.ui.clearInlineImages();
 				this.ctx.ui.resetDisplay();
 				break;
@@ -714,11 +716,17 @@ export class SelectorController {
 		const quickRoleOrder = this.ctx.settings.get("cycleOrder");
 		const quickRoleCycle = this.ctx.session.getRoleModelCycle(quickRoleOrder);
 		let overlayHandle: OverlayHandle | undefined;
+		let pickerHidden = false;
 		let closed = false;
+		const hidePicker = () => {
+			if (pickerHidden) return;
+			pickerHidden = true;
+			overlayHandle?.hide();
+		};
 		const done = () => {
 			if (closed) return;
 			closed = true;
-			overlayHandle?.hide();
+			hidePicker();
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
@@ -729,6 +737,7 @@ export class SelectorController {
 			this.ctx.session.scopedModels,
 			{
 				onPick: async (model, selector, { overContext }) => {
+					picker.lockInput();
 					// Session-only: update agent state but don't persist the model to settings.
 					const applySessionModel = async (thinkingLevel: ConfiguredThinkingLevel | undefined) => {
 						await this.ctx.session.setModelTemporary(model, thinkingLevel);
@@ -759,10 +768,10 @@ export class SelectorController {
 							await switchAfterCompaction(outcome);
 							return;
 						}
+						await this.#pickSessionThinkingLevel(model, applySessionModel, hidePicker);
 						done();
-						const thinkingLevel = await this.#pickSessionThinkingLevel(model);
-						await applySessionModel(thinkingLevel);
 					} catch (error) {
+						done();
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
 				},
@@ -811,20 +820,43 @@ export class SelectorController {
 	 * behavior by resolving with the role-configured level for the model (or
 	 * the model's default when none is configured).
 	 */
-	#pickSessionThinkingLevel(model: Model): Promise<ConfiguredThinkingLevel | undefined> {
+	#pickSessionThinkingLevel(
+		model: Model,
+		apply?: (thinkingLevel: ConfiguredThinkingLevel | undefined) => Promise<void>,
+		beforeShow?: () => void,
+	): Promise<ConfiguredThinkingLevel | undefined> {
 		const fallback = this.ctx.session.resolveTemporaryModelThinkingLevel(model);
 		const options = sessionSwitchThinkingOptions(model, fallback);
-		if (!options) return Promise.resolve(fallback);
-		const { promise, resolve } = Promise.withResolvers<ConfiguredThinkingLevel | undefined>();
+		if (!options) {
+			return apply ? apply(fallback).then(() => fallback) : Promise.resolve(fallback);
+		}
+		beforeShow?.();
+		const { promise, resolve, reject } = Promise.withResolvers<ConfiguredThinkingLevel | undefined>();
 		let overlayHandle: OverlayHandle | undefined;
 		let closed = false;
-		const finish = (level: ConfiguredThinkingLevel | undefined) => {
-			if (closed) return;
-			closed = true;
+		const close = () => {
 			overlayHandle?.hide();
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
-			resolve(level);
+		};
+		const finish = (level: ConfiguredThinkingLevel | undefined) => {
+			if (closed) return;
+			closed = true;
+			if (!apply) {
+				close();
+				resolve(level);
+				return;
+			}
+			void apply(level).then(
+				() => {
+					close();
+					resolve(level);
+				},
+				error => {
+					close();
+					reject(error);
+				},
+			);
 		};
 		const strip = new ThinkingStripComponent(
 			`${model.provider}/${model.id}`,

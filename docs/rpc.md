@@ -12,6 +12,7 @@ Primary implementation:
 - `packages/coding-agent/src/session/agent-session.ts`
 - `packages/agent/src/agent.ts`
 - `packages/agent/src/agent-loop.ts`
+- `docs/rpc-host-events.schema.json` (machine-readable `ready` and `prompt_end` frames for non-TypeScript hosts)
 
 ## Startup
 
@@ -25,8 +26,8 @@ Behavior notes:
 - RPC mode disables automatic session title generation by default to avoid an extra model call.
 - RPC/ACP host defaults cover task isolation/execution, memory, advisor, tier, async-job, and bash auto-background settings. They are applied only when a path is not explicitly configured; project/global config, `--config`, and isolated settings remain authoritative. Todo settings are not host-defaulted.
 - The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
-- At startup it writes a `ready` frame before processing commands. The frame advertises supported protocol versions and transport limits.
-- When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, and the process exits with code `0`.
+- At startup it writes a `ready` frame before processing commands. The frame advertises the server version, supported protocol versions, frame limits, and named capabilities.
+- When stdin closes or stdout reports a broken pipe, session disposal starts immediately so active tools and child processes receive their normal abort signal. Pending side-channel requests are rejected, accepted commands are drained, subagent subscriptions are disposed, and the session lock closes before exit.
 - Responses/events are written as one JSON object per line.
 
 ## Transport and Framing
@@ -38,11 +39,17 @@ The initial ready frame uses protocol v1 and advertises the opt-in lossless tran
 ```json
 {
   "type": "ready",
+  "serverVersion": "17.2.12",
   "protocolVersion": 1,
   "supportedProtocolVersions": [1, 2],
   "maxFrameBytes": 1048576,
-  "maxReassembledFrameBytes": 67108864
-}
+  "maxReassembledFrameBytes": 67108864,
+  "capabilities": {
+    "protocolNegotiation": true,
+    "chunkedFrames": true,
+    "promptTerminal": true,
+    "deterministicDisconnectCleanup": true
+  }
 ```
 
 Clients that support protocol v2 SHOULD immediately send:
@@ -66,7 +73,7 @@ After the success response, oversized stdout objects are emitted losslessly as a
 
 Clients MUST validate `chunkId`, `index`, `count`, and `byteLength`, reject interleaved or interrupted sequences, enforce the advertised reassembly limit, concatenate decoded bytes in index order, decode them as strict UTF-8, and parse the result as one JSON object. The TypeScript `RpcFrameDecoder`, exported from `@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame`, implements this validation. The bundled TypeScript and Python `RpcClient` implementations negotiate v2 automatically when the ready frame advertises it.
 
-Legacy clients may ignore the added ready fields and remain on v1. V1 retains its bounded fallback behavior for oversized output. Frames above the v2 reassembly ceiling still fail explicitly; large history APIs should use pagination rather than depending on arbitrarily large logical frames.
+Legacy clients may ignore all added ready fields and remain on v1. `protocolVersion`, `supportedProtocolVersions`, and the frame-limit fields retain their previous values. V1 retains its bounded fallback behavior for oversized events.
 
 ### Outbound frame categories (stdout)
 
@@ -78,7 +85,9 @@ Legacy clients may ignore the added ready fields and remain on v1. V1 retains it
 6. Host URI requests/cancellations (`host_uri_request`, `host_uri_cancel`)
 7. Extension errors (`{ type: "extension_error", extensionPath, event, error }`)
 8. Available-commands updates (`{ type: "available_commands_update", commands }`), emitted at startup and whenever command metadata changes
-9. Prompt lifecycle hints (`{ type: "prompt_result", id?, agentInvoked }`) for scheduled prompts that later resolve without invoking the agent
+9. Prompt lifecycle frames:
+   - `{ type: "prompt_result", id?, agentInvoked }` for scheduled prompts that later resolve without invoking the agent
+   - `{ type: "prompt_end", promptId, sessionId, sessionFile?, outcome }` exactly once for every `prompt`; `outcome` is `completed`, `aborted`, or `failed`
 10. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
 11. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
 
@@ -94,15 +103,17 @@ Legacy clients may ignore the added ready fields and remain on v1. V1 retains it
 All commands accept optional `id?: string`.
 
 - If provided, normal command responses echo the same `id`.
-- `RpcClient` relies on this for pending-request resolution.
+- A `prompt` uses its command `id` as `promptId`. If omitted, the server generates a `promptId` and returns it in the immediate success response as `data.promptId`.
+- Every `prompt` emits exactly one `prompt_end` after its live prompt and any extension-scheduled agent work settle. Hosts do not need transcript replay or polling.
+- `RpcClient` relies on response `id` for pending-request resolution.
 
 Important edge behavior from runtime:
 
 - Unknown command responses are emitted with `id: undefined` (even if the request had an `id`).
-- Malformed JSON and synchronous dispatch failures emit `command: "parse"` with `id: undefined`. Exceptions while handling a recognized command emit a failure with that command's `type` and `id`.
-- `prompt` and `abort_and_prompt` return immediate success, then may emit a later error response with the **same** id if async prompt scheduling fails.
-- `prompt` success responses may include `data.agentInvoked`. `false` means the prompt completed locally without an agent turn; `true` means the prompt produced agent lifecycle events; omitted means the host must rely on session events for completion.
-- `abort_and_prompt` does not currently emit `data.agentInvoked` or `prompt_result`; hosts should treat it as the legacy abort-then-schedule path and rely on session events or same-id scheduling errors.
+- Malformed JSON and synchronous dispatch failures emit `command: "parse"` with `id: undefined`. Exceptions while handling known commands preserve the request `id`.
+- `prompt` and `abort_and_prompt` return immediate success, then may emit a later error response with the same id if asynchronous prompt work fails.
+- `prompt` success responses include `data.promptId` and may include `data.agentInvoked`. `false` means the prompt completed locally without an agent turn; `prompt_end` still emits with `outcome: "completed"`.
+- `abort_and_prompt` retains its legacy event behavior and does not emit `prompt_end`.
 
 ## Command Schema (canonical)
 
@@ -514,6 +525,22 @@ so the session will resume before its true final settle. Treat an `agent_end` as
 run completion only when `isTerminal !== false`; the field is optional so frames
 from older runtimes, where it is absent, remain terminal-compatible.
 
+`prompt_end` is the host-facing prompt terminal event:
+
+```json
+{
+  "type": "prompt_end",
+  "promptId": "req_1",
+  "sessionId": "session-3",
+  "sessionFile": "/sessions/session-3.jsonl",
+  "outcome": "completed"
+}
+```
+
+`sessionFile` is omitted when persistence is disabled. `outcome` is
+`completed` for a normal or local-only prompt, `aborted` for a cooperative
+abort, and `failed` when prompt setup or the agent run fails.
+
 ### Available commands
 
 `get_available_commands` returns `{ commands }`, and the same array is pushed
@@ -545,14 +572,21 @@ This is the most important operational behavior.
 `prompt` and `abort_and_prompt` are **acknowledged immediately**:
 
 ```json
-{ "id": "req_1", "type": "response", "command": "prompt", "success": true }
+{
+  "id": "req_1",
+  "type": "response",
+  "command": "prompt",
+  "success": true,
+  "data": { "promptId": "req_1" }
+}
 ```
 
 That means:
 
-- command acceptance != run completion
-- agent turns complete only on `agent_end` frames where `isTerminal !== false`
-- local-only prompts complete via `data.agentInvoked: false` on the response or via a later `prompt_result`
+- command acceptance != prompt completion
+- every `prompt` completes with one prompt-correlated `prompt_end`
+- `agent_end` remains the session-wide lifecycle event and can cover queued prompts together
+- local-only prompts still report `data.agentInvoked: false` or a later `prompt_result`
 
 ### While streaming
 

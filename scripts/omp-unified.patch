@@ -1,8 +1,8 @@
 diff --git a/AGENTS.md b/AGENTS.md
-index f85bcd74ef..92a083ab87 100644
+index b5723f10f3..736a30b381 100644
 --- a/AGENTS.md
 +++ b/AGENTS.md
-@@ -30,6 +30,25 @@ Unless user tells you exactly what to write:
+@@ -30,6 +30,27 @@ Unless user tells you exactly what to write:
  - **Never comment on GitHub** (issues, PRs, discussions).
  - **Never create issues on GitHub**.
  
@@ -18,17 +18,19 @@ index f85bcd74ef..92a083ab87 100644
 +| P1 | Legacy plugin loader accepts JSON, TOML, and text assets (`legacy-pi-compat.ts:getLoader`) | local only; no PR | keep |
 +| P6 | `/guided-goal` interview uses the ask tool | upstream PR [#8187](https://github.com/can1357/oh-my-pi/pull/8187), open | retire when merged |
 +| P7 | `/guided-goal` performs recon and asks only unresolved questions | fork PR [fatihaziz/oh-my-pi#1](https://github.com/fatihaziz/oh-my-pi/pull/1) | never upstream |
++| P8 | Windows external editor hides the `cmd.exe` shell window (`external-editor.ts:openInEditor`) | local only; user-reported | keep until upstream sets `Bun.spawn` `windowsHide` |
++| P9 | External editor rejects a launcher that exits 0 without ever opening the file, instead of silently keeping the unchanged draft (`external-editor.ts:openInEditor`) | local only; upstreamable | offer upstream; drop when upstream validates the launch |
 +
-+Retired: P3 (`max` thinking label) — upstream-native since 17.3.x. P5 (fresh-session vibe autostart) — retired by user decision on 2026-08-20; fresh sessions start in normal mode and vibe is `/vibe` only.
++Retired: P3 (`max` thinking label) — upstream-native since 17.3.x. P5 (fresh-session vibe autostart) — retired by user decision on 2026-08-20; fresh sessions start in normal mode and vibe is `/vibe` only. P10 (git concurrency limiter) — retired by owner decision on 2026-09-03: upstream 18.0.9 removed `utils/git.ts` (VCS moved in-process to `@oh-my-pi/pi-natives/vcs` via gix/jj-lib), leaving the TS FIFO limiter without an anchor; upstream [#9936](https://github.com/can1357/oh-my-pi/pull/9936) was closed unmerged by the owner the same day. If concurrent-launch capping is needed again, implement it as a tokio semaphore inside the `pi-vcs` crate.
 +
-+The merge worktree `tmp/upstream-unified-18.0.3` (branch `unified-patch-18.0.3`, base `v18.0.3`) is where upstream releases and the PR branches get merged and conflicts resolved; the patch file is regenerated from it. The exact regeneration procedure lives in the engine's module docstring. On a new upstream release: regenerate the patch there, bump `UNIFIED_BASE_VERSION`, bump `ompInstall.version` in the vault's `env.yml`, then run the vault sync (`uv run scripts/sync-to-global.py --only omp-local,omp-cli-patches --force`).
++The merge worktree `tmp/upstream-unified-18.1.4` (branch `unified-patch-18.1.4`, base `v18.1.4`) is where upstream releases and the PR branches get merged and conflicts resolved; the patch file is regenerated from it. The exact regeneration procedure lives in the engine's module docstring. On a new upstream release: regenerate the patch there, bump `UNIFIED_BASE_VERSION`, bump `ompInstall.version` in the vault's `env.yml`, then run the vault sync (`uv run scripts/sync-to-global.py --only omp-local,omp-cli-patches --force`).
 +
 +After every Bun-managed OMP update, run `uv run scripts/omp-reapply-patches.py`; then `--dry-run` must report every marker `[present]`. `[conflict]` means STOP: follow the printed `source:`/`resolve:` guidance (usually regenerate the unified patch from a fresh merge worktree), update the registry and `scripts/test_omp_reapply_patches.py`, then retry. Before preparing an upstream PR, remove this local-only section plus `scripts/omp-reapply-patches.py`, `scripts/omp-unified.patch`, and `scripts/test_omp_reapply_patches.py` from that PR branch unless the PR explicitly upstreams one named behavior.
 +
  ## Code Quality
  
  - No `any` unless absolutely necessary.
-@@ -231,46 +250,13 @@ For the bash tool specifically:
+@@ -250,46 +271,13 @@ For the bash tool specifically:
  
  - NEVER commit unless asked.
  - Never use `tsc`/`npx tsc` — always `bun check`.
@@ -75,7 +77,7 @@ index f85bcd74ef..92a083ab87 100644
  - No placeholder tests, tautologies, or "the code ran" assertions (`expect(true).toBe(true)`, bare `not.toThrow()`, non-empty string checks, length-grew checks, "prompt exists" checks without semantic assertion).
  - Prefer contract-level tests over implementation details. Avoid asserting internal helper wiring, field assignment, singleton identity, incidental ordering, prompt boilerplate, or passthrough option forwarding unless another component depends on that exact detail.
  - Don't duplicate coverage across abstraction levels. If an integration test already proves the behavior, drop the narrower unit test that restates it through mocks.
-@@ -300,7 +286,6 @@ Location: `packages/*/CHANGELOG.md` (per package).
+@@ -319,7 +307,6 @@ Location: `packages/*/CHANGELOG.md` (per package).
  **Rules:**
  
  - New entries always go under `## [Unreleased]`.
@@ -83,11 +85,98 @@ index f85bcd74ef..92a083ab87 100644
  - Never modify already-released sections (e.g., `## [0.12.2]`) — they are immutable.
  - Don't flag changelog section order or formatting in reviews or PRs — `bun run release` runs `fix-changelogs` which normalizes everything automatically.
  
+diff --git a/packages/ai/src/providers/openai-codex/response-handler.ts b/packages/ai/src/providers/openai-codex/response-handler.ts
+index 3e5fbb8bed..d486a25957 100644
+--- a/packages/ai/src/providers/openai-codex/response-handler.ts
++++ b/packages/ai/src/providers/openai-codex/response-handler.ts
+@@ -80,9 +80,16 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
+ 		}
+ 
+ 		const errMessage = (err as { message?: string }).message;
+-		message = errMessage || friendlyMessage || message;
++		if (errMessage) {
++			message = errMessage;
++		} else if (friendlyMessage) {
++			message = friendlyMessage;
++		} else {
++			message = describeCodexHttpFailure(response, message);
++		}
+ 	} catch {
+-		// raw body not JSON
++		// raw body not JSON — no structured error to extract
++		message = describeCodexHttpFailure(response, message);
+ 	}
+ 
+ 	return {
+@@ -95,6 +102,29 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
+ 	};
+ }
+ 
++/**
++ * Builds a self-locating message for failures whose body carries no structured
++ * API error (plain-text or HTML bodies from edge/backend outages, empty bodies).
++ * A bare "Not Found" tells the user nothing; the status, endpoint, and body
++ * snippet make provider-side incidents diagnosable from the banner alone.
++ */
++function describeCodexHttpFailure(response: Response, bodyText: string): string {
++	let location = "";
++	try {
++		const url = new URL(response.url);
++		if (url.protocol === "https:" || url.protocol === "http:") location = `${url.host}${url.pathname}`;
++	} catch {
++		// no usable URL on this response
++	}
++	const statusText = response.statusText.trim();
++	let snippet = bodyText.replace(/\s+/g, " ").trim();
++	if (snippet.length > 200) snippet = snippet.slice(0, 200);
++	if (snippet === statusText) snippet = "";
++	const at = location ? ` at ${location}` : "";
++	const body = snippet ? `: ${snippet}` : "";
++	return `HTTP ${response.status}${statusText ? ` ${statusText}` : ""}${at}${body}`;
++}
++
+ function toInt(v: string | null): number | undefined {
+ 	if (v == null) return undefined;
+ 	const n = parseInt(v, 10);
+diff --git a/packages/ai/test/openai-codex.test.ts b/packages/ai/test/openai-codex.test.ts
+index d174d70710..ea4d906eae 100644
+--- a/packages/ai/test/openai-codex.test.ts
++++ b/packages/ai/test/openai-codex.test.ts
+@@ -382,4 +382,29 @@ describe("openai-codex error parsing", () => {
+ 		expect(error.headers?.get("retry-after")).toBe("7");
+ 		expect(error.message).toContain("rate limit exceeded");
+ 	});
++	it("plain-text failure body surfaces status, endpoint, and body instead of a bare phrase", async () => {
++		// The 2026-09-03 Codex outage answered every request with a plain-text
++		// "Not Found"; the banner showed only that phrase with no status or URL.
++		const response = new Response("Not Found", {
++			status: 404,
++			statusText: "Not Found",
++		});
++		Object.defineProperty(response, "url", { value: "https://chatgpt.com/backend-api/codex/responses" });
++
++		const info = await parseCodexError(response);
++		const error = new CodexApiError(info);
++		expect(error.message).toBe("HTTP 404 Not Found at chatgpt.com/backend-api/codex/responses");
++		expect(error.status).toBe(404);
++	});
++
++	it("structured API error messages pass through untouched", async () => {
++		const response = new Response(JSON.stringify({ error: { code: "server_error", message: "upstream exploded" } }), {
++			status: 500,
++			statusText: "Internal Server Error",
++		});
++
++		const info = await parseCodexError(response);
++		expect(info.message).toBe("upstream exploded");
++		expect(info.status).toBe(500);
++	});
+ });
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index d358159fd0..87273f072f 100644
+index 3d50916f19..474324bc41 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
-@@ -633,6 +633,13 @@
+@@ -1082,6 +1082,13 @@
  - Removed the `resolveAgentModelSource` model-resolver export, whose only use was being fed to `resolveExplicitModelRole`. Replaced by `resolveAgentModelSelection`, which returns the expanded `patterns` and the pre-expansion `role` together so a spawn path cannot derive one without the other ([#7910](https://github.com/can1357/oh-my-pi/pull/7910) by [@enieuwy](https://github.com/enieuwy)).
  - A run is now attributed to the model that actually produced its output, not whichever model the session was last pointed at. A retry fallback that errored on its first request — an exhausted quota, a hard provider error — was credited with the whole run in the Agent Hub row and the settled task result, even when the previous model did every turn. Sessions expose the serving model directly, holding the last model that produced output while a candidate is armed but unproven, and transcript-derived history stops at the newest turn that produced output.
  
@@ -101,7 +190,7 @@ index d358159fd0..87273f072f 100644
  ## [17.2.12] - 2026-08-08
  
  ### Fixed
-@@ -779,6 +786,10 @@
+@@ -1228,6 +1235,10 @@
  - Fixed self-update misclassifying glibc Linux hosts with an installed musl loader as musl hosts, which could download an unusable musl binary instead of the glibc release.
  - Fixed a crash where opening the Agent Hub after a resume and moving the selection triggered an unbounded `ExtensionExitError` unhandled-rejection storm and exit 129. The postmortem module bound the native hard-exit at first evaluation; when the bundler deferred that evaluation into a `withHostGuard` window it froze the guard's throwing replacement, poisoning every later signal/fatal exit. The native exit is now resolved per call, and the guard stamps its replacement with the native primitive it shadows so mid-guard signals still exit ([#7393](https://github.com/can1357/oh-my-pi/issues/7393)).
  
@@ -112,11 +201,178 @@ index d358159fd0..87273f072f 100644
  ## [17.2.8] - 2026-08-04
  
  ### Changed
+diff --git a/packages/coding-agent/src/cli/usage-cli.ts b/packages/coding-agent/src/cli/usage-cli.ts
+index 99f6b044a9..79c90f3cb5 100644
+--- a/packages/coding-agent/src/cli/usage-cli.ts
++++ b/packages/coding-agent/src/cli/usage-cli.ts
+@@ -38,6 +38,128 @@ export interface UsageCommandArgs {
+ 	days?: number;
+ }
+ 
++const OPENROUTER_KEY_USAGE_URL = "https://openrouter.ai/api/v1/key";
++const OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits";
++const OPENROUTER_USAGE_MARKER = "omp-fork:P11-openrouter-usage";
++const OPENROUTER_USAGE_TIMEOUT_MS = 10_000;
++
++async function fetchOpenRouterAvailableCredits(
++	apiKey: string,
++	fetchImpl: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
++): Promise<number | undefined> {
++	const response = await fetchImpl(OPENROUTER_CREDITS_URL, {
++		headers: {
++			Accept: "application/json",
++			Authorization: `Bearer ${apiKey}`,
++		},
++		signal: AbortSignal.timeout(OPENROUTER_USAGE_TIMEOUT_MS),
++	});
++	if (!response.ok) return undefined; // credits need a management key; key spend still stands alone
++	const payload: unknown = await response.json();
++	if (!payload || typeof payload !== "object" || !("data" in payload)) return undefined;
++	const data: unknown = payload.data;
++
++	if (!data || typeof data !== "object" || !("total_credits" in data) || !("total_usage" in data)) return undefined;
++	const totalCredits = data.total_credits;
++	const totalUsage = data.total_usage;
++	if (typeof totalCredits !== "number" || !Number.isFinite(totalCredits) || totalCredits < 0) return undefined;
++	if (typeof totalUsage !== "number" || !Number.isFinite(totalUsage) || totalUsage < 0) return undefined;
++	return Math.max(0, totalCredits - totalUsage);
++}
++
++function openRouterAmount(value: unknown, field: string, nullable = false): number | undefined {
++	if ((value === null || value === undefined) && nullable) return undefined;
++	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
++		throw new Error(`OpenRouter ${field} must be a non-negative number${nullable ? " or null" : ""}`);
++	}
++	return value;
++}
++
++export function parseOpenRouterKeyUsage(payload: unknown, fetchedAt = Date.now()): UsageReport {
++	if (
++		!payload ||
++		typeof payload !== "object" ||
++		!("data" in payload) ||
++		!payload.data ||
++		typeof payload.data !== "object"
++	) {
++		throw new Error("OpenRouter key usage response is missing data");
++	}
++	const data = payload.data as Record<string, unknown>;
++	const used = openRouterAmount(data.usage, "usage")!;
++	const limit = openRouterAmount(data.limit, "limit", true);
++	const reportedRemaining = openRouterAmount(data.limit_remaining, "limit_remaining", true);
++	const remaining = limit === undefined ? undefined : (reportedRemaining ?? Math.max(0, limit - used));
++	const reset =
++		typeof data.limit_reset === "string" && data.limit_reset.trim()
++			? data.limit_reset.trim().toLowerCase()
++			: undefined;
++	const amount: UsageLimit["amount"] = { used, unit: "usd" };
++	if (limit !== undefined) amount.limit = limit;
++	if (remaining !== undefined) amount.remaining = remaining;
++	const window = reset ? { id: reset, label: reset[0].toUpperCase() + reset.slice(1) } : undefined;
++	return {
++		provider: "openrouter",
++		fetchedAt,
++		limits: [
++			{
++				id: "openrouter:key-spend",
++				label: "API key spend",
++				scope: { provider: "openrouter", windowId: reset },
++				window,
++				amount,
++				notes: limit === undefined ? ["No spending limit configured for this API key."] : undefined,
++			},
++		],
++		notes: [
++			"Spend and limit come from OpenRouter's current API key endpoint.",
++			"Per-model totals are not available from this endpoint.",
++		],
++		metadata: {
++			source: OPENROUTER_USAGE_MARKER,
++			limitReset: reset ?? null,
++			usageDaily: openRouterAmount(data.usage_daily, "usage_daily", true) ?? null,
++			usageWeekly: openRouterAmount(data.usage_weekly, "usage_weekly", true) ?? null,
++			usageMonthly: openRouterAmount(data.usage_monthly, "usage_monthly", true) ?? null,
++		},
++	};
++}
++
++export async function fetchOpenRouterUsageReport(
++	apiKey: string | undefined,
++	fetchImpl: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = fetch,
++	fetchedAt = Date.now(),
++	/** Explicit management key override; credentials stay inside OMP either way. */
++	envManagementKey?: string,
++): Promise<UsageReport | undefined> {
++	if (!apiKey?.trim()) return undefined;
++	const response = await fetchImpl(OPENROUTER_KEY_USAGE_URL, {
++		headers: {
++			Accept: "application/json",
++			Authorization: `Bearer ${apiKey}`,
++		},
++		signal: AbortSignal.timeout(OPENROUTER_USAGE_TIMEOUT_MS),
++	});
++	if (!response.ok) {
++		throw new Error(`OpenRouter key usage request failed with HTTP ${response.status}`);
++	}
++	const report = parseOpenRouterKeyUsage(await response.json(), fetchedAt);
++	// Pay-as-you-go balance rides only when a management key is configured;
++	// the plain /key endpoint never reports account credits.
++	const managementKey = envManagementKey?.trim();
++	if (managementKey) {
++		try {
++			const available = await fetchOpenRouterAvailableCredits(managementKey, fetchImpl);
++			if (available !== undefined && report.metadata) {
++				(report.metadata as Record<string, unknown>).availableUSD = available;
++			}
++		} catch {
++			// Credits are optional enrichment; key spend is already complete.
++		}
++	}
++	return report;
++}
++
+ /** Identity slice of a stored credential, for "every account" coverage. */
+ export interface UsageAccountIdentity {
+ 	provider: string;
+@@ -1101,10 +1223,30 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
+ 			return;
+ 		}
+ 		const modelRegistry = new ModelRegistry(authStorage);
+-		const reports =
+-			(await authStorage.fetchUsageReports({
++		const reports = [
++			...((await authStorage.fetchUsageReports({
+ 				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),
+-			})) ?? [];
++			})) ?? []),
++		];
++		if (
++			(!cmd.provider || cmd.provider.toLowerCase() === "openrouter") &&
++			!reports.some(report => report.provider === "openrouter")
++		) {
++			try {
++				const managementKey =
++					Bun.env.OPENROUTER_MANAGEMENT_KEY?.trim() || (await authStorage.getApiKey("openrouter-management"));
++				const report = await fetchOpenRouterUsageReport(
++					await authStorage.getApiKey("openrouter"),
++					fetch,
++					Date.now(),
++					managementKey,
++				);
++				if (report) reports.push(report);
++			} catch (error) {
++				const message = error instanceof Error ? error.message : String(error);
++				process.stderr.write(chalk.yellow(`OpenRouter usage unavailable: ${sanitizeText(message)}\n`));
++			}
++		}
+ 		// Reports are always fresh (broker-side fetch) but the account list can
+ 		// come from a disk-cached snapshot up to an hour old — revalidate so a
+ 		// just-logged-in (or just-rotated-identity) credential isn't rendered
 diff --git a/packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts b/packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts
-index a3c7cfc186..68efccea95 100644
+index b6d78fc0fc..5e9d7d5fb1 100644
 --- a/packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts
 +++ b/packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts
-@@ -2791,7 +2791,7 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
+@@ -2818,7 +2818,7 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
  	}
  }
  
@@ -125,7 +381,7 @@ index a3c7cfc186..68efccea95 100644
  	if (path.endsWith(".tsx")) {
  		return "tsx";
  	}
-@@ -2801,6 +2801,17 @@ function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {
+@@ -2828,6 +2828,17 @@ function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {
  	if (path.endsWith(".ts") || path.endsWith(".mts") || path.endsWith(".cts")) {
  		return "ts";
  	}
@@ -167,18 +423,18 @@ index ae23947460..e2d622c5f3 100644
  			this.#tui.start();
  			this.#tui.requestRender(true);
 diff --git a/packages/coding-agent/src/modes/components/model-picker.ts b/packages/coding-agent/src/modes/components/model-picker.ts
-index 4fc8c38fdb..ab3623f9cf 100644
+index 16c09d9dc6..f050249617 100644
 --- a/packages/coding-agent/src/modes/components/model-picker.ts
 +++ b/packages/coding-agent/src/modes/components/model-picker.ts
-@@ -79,6 +79,7 @@ export class ModelPickerComponent implements Component {
- 	#quickRoleItems: ModelBrowserItem[] = [];
- 	#quickRoles = new Map<string, ResolvedRoleModel>();
- 	#roleMode = false;
+@@ -96,6 +96,7 @@ export class ModelPickerComponent implements Component {
+ 	#taskMatchKeys = new Set<string>();
+ 	#taskModeKeyLabel: string;
+ 	#taskSelector: string | undefined;
 +	#inputLocked = false;
  
  	constructor(
  		tui: TUI,
-@@ -207,7 +208,13 @@ export class ModelPickerComponent implements Component {
+@@ -237,7 +238,13 @@ export class ModelPickerComponent implements Component {
  		}
  	}
  
@@ -316,18 +572,19 @@ index 0000000000..cad76e9d7a
 +	}
 +}
 diff --git a/packages/coding-agent/src/modes/controllers/selector-controller.ts b/packages/coding-agent/src/modes/controllers/selector-controller.ts
-index 592ff331d7..de6033156b 100644
+index c4270513f3..7fde0acde3 100644
 --- a/packages/coding-agent/src/modes/controllers/selector-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/selector-controller.ts
-@@ -1,6 +1,6 @@
- import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+@@ -2,7 +2,7 @@ import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-p
  import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
--import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
-+import { type Model, PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
+ import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
+ import { getDailyActivity } from "@oh-my-pi/omp-stats/db";
+-import { PASTE_CODE_LOGIN_PROVIDERS, type UsageReport } from "@oh-my-pi/pi-ai";
++import { PASTE_CODE_LOGIN_PROVIDERS, type Model, type UsageReport } from "@oh-my-pi/pi-ai";
  import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
  import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
- import type { Component, OverlayHandle, ResizeScrollbackMode } from "@oh-my-pi/pi-tui";
-@@ -67,6 +67,7 @@ import {
+ import * as vcs from "@oh-my-pi/pi-natives/vcs";
+@@ -71,6 +71,7 @@ import {
  	type ConfiguredThinkingLevel,
  	concreteThinkingLevel,
  	parseConfiguredThinkingLevel,
@@ -335,7 +592,7 @@ index 592ff331d7..de6033156b 100644
  } from "../../thinking";
  import {
  	isSearchProviderId,
-@@ -100,6 +101,7 @@ import { renderSegmentTrack } from "../components/segment-track";
+@@ -106,6 +107,7 @@ import { renderSegmentTrack } from "../components/segment-track";
  import { SessionAccountSelectorComponent } from "../components/session-account-selector";
  import { SessionSelectorComponent, type SessionSelectorOptions } from "../components/session-selector";
  import { SettingsSelectorComponent } from "../components/settings-selector";
@@ -343,10 +600,10 @@ index 592ff331d7..de6033156b 100644
  import { ToolExecutionComponent } from "../components/tool-execution";
  import { TranscriptBlock } from "../components/transcript-container";
  import { TreeSelectorComponent } from "../components/tree-selector";
-@@ -736,11 +738,17 @@ export class SelectorController {
- 		const quickRoleOrder = this.ctx.settings.get("cycleOrder");
- 		const quickRoleCycle = this.ctx.session.getRoleModelCycle(quickRoleOrder);
- 		let overlayHandle: OverlayHandle | undefined;
+@@ -825,11 +827,17 @@ export class SelectorController {
+ 		// else the session model (the bundled task agent inherits it by default).
+ 		const taskOverride = this.ctx.settings.get("task.agentModelOverrides").task;
+ 		const taskSelector = (Array.isArray(taskOverride) ? taskOverride[0] : taskOverride) ?? currentSelector;
 +		let pickerHidden = false;
  		let closed = false;
 +		const hidePicker = () => {
@@ -362,7 +619,7 @@ index 592ff331d7..de6033156b 100644
  			this.focusActiveEditorArea();
  			this.ctx.ui.requestRender();
  		};
-@@ -751,10 +759,10 @@ export class SelectorController {
+@@ -840,10 +848,10 @@ export class SelectorController {
  			this.ctx.session.scopedModels,
  			{
  				onPick: async (model, selector, { overContext }) => {
@@ -376,7 +633,7 @@ index 592ff331d7..de6033156b 100644
  						this.ctx.statusLine.invalidate();
  						this.ctx.updateEditorBorderColor();
  						const roleSelectorHint = this.ctx.keybindings.getKeys("app.model.select")[0] ?? "Alt+M";
-@@ -771,19 +779,21 @@ export class SelectorController {
+@@ -860,19 +868,21 @@ export class SelectorController {
  							// compaction keeps the current model — the target still cannot
  							// fit the transcript.
  							done();
@@ -400,7 +657,7 @@ index 592ff331d7..de6033156b 100644
  						this.ctx.showError(error instanceof Error ? error.message : String(error));
  					}
  				},
-@@ -823,6 +833,71 @@ export class SelectorController {
+@@ -925,6 +935,70 @@ export class SelectorController {
  		this.ctx.ui.requestRender();
  	}
  
@@ -425,7 +682,6 @@ index 592ff331d7..de6033156b 100644
 +		}
 +		beforeShow?.();
 +		const { promise, resolve, reject } = Promise.withResolvers<ConfiguredThinkingLevel | undefined>();
-+		let overlayHandle: OverlayHandle | undefined;
 +		let closed = false;
 +		const close = () => {
 +			overlayHandle?.hide();
@@ -458,7 +714,7 @@ index 592ff331d7..de6033156b 100644
 +			level => finish(level),
 +			() => finish(fallback),
 +		);
-+		overlayHandle = this.ctx.ui.showOverlay(strip, {
++		const overlayHandle = this.ctx.ui.showOverlay(strip, {
 +			anchor: "bottom-center",
 +			width: "100%",
 +			maxHeight: "100%",
@@ -473,11 +729,11 @@ index 592ff331d7..de6033156b 100644
  	 * Fullscreen model hub on the alternate screen (the /settings idiom): the
  	 * overlay enables mouse tracking for its lifetime and the transcript stays
 diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
-index 386f965b62..adf13f09a7 100644
+index 574736e209..cae688ac54 100644
 --- a/packages/coding-agent/src/modes/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive-mode.ts
-@@ -718,6 +718,9 @@ export class InteractiveMode implements InteractiveModeContext {
- 	readonly #startupChangelog: StartupChangelogSelection | undefined;
+@@ -729,6 +729,9 @@ export class InteractiveMode implements InteractiveModeContext {
+ 	#headerAfter: readonly Component[] = [];
  	#planModePreviousTools: string[] | undefined;
  	#goalModePreviousTools: string[] | undefined;
 +	#guidedGoalInterviewActive = false;
@@ -486,7 +742,7 @@ index 386f965b62..adf13f09a7 100644
  	#vibeModePreviousTools: string[] | undefined;
  	#vibeModeOwnerScope: VibeOwnerScope | undefined;
  	#vibeScopeSuspendedForSwitch = false;
-@@ -2753,6 +2756,27 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -2871,6 +2874,27 @@ export class InteractiveMode implements InteractiveModeContext {
  			}
  			return;
  		}
@@ -514,7 +770,7 @@ index 386f965b62..adf13f09a7 100644
  		if (event.type === "message_start" && event.message.role === "user" && !event.message.synthetic) {
  			this.#resetGoalContinuationSuppression();
  			return;
-@@ -2772,9 +2796,10 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -2890,9 +2914,10 @@ export class InteractiveMode implements InteractiveModeContext {
  			this.#updateGoalModeStatus();
  			return;
  		}
@@ -526,7 +782,7 @@ index 386f965b62..adf13f09a7 100644
  		if (this.#goalContinuationTurnInFlight) {
  			this.#goalSuppressNextContinuation = !this.#goalTurnHadToolCalls;
  			this.#goalContinuationTurnInFlight = false;
-@@ -3202,6 +3227,51 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -3343,6 +3368,51 @@ export class InteractiveMode implements InteractiveModeContext {
  		}
  	}
  
@@ -578,7 +834,7 @@ index 386f965b62..adf13f09a7 100644
  	async #enterGoalMode(options: { objective?: string; resume?: boolean; silent?: boolean }): Promise<void> {
  		if (this.goalModeEnabled) {
  			return;
-@@ -4028,14 +4098,24 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -4169,14 +4239,24 @@ export class InteractiveMode implements InteractiveModeContext {
  				return false;
  			}
  
@@ -606,7 +862,7 @@ index 386f965b62..adf13f09a7 100644
  			}
  
  			// The interview is a normal conversation: the kickoff rides in as a
-@@ -4045,18 +4125,26 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -4186,18 +4266,26 @@ export class InteractiveMode implements InteractiveModeContext {
  			const kickoff = prompt.render(guidedGoalInterviewPrompt, { initial: rest?.trim() || undefined });
  			const images = input?.images?.length ? input.images : undefined;
  			if (this.session.isStreaming) {
@@ -664,10 +920,10 @@ index f542c3195b..5bdf083a27 100644
  - No implementation plan unless user explicitly asks goal to include planning.
  
 diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
-index c66ab2c937..278b06b3e6 100644
+index b805674367..1cf59abd2b 100644
 --- a/packages/coding-agent/src/session/agent-session.ts
 +++ b/packages/coding-agent/src/session/agent-session.ts
-@@ -6579,6 +6579,14 @@ export class AgentSession {
+@@ -6973,6 +6973,14 @@ export class AgentSession {
  	 *  non-user steer (hidden goal/plan/budget, IRC/extension asides) is dropped, so abort()'s
  	 *  #drainStrandedQueuedMessages can't auto-resume the run the user just interrupted (the drain only
  	 *  fires while agent.hasQueuedMessages()). Plain Alt+Up dequeue preserves those non-user steers. */
@@ -783,83 +1039,6 @@ index 6e1d737aba..74b8200f4d 100644
  			if (options?.trimTrailingNewline === false) {
  				return text;
  			}
-diff --git a/packages/coding-agent/src/utils/git.ts b/packages/coding-agent/src/utils/git.ts
-index 79284e4a37..b9da2d6a66 100644
---- a/packages/coding-agent/src/utils/git.ts
-+++ b/packages/coding-agent/src/utils/git.ts
-@@ -512,8 +512,51 @@ function formatCommandFailure(
- 	return `git ${args.join(" ")} failed with exit code ${result.exitCode}`;
- }
- 
-+// ════════════════════════════════════════════════════════════════════════════
-+// Concurrency limiter
-+// ════════════════════════════════════════════════════════════════════════════
-+//
-+// A burst of parallel `git` launches — one per concurrent subagent plus any
-+// always-on status pollers — can saturate CPU and filesystem I/O on
-+// constrained or thermally-limited hosts. When `OMP_GIT_MAX_CONCURRENCY` is a
-+// positive integer, git subprocess launches are queued so at most N run at
-+// once; excess callers wait FIFO for a slot. Unset or non-positive => 0 =>
-+// unlimited, preserving the previous behavior exactly.
-+const GIT_MAX_CONCURRENCY_RAW = Number.parseInt(process.env.OMP_GIT_MAX_CONCURRENCY ?? "", 10);
-+const GIT_MAX_CONCURRENCY = Number.isFinite(GIT_MAX_CONCURRENCY_RAW) && GIT_MAX_CONCURRENCY_RAW > 0 ? GIT_MAX_CONCURRENCY_RAW : 0;
-+let gitActiveCount = 0;
-+const gitSlotWaiters: Array<() => void> = [];
-+
-+/**
-+ * Reserve a git-launch slot. Resolves with a release callback that MUST be
-+ * invoked once (idempotent) after the child exits. A no-op when the limiter is
-+ * disabled (`GIT_MAX_CONCURRENCY === 0`).
-+ */
-+function acquireGitSlot(): Promise<() => void> {
-+	if (GIT_MAX_CONCURRENCY === 0) return Promise.resolve(() => {});
-+	let released = false;
-+	const release = (): void => {
-+		if (released) return;
-+		released = true;
-+		gitActiveCount -= 1;
-+		const next = gitSlotWaiters.shift();
-+		if (next !== undefined) next();
-+	};
-+	if (gitActiveCount < GIT_MAX_CONCURRENCY) {
-+		gitActiveCount += 1;
-+		return Promise.resolve(release);
-+	}
-+	return new Promise<() => void>((resolve) => {
-+		gitSlotWaiters.push(() => {
-+			gitActiveCount += 1;
-+			resolve(release);
-+		});
-+	});
-+}
-+
- async function git(cwd: string, args: readonly string[], options: CommandOptions = {}): Promise<GitCommandResult> {
- 	const commandArgs = withShortLivedGitConfig(options.readOnly ? withNoOptionalLocks(args) : [...args]);
-+	const releaseGitSlot = await acquireGitSlot();
- 	let child: Subprocess;
- 	try {
- 		child = Bun.spawn(["git", ...commandArgs], {
-@@ -526,6 +569,7 @@ async function git(cwd: string, args: readonly string[], options: CommandOptions
- 			windowsHide: true,
- 		});
- 	} catch (err) {
-+		releaseGitSlot();
- 		if (isEnoent(err)) {
- 			// A deleted/nonexistent cwd also surfaces as a spawn ENOENT; only blame
- 			// the binary when the working directory actually exists.
-@@ -535,7 +579,11 @@ async function git(cwd: string, args: readonly string[], options: CommandOptions
- 		throw err;
- 	}
- 
--	return await collectSubprocessResult("git", commandArgs, child, options);
-+	try {
-+		return await collectSubprocessResult("git", commandArgs, child, options);
-+	} finally {
-+		releaseGitSlot();
-+	}
- }
- 
- function withNoOptionalLocks(args: readonly string[]): string[] {
 diff --git a/packages/coding-agent/test/external-editor.test.ts b/packages/coding-agent/test/external-editor.test.ts
 index ca2664a61e..9442a1b4cf 100644
 --- a/packages/coding-agent/test/external-editor.test.ts
@@ -1257,7 +1436,7 @@ index 0000000000..efad6c91c7
 +	});
 +});
 diff --git a/packages/coding-agent/test/slash-commands/switch.test.ts b/packages/coding-agent/test/slash-commands/switch.test.ts
-index 9ea8f53b2f..9412c1a5b5 100644
+index 9ea8f53b2f..8da2f647aa 100644
 --- a/packages/coding-agent/test/slash-commands/switch.test.ts
 +++ b/packages/coding-agent/test/slash-commands/switch.test.ts
 @@ -1,6 +1,17 @@
@@ -1318,7 +1497,7 @@ index 9ea8f53b2f..9412c1a5b5 100644
 +		editor,
 +		editorContainer: { children: [activeDialog] },
 +		settings: Settings.isolated({}),
-+		keybindings: { getKeys: () => [] },
++		keybindings: { getKeys: () => [], getDisplayString: () => "alt+p" },
 +		session: {
 +			model,
 +			scopedModels: [{ model }],
@@ -1450,12 +1629,127 @@ index 9ea8f53b2f..9412c1a5b5 100644
 +		expect(harness.setModelTemporary).toHaveBeenCalledWith(model, Effort.High);
 +	});
 +});
+diff --git a/packages/coding-agent/test/usage-cli.test.ts b/packages/coding-agent/test/usage-cli.test.ts
+index 25d065c2c5..4bb8f13b37 100644
+--- a/packages/coding-agent/test/usage-cli.test.ts
++++ b/packages/coding-agent/test/usage-cli.test.ts
+@@ -5,6 +5,8 @@ import {
+ 	buildRedactionMap,
+ 	collectUnreportedAccounts,
+ 	computeProviderWindowStats,
++	fetchOpenRouterUsageReport,
++	parseOpenRouterKeyUsage,
+ 	formatUsageBreakdown,
+ 	formatUsageHistory,
+ 	type UsageAccountIdentity,
+@@ -299,6 +301,101 @@ describe("collectUnreportedAccounts", () => {
+ 	});
+ });
+ 
++describe("OpenRouter current-key usage", () => {
++	it("normalizes spend with no configured limit", () => {
++		const report = parseOpenRouterKeyUsage(
++			{
++				data: {
++					usage: 12.345,
++					limit: null,
++					limit_remaining: null,
++					limit_reset: null,
++					usage_daily: 1.25,
++				},
++			},
++			123,
++		);
++		expect(report).toMatchObject({
++			provider: "openrouter",
++			fetchedAt: 123,
++			limits: [
++				{
++					id: "openrouter:key-spend",
++					amount: { used: 12.345, unit: "usd" },
++					notes: ["No spending limit configured for this API key."],
++				},
++			],
++			metadata: {
++				source: "omp-fork:P11-openrouter-usage",
++				limitReset: null,
++				usageDaily: 1.25,
++				usageWeekly: null,
++				usageMonthly: null,
++			},
++		});
++		expect(report.limits[0].amount.limit).toBeUndefined();
++		expect(report.limits[0].amount.remaining).toBeUndefined();
++	});
++
++	it("normalizes configured USD limit and reset window", () => {
++		const report = parseOpenRouterKeyUsage(
++			{
++				data: {
++					usage: 25.5,
++					limit: 100,
++					limit_remaining: 74.5,
++					limit_reset: "monthly",
++				},
++			},
++			456,
++		);
++		expect(report.limits[0]).toMatchObject({
++			window: { id: "monthly", label: "Monthly" },
++			amount: { used: 25.5, limit: 100, remaining: 74.5, unit: "usd" },
++		});
++	});
++
++	it("uses the resolved key only as an authorization header", async () => {
++		let authorization = "";
++		const report = await fetchOpenRouterUsageReport(
++			"secret-openrouter-key",
++			async (input, init) => {
++				expect(String(input)).toBe("https://openrouter.ai/api/v1/key");
++				authorization = new Headers(init?.headers).get("authorization") ?? "";
++				return new Response(
++					JSON.stringify({
++						data: { usage: 3.5, limit: 10, limit_remaining: 6.5, limit_reset: "monthly" },
++					}),
++					{ status: 200, headers: { "content-type": "application/json" } },
++				);
++			},
++			789,
++		);
++		expect(authorization).toBe("Bearer secret-openrouter-key");
++		expect(report?.limits[0].amount.used).toBe(3.5);
++		expect(JSON.stringify(report)).not.toContain("secret-openrouter-key");
++	});
++	it("adds the available credit balance with a management key", async () => {
++		const urls: string[] = [];
++		const report = await fetchOpenRouterUsageReport(
++			"usage-key",
++			async input => {
++				const url = String(input);
++				urls.push(url);
++				const data = url.endsWith("/credits")
++					? { data: { total_credits: 20, total_usage: 2.47 } }
++					: { data: { usage: 3.5, limit: 10, limit_remaining: 6.5, limit_reset: "monthly" } };
++				return new Response(JSON.stringify(data), { status: 200 });
++			},
++			789,
++			"management-key",
++		);
++		expect(urls).toEqual(["https://openrouter.ai/api/v1/key", "https://openrouter.ai/api/v1/credits"]);
++		expect(report?.metadata?.availableUSD).toBe(17.53);
++		expect(JSON.stringify(report)).not.toContain("management-key");
++	});
++});
++
+ describe("formatUsageBreakdown", () => {
+ 	const reports = [
+ 		makeReport("anthropic", "dummy.primary@example.test", [
 diff --git a/scripts/omp-reapply-patches.py b/scripts/omp-reapply-patches.py
 new file mode 100644
-index 0000000000..ba1ae438ef
+index 0000000000..39166ecdad
 --- /dev/null
 +++ b/scripts/omp-reapply-patches.py
-@@ -0,0 +1,486 @@
+@@ -0,0 +1,507 @@
 +#!/usr/bin/env python3
 +"""Re-apply the local OMP patch bundle after `bun update -g` wipes it.
 +
@@ -1472,10 +1766,16 @@ index 0000000000..ba1ae438ef
 +      P1  getLoader json/toml/text assets  local only; no PR
 +      P6  guided-goal ask-tool interview   upstream PR #8187
 +      P7  guided-goal recon-first          fork PR fatihaziz/oh-my-pi#1
-+
++      P9  guard lying editor launcher    local only; upstreamable
 +    Retired: P3 (thinking label "max") — upstream-native since 17.3.x.
 +    Retired: P5 (fresh-session vibe autostart) — removed 2026-08-20 by user
 +    decision: fresh sessions must start in normal mode; vibe is /vibe only.
++    Retired: P10 (git concurrency limiter) — retired 2026-09-03 by owner
++    decision: upstream 18.0.9 removed utils/git.ts (VCS moved in-process to
++    @oh-my-pi/pi-natives/vcs via gix/jj-lib), so the TS FIFO limiter has no
++    anchor; upstream PR #9936 was closed unmerged by the owner the same day.
++    If concurrent-launch capping is needed again, implement it as a tokio
++    semaphore inside the pi-vcs crate.
 +
 +MARKERS below only VERIFY the rebuilt bundle; they never rewrite bytes.
 +
@@ -1524,7 +1824,7 @@ index 0000000000..ba1ae438ef
 +BACKUP_SUFFIX = ".ompbak"  # -> cli.js.ompbak beside the bundle
 +REPO_ROOT = Path(__file__).resolve().parents[1]
 +UNIFIED_PATCH = REPO_ROOT / "scripts" / "omp-unified.patch"
-+UNIFIED_BASE_VERSION = "18.0.3"
++UNIFIED_BASE_VERSION = "18.1.4"
 +PACKAGE_PREFIX = "packages/coding-agent/"
 +# Only source ships in the npm package; CHANGELOG/test hunks stay repo-side.
 +APPLY_PREFIX = PACKAGE_PREFIX + "src/"
@@ -1596,6 +1896,21 @@ index 0000000000..ba1ae438ef
 +        "resolution": "Fork PR fatihaziz/oh-my-pi#1; never upstream. Rides in the unified patch after the P6 prompt text.",
 +        "applied": lambda t: "- Ask only what recon cannot answer." in t,
 +    },
++    {
++        "id": "P8",
++        "name": "P8 hidden Windows editor shell",
++        "source": "packages/coding-agent/src/utils/external-editor.ts:openInEditor",
++        "resolution": "Local only. Keep until upstream sets Bun.spawn windowsHide for the Windows external-editor shell.",
++        "applied": lambda t: (i := t.find("omp-editor-")) >= 0
++        and 'windowsHide:process.platform==="win32"' in t[i : i + 1000],
++    },
++    {
++        "id": "P9",
++        "name": "P9 lying editor launcher guard",
++        "source": "packages/coding-agent/src/utils/external-editor.ts:openInEditor",
++        "resolution": "Local only; upstreamable. Regenerate the unified patch; drop this marker once upstream rejects a launcher that exits 0 without ever opening the file.",
++        "applied": lambda t: "without opening the file" in t,
++	},
 +]
 +
 +

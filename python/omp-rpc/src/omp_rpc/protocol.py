@@ -70,6 +70,9 @@ _EFFORT_VALUES: Final[frozenset[str]] = frozenset(
     {"minimal", "low", "medium", "high", "xhigh", "max"}
 )
 _THINKING_LEVEL_VALUES: Final[frozenset[str]] = _EFFORT_VALUES | frozenset({"off"})
+_PROMPT_OUTCOME_VALUES: Final[frozenset[str]] = frozenset(
+    {"completed", "aborted", "failed"}
+)
 _STEERING_MODE_VALUES: Final[frozenset[str]] = frozenset({"all", "one-at-a-time"})
 _INTERRUPT_MODE_VALUES: Final[frozenset[str]] = frozenset({"immediate", "wait"})
 _STOP_REASON_VALUES: Final[frozenset[str]] = frozenset(
@@ -902,11 +905,22 @@ class SessionStats:
 
 @dataclass(slots=True, frozen=True)
 class ReadyEvent:
+    server_version: str | None = None
     protocol_version: int | None = None
     supported_protocol_versions: tuple[int, ...] | None = None
     max_frame_bytes: int | None = None
     max_reassembled_frame_bytes: int | None = None
+    capabilities: JsonObject | None = None
     type: Literal["ready"] = "ready"
+
+
+@dataclass(slots=True, frozen=True)
+class PromptEndEvent:
+    prompt_id: str
+    session_id: str
+    outcome: Literal["completed", "aborted", "failed"]
+    session_file: str | None = None
+    type: Literal["prompt_end"] = "prompt_end"
 
 
 @dataclass(slots=True, frozen=True)
@@ -1132,6 +1146,7 @@ RpcAgentEvent: TypeAlias = (
 
 RpcNotification: TypeAlias = (
     ReadyEvent
+    | PromptEndEvent
     | ExtensionUiRequest
     | ExtensionError
     | RpcAgentEvent
@@ -1596,11 +1611,29 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
                 raise ValueError("ready.supportedProtocolVersions must be integers")
             supported_versions = tuple(raw_versions)
         return ReadyEvent(
+            server_version=_optional_str(payload, "serverVersion"),
             protocol_version=_optional_int(payload, "protocolVersion"),
             supported_protocol_versions=supported_versions,
             max_frame_bytes=_optional_int(payload, "maxFrameBytes"),
             max_reassembled_frame_bytes=_optional_int(
                 payload, "maxReassembledFrameBytes"
+            ),
+            capabilities=_optional_json_object(
+                payload.get("capabilities"), field="ready.capabilities"
+            ),
+        )
+    if event_type == "prompt_end":
+        return PromptEndEvent(
+            prompt_id=_require_str(payload, "promptId"),
+            session_id=_require_str(payload, "sessionId"),
+            session_file=_optional_str(payload, "sessionFile"),
+            outcome=cast(
+                Literal["completed", "aborted", "failed"],
+                _require_literal(
+                    payload.get("outcome"),
+                    _PROMPT_OUTCOME_VALUES,
+                    field="prompt_end.outcome",
+                ),
             ),
         )
     if event_type == "extension_ui_request":

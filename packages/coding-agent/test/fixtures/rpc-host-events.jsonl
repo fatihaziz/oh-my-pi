@@ -1,0 +1,2 @@
+{"type":"ready","serverVersion":"1.2.3","protocolVersion":1,"supportedProtocolVersions":[1,2],"maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864,"capabilities":{"protocolNegotiation":true,"chunkedFrames":true,"promptTerminal":true,"deterministicDisconnectCleanup":true}}
+{"type":"prompt_end","promptId":"prompt-7","sessionId":"session-3","sessionFile":"/sessions/session-3.jsonl","outcome":"completed"}

@@ -141,12 +141,29 @@ export interface RpcPromptResultFrame {
 	agentInvoked: boolean;
 }
 
+export interface RpcPromptEndFrame {
+	type: "prompt_end";
+	promptId: string;
+	sessionId: string;
+	sessionFile?: string;
+	outcome: "completed" | "aborted" | "failed";
+}
+
+export interface RpcCapabilities {
+	protocolNegotiation: true;
+	chunkedFrames: true;
+	promptTerminal: true;
+	deterministicDisconnectCleanup: true;
+}
+
 export interface RpcReadyFrame {
 	type: "ready";
+	serverVersion: string;
 	protocolVersion: 1;
 	supportedProtocolVersions: [1, 2];
 	maxFrameBytes: number;
 	maxReassembledFrameBytes: number;
+	capabilities: RpcCapabilities;
 }
 
 export interface RpcChunkFrame {
@@ -204,7 +221,13 @@ export type RpcResponse =
 	  }
 
 	// Prompting (async - events follow)
-	| { id?: string; type: "response"; command: "prompt"; success: true; data?: { agentInvoked: boolean } }
+	| {
+			id?: string;
+			type: "response";
+			command: "prompt";
+			success: true;
+			data?: { promptId?: string; agentInvoked?: boolean };
+	  }
 	| { id?: string; type: "response"; command: "steer"; success: true }
 	| { id?: string; type: "response"; command: "follow_up"; success: true }
 	| { id?: string; type: "response"; command: "abort"; success: true }

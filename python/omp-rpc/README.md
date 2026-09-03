@@ -15,6 +15,10 @@ provides:
 - helpers for collecting prompt runs and handling extension UI requests in manual or headless mode
 - typed host-tool helpers so Python RPC owners can expose custom tools with JSON Schema metadata
 
+Startup `ReadyEvent` notifications expose `server_version` and the named
+`capabilities` map when advertised. Legacy `{ "type": "ready" }` frames leave
+both fields as `None`.
+
 ## Basic Usage
 
 ```python
@@ -66,8 +70,15 @@ with RpcClient(model="openrouter/anthropic/claude-sonnet-4.6", no_session=True) 
             "Write concrete findings and gaps.",
         ]
     )
+
     client.prompt_and_wait("Evaluate the current tool behavior.")
 ```
+
+Hosts can correlate completion without replaying the transcript by handling the
+typed `PromptEndEvent` in `client.on_notification(...)`. Its `prompt_id` matches
+the prompt command id, and `outcome` is exactly `"completed"`, `"aborted"`, or
+`"failed"`. Legacy clients that do not parse this additive event continue to use
+`agent_end`.
 
 `set_todos()` accepts either a flat list of todo strings/items or explicit
 phases, and `get_state().todo_phases` returns the typed current todo state.

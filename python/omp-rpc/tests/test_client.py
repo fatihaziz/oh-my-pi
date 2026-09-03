@@ -18,6 +18,7 @@ from omp_rpc import (
     RpcCommandError,
     RpcConcurrencyError,
     RpcError,
+    RpcNotification,
     host_tool,
 )
 from omp_rpc.client import _RpcFrameDecoder
@@ -405,7 +406,11 @@ FAKE_SERVER = textwrap.dedent(
         elif command_type in {"steer", "follow_up", "abort"}:
             respond(request_id, command_type, {})
         elif command_type in {"prompt", "abort_and_prompt"}:
-            respond(request_id, command_type, {})
+            respond(
+                request_id,
+                command_type,
+                {"promptId": request_id} if command_type == "prompt" else {},
+            )
             message = command["message"]
             if message == "needs ui":
                 print(json.dumps({"type": "extension_ui_request", "id": "ui-1", "method": "input", "title": "Need input", "placeholder": "value"}), flush=True)
@@ -470,6 +475,18 @@ FAKE_SERVER = textwrap.dedent(
                 include_extra_events=message == "all events",
                 compact_terminal=message == "compacted turn",
             )
+            if command_type == "prompt":
+                print(
+                    json.dumps(
+                        {
+                            "type": "prompt_end",
+                            "promptId": request_id,
+                            "sessionId": "fake-session",
+                            "outcome": "completed",
+                        }
+                    ),
+                    flush=True,
+                )
         elif command_type == "host_tool_update":
             print(
                 json.dumps(
@@ -1116,11 +1133,16 @@ class RpcClientTests(unittest.TestCase):
         ready_types: list[str] = []
         event_types: list[str] = []
         notification_types: list[str] = []
+        prompt_ids: list[str] = []
+
+        def on_notification(notification: RpcNotification) -> None:
+            notification_types.append(notification.type)
+            if notification.type == "prompt_end":
+                prompt_ids.append(notification.prompt_id)
+
         client = self.make_client()
         client.on_ready(lambda event: ready_types.append(event.type))
-        client.on_notification(
-            lambda notification: notification_types.append(notification.type)
-        )
+        client.on_notification(on_notification)
         client.on_turn_start(lambda event: event_types.append(event.type))
         client.on_message_update(lambda event: event_types.append(event.type))
         client.on_agent_end(lambda event: event_types.append(event.type))
@@ -1128,6 +1150,7 @@ class RpcClientTests(unittest.TestCase):
         try:
             client.start()
             client.prompt_and_wait("say hello", timeout=2.0)
+            time.sleep(0.01)
         finally:
             client.stop()
 
@@ -1136,6 +1159,8 @@ class RpcClientTests(unittest.TestCase):
         self.assertIn("ready", notification_types)
         self.assertIn("turn_start", notification_types)
         self.assertIn("agent_end", notification_types)
+        self.assertIn("prompt_end", notification_types)
+        self.assertEqual(prompt_ids, ["req_1"])
 
     def test_set_todos_supports_flat_items(self) -> None:
         with self.make_client() as client:

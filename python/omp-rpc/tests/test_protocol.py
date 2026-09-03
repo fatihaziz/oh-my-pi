@@ -7,6 +7,8 @@ from omp_rpc import (
     AutoCompactionEndEvent,
     AutoCompactionStartEvent,
     ExtensionUiRequest,
+    PromptEndEvent,
+    ReadyEvent,
     SessionState,
     TodoReminderEvent,
     assistant_text,
@@ -141,6 +143,53 @@ class ProtocolParsingTests(unittest.TestCase):
                     ),
                     (False, False, expected),
                 )
+
+    def test_parse_ready_negotiation_and_legacy_compatibility(self) -> None:
+        ready = parse_notification(
+            {
+                "type": "ready",
+                "serverVersion": "17.2.12",
+                "protocolVersion": 1,
+                "supportedProtocolVersions": [1, 2],
+                "maxFrameBytes": 1048576,
+                "maxReassembledFrameBytes": 67108864,
+                "capabilities": {
+                    "protocolNegotiation": True,
+                    "chunkedFrames": True,
+                    "promptTerminal": True,
+                    "deterministicDisconnectCleanup": True,
+                },
+            }
+        )
+        self.assertIsInstance(ready, ReadyEvent)
+        self.assertEqual(ready.server_version, "17.2.12")
+        self.assertEqual(ready.supported_protocol_versions, (1, 2))
+        self.assertTrue(ready.capabilities["promptTerminal"])
+
+        legacy = parse_notification({"type": "ready"})
+        self.assertIsInstance(legacy, ReadyEvent)
+        self.assertIsNone(legacy.server_version)
+        self.assertIsNone(legacy.capabilities)
+
+    def test_parse_prompt_end(self) -> None:
+        terminal = parse_notification(
+            {
+                "type": "prompt_end",
+                "promptId": "prompt-7",
+                "sessionId": "session-3",
+                "sessionFile": "/sessions/session-3.jsonl",
+                "outcome": "aborted",
+            }
+        )
+        self.assertEqual(
+            terminal,
+            PromptEndEvent(
+                prompt_id="prompt-7",
+                session_id="session-3",
+                session_file="/sessions/session-3.jsonl",
+                outcome="aborted",
+            ),
+        )
 
     def test_parse_agent_end_notification(self) -> None:
         notification = parse_notification(

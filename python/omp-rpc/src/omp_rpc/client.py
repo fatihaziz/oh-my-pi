@@ -42,6 +42,7 @@ from .protocol import (
     MessageUpdateEvent,
     ModelCycleResult,
     ModelInfo,
+    PromptEndEvent,
     ReadyEvent,
     RetryFallbackAppliedEvent,
     RetryFallbackSucceededEvent,
@@ -1953,6 +1954,9 @@ class RpcClient:
                         self._extension_error_listeners,
                         notification,
                     )
+                    continue
+
+                if isinstance(notification, PromptEndEvent):
                     continue
 
                 if isinstance(notification, UnknownNotification):

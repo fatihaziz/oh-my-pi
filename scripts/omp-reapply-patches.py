@@ -14,14 +14,24 @@ Single source of truth
       P1  getLoader json/toml/text assets  local only; no PR
       P6  guided-goal ask-tool interview   upstream PR #8187
       P7  guided-goal recon-first          fork PR fatihaziz/oh-my-pi#1
-      P8  hide Windows editor shell       local only; user-reported
       P9  guard lying editor launcher    local only; upstreamable
-
+      P11 openrouter usage in `omp usage` local only; upstreamable
+      P12 codex http failure context (pi-ai) local only; upstreamable
     Retired: P3 (thinking label "max") — upstream-native since 17.3.x.
     Retired: P5 (fresh-session vibe autostart) — removed 2026-08-20 by user
     decision: fresh sessions must start in normal mode; vibe is /vibe only.
-
-MARKERS below only VERIFY the rebuilt bundle; they never rewrite bytes.
+    Retired: P10 (git concurrency limiter) — retired 2026-09-03 by owner
+    decision: upstream 18.0.9 removed utils/git.ts (VCS moved in-process to
+    @oh-my-pi/pi-natives/vcs via gix/jj-lib), so the TS FIFO limiter has no
+    anchor; upstream PR #9936 was closed unmerged by the owner the same day.
+    If concurrent-launch capping is needed again, implement it as a tokio
+    semaphore inside the pi-vcs crate.
+    Multi-package support: PACKAGE_PREFIXES maps repo `packages/<dir>/` to the
+    installed `@oh-my-pi/<pkg>` source package; every mapping's `src/` hunks
+    are applied inside that package's own root (git apply -p3) and rebuilt
+    into dist/cli.js.
+ 
+     MARKERS below only VERIFY the rebuilt bundle; they never rewrite bytes.
 
 Idempotence
     `git apply --check` decides the installed-source state:
@@ -68,10 +78,14 @@ from pathlib import Path
 BACKUP_SUFFIX = ".ompbak"  # -> cli.js.ompbak beside the bundle
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UNIFIED_PATCH = REPO_ROOT / "scripts" / "omp-unified.patch"
-UNIFIED_BASE_VERSION = "18.0.3"
-PACKAGE_PREFIX = "packages/coding-agent/"
-# Only source ships in the npm package; CHANGELOG/test hunks stay repo-side.
-APPLY_PREFIX = PACKAGE_PREFIX + "src/"
+UNIFIED_BASE_VERSION = "18.1.4"
+PACKAGE_PREFIXES = {
+    # Repo package prefix -> installed npm package name under @oh-my-pi.
+    # Only source ships in the npm packages; CHANGELOG/test hunks stay repo-side.
+    "packages/coding-agent/": "pi-coding-agent",
+    "packages/ai/": "pi-ai",
+}
+APPLY_PREFIXES = {prefix + "src/": name for prefix, name in PACKAGE_PREFIXES.items()}
 
 
 # ── Locate the bundle ─────────────────────────────────────────────────────────
@@ -155,13 +169,21 @@ MARKERS = [
         "resolution": "Local only; upstreamable. Regenerate the unified patch; drop this marker once upstream rejects a launcher that exits 0 without ever opening the file.",
         "applied": lambda t: "without opening the file" in t,
 	},
-	{
-		"id": "P10",
-		"name": "P10 git concurrency limiter",
-		"source": "packages/coding-agent/src/utils/git.ts:git (acquireGitSlot)",
-		"resolution": "Fork PR fatihaziz/oh-my-pi#2; upstream can1357/oh-my-pi#9936. Regenerate the unified patch; drop this marker once upstream merges OMP_GIT_MAX_CONCURRENCY.",
-		"applied": lambda t: "OMP_GIT_MAX_CONCURRENCY" in t,
-	},
+    {
+        "id": "P11",
+        "name": "P11 openrouter usage rows",
+        "source": "packages/coding-agent/src/cli/usage-cli.ts:runUsageCommand",
+        "resolution": "Local only; upstreamable. Regenerate the unified patch; retire once upstream ships an OpenRouter usage provider.",
+        "applied": lambda t: "omp-fork:P11-openrouter-usage" in t,
+    },
+    {
+        "id": "P12",
+        "name": "P12 codex http failure context",
+        "source": "packages/ai/src/providers/openai-codex/response-handler.ts:parseCodexError",
+        "resolution": "Local only; upstreamable. Regenerate the unified patch; drop this marker once upstream "
+        "prefixes non-structured Codex errors with status and endpoint.",
+        "applied": lambda t: "statusText.trim()" in t,
+    },
 ]
 
 
@@ -189,48 +211,74 @@ def print_marker_resolutions(results: list[dict]) -> None:
 
 # ── Unified patch handling ────────────────────────────────────────────────────
 
-
 def filter_patch_for_package(patch_text: str) -> str:
-    """Keep only the `packages/coding-agent/src/` file sections of the diff."""
-    sections: list[str] = []
+    """Keep only shippable `packages/<pkg>/src/` file sections of the diff."""
+    return "".join(section for _, section in patch_sections(patch_text))
+
+
+def section_package(section_header: str) -> str | None:
+    """Installed package name owning a `diff --git` line, or None to skip."""
+    return next(
+        (name for prefix, name in APPLY_PREFIXES.items() if f" b/{prefix}" in section_header),
+        None,
+    )
+
+
+def patch_sections(patch_text: str) -> list[tuple[str, str]]:
+    """[(installed package name, section text)] for every shippable file section."""
+    sections: list[tuple[str, str]] = []
     current: list[str] | None = None
-    keep = False
+    name: str | None = None
     for line in patch_text.splitlines(keepends=True):
         if line.startswith("diff --git "):
-            if current and keep:
-                sections.append("".join(current))
+            if current is not None and name is not None:
+                sections.append((name, "".join(current)))
             current = [line]
             # `diff --git a/<path> b/<path>` — match on the b-side path.
-            keep = f" b/{APPLY_PREFIX}" in line
+            name = section_package(line)
         elif current is not None:
             current.append(line)
-    if current and keep:
-        sections.append("".join(current))
-    return "".join(sections)
+    if current is not None and name is not None:
+        sections.append((name, "".join(current)))
+    return sections
 
 
-def patched_source_paths(filtered_patch: str) -> list[str]:
-    """Package-relative paths (below packages/coding-agent/) the patch touches."""
-    paths: list[str] = []
-    for line in filtered_patch.splitlines():
-        if line.startswith("+++ b/") and line[6:].startswith(APPLY_PREFIX):
-            paths.append(line[6 + len(PACKAGE_PREFIX):])
-    return paths
+def sections_by_package(filtered_patch: str) -> dict[str, str]:
+    """Group filtered patch sections per installed package for git apply."""
+    grouped: dict[str, list[str]] = {}
+    for name, section in patch_sections(filtered_patch):
+        grouped.setdefault(name, []).append(section)
+    return {name: "".join(parts) for name, parts in grouped.items()}
 
 
-def created_file_paths(filtered_patch: str) -> list[str]:
-    """Package-relative paths of files the patch CREATES (absent upstream)."""
-    paths: list[str] = []
+def _prefixed_paths(filtered_patch: str, created_only: bool) -> dict[str, list[str]]:
+    """Installed package name -> paths (relative to that package root)."""
+    paths: dict[str, list[str]] = {}
     pending_new = False
     for line in filtered_patch.splitlines():
         if line.startswith("diff --git "):
             pending_new = False
         elif line == "--- /dev/null":
             pending_new = True
-        elif line.startswith("+++ b/") and pending_new:
-            paths.append(line[6 + len(PACKAGE_PREFIX):])
+        elif line.startswith("+++ b/"):
+            b_path = line[6:]
+            package = next((p for p in PACKAGE_PREFIXES if b_path.startswith(p)), None)
+            if package is None or (created_only and not pending_new):
+                continue
+            name = PACKAGE_PREFIXES[package]
+            paths.setdefault(name, []).append(b_path[len(package):])
             pending_new = False
     return paths
+
+
+def patched_source_paths(filtered_patch: str) -> dict[str, list[str]]:
+    """Paths each patch-touched source file, relative to its installed package root."""
+    return _prefixed_paths(filtered_patch, created_only=False)
+
+
+def created_file_paths(filtered_patch: str) -> dict[str, list[str]]:
+    """Paths of files the patch CREATES (absent upstream), per installed package root."""
+    return _prefixed_paths(filtered_patch, created_only=True)
 
 
 def git_apply(package_root: Path, filtered_patch: str, *extra: str) -> subprocess.CompletedProcess:
@@ -258,23 +306,42 @@ def git_apply(package_root: Path, filtered_patch: str, *extra: str) -> subproces
             patch_file.unlink(missing_ok=True)
 
 
-def classify_source_state(package_root: Path, filtered_patch: str) -> tuple[str, str, list[str]]:
+def classify_source_state(cli: Path, filtered_patch: str) -> tuple[str, str, dict[str, list[str]]]:
     """Return ("pristine"|"patched"|"conflict", detail, stray_created_files).
 
-    Strays are files this patch CREATES that already exist on disk while the
-    rest of the source is unpatched: leftovers from an earlier patch
-    generation that `bun add -g` upgrades never delete. The caller removes
-    them inside the rebuild transaction; this probe never writes.
+    Classified per installed package (see PACKAGE_PREFIXES): every package
+    must agree, or the state is a conflict. Strays are files this patch
+    CREATES that already exist on disk while the rest of the source is
+    unpatched: leftovers from an earlier patch generation that `bun add -g`
+    upgrades never delete. The caller removes them inside the rebuild
+    transaction; this probe never writes.
     """
-    reverse = git_apply(package_root, filtered_patch, "--check", "--reverse")
-    if reverse.returncode == 0:
-        return "patched", "", []
-    strays = [rel for rel in created_file_paths(filtered_patch) if (package_root / rel).exists()]
-    excludes = [f"--exclude={rel}" for rel in strays]
-    forward = git_apply(package_root, filtered_patch, "--check", *excludes)
-    if forward.returncode == 0:
-        return "pristine", "", strays
-    return "conflict", (forward.stderr.strip() or forward.stdout.strip()), strays
+    states: list[str] = []
+    details: list[str] = []
+    strays: dict[str, list[str]] = {}
+    scope_root = cli.parents[2]  # node_modules/@oh-my-pi
+    for name, sections in sections_by_package(filtered_patch).items():
+        package_root = scope_root / name
+        reverse = git_apply(package_root, sections, "--check", "--reverse")
+        if reverse.returncode == 0:
+            states.append("patched")
+            continue
+        created = [rel for rel in created_file_paths(sections).get(name, []) if (package_root / rel).exists()]
+        if created:
+            strays[name] = created
+        excludes = [f"--exclude={rel}" for rel in created]
+        forward = git_apply(package_root, sections, "--check", *excludes)
+        if forward.returncode == 0:
+            states.append("pristine")
+        else:
+            details.append(
+                f"{name}: {forward.stderr.strip() or forward.stdout.strip()}"
+            )
+    if any(state != states[0] for state in states) or "conflict" in states:
+        return "conflict", "\n".join(details), strays
+    if not states:
+        return "conflict", "no shippable sections", strays
+    return states[0], "; ".join(details), strays
 
 
 # ── Transactional rebuild ─────────────────────────────────────────────────────
@@ -295,13 +362,30 @@ def _restore_transaction(transaction: dict | None) -> None:
 
 
 def rebuild_bundle(
-    cli: Path, filtered_patch: str, source_state: str, strays: list[str] | None = None
+    cli: Path, filtered_patch: str, source_state: str, strays: dict[str, list[str]] | None = None
 ) -> tuple[dict | None, str]:
     """Apply the unified patch (when pristine), rebuild dist/cli.js, verify markers.
 
     Returns (transaction, "") on success — caller drops the backup after the
     smoke test — or (None, reason) after rolling everything back.
     """
+    package_root = cli.parent.parent
+    scope_root = cli.parents[2]  # node_modules/@oh-my-pi
+    repo_tmp = REPO_ROOT / "tmp"
+    repo_tmp.mkdir(exist_ok=True)
+    backup_root = Path(tempfile.mkdtemp(prefix="omp-unified-", dir=repo_tmp))
+    grouped = sections_by_package(filtered_patch)
+    touched = [
+        scope_root / name / rel
+        for name, rels in patched_source_paths(filtered_patch).items()
+        for rel in rels
+    ]
+    source_backups = {
+        path: path.read_text(encoding="utf-8") if path.exists() else None for path in touched
+    }
+    dist = package_root / "dist"
+    shutil.copytree(dist, backup_root / "dist")
+    transaction = {"sources": source_backups, "dist": dist, "backup": backup_root}
     package_root = cli.parent.parent
     repo_tmp = REPO_ROOT / "tmp"
     repo_tmp.mkdir(exist_ok=True)
@@ -353,12 +437,14 @@ def rebuild_bundle(
             # Stale created-file leftovers from an earlier patch generation are
             # backed up in the transaction above; drop them so the full patch
             # applies cleanly.
-            for rel in strays or []:
-                (package_root / rel).unlink(missing_ok=True)
-            applied = git_apply(package_root, filtered_patch)
-            if applied.returncode != 0:
-                shutil.rmtree(backup_root, ignore_errors=True)
-                return None, f"git apply failed: {applied.stderr.strip() or applied.stdout.strip()}"
+            for name, rels in (strays or {}).items():
+                for rel in rels:
+                    (scope_root / name / rel).unlink(missing_ok=True)
+            for name, sections in grouped.items():
+                applied = git_apply(scope_root / name, sections)
+                if applied.returncode != 0:
+                    _restore_transaction(transaction)
+                    return None, f"git apply failed for {name}: {applied.stderr.strip() or applied.stdout.strip()}"
         docs_script.write_text(patched_docs_script, encoding="utf-8")
         build_script.write_text(patched_build_script, encoding="utf-8")
         result = subprocess.run(
@@ -448,11 +534,11 @@ def main(argv: list[str] | None = None) -> int:
 
     filtered_patch = filter_patch_for_package(UNIFIED_PATCH.read_text(encoding="utf-8"))
     if not filtered_patch:
-        print("[conflict] unified patch contains no packages/coding-agent/src/ sections")
+        print("[conflict] unified patch contains no shippable packages/*/src/ sections")
         print("    resolve: regenerate scripts/omp-unified.patch (see module docstring).")
         return 3
 
-    source_state, detail, strays = classify_source_state(package_root, filtered_patch)
+    source_state, detail, strays = classify_source_state(cli, filtered_patch)
     if source_state == "conflict":
         print("  [conflict] installed source matches neither pristine nor patched state")
         if detail:

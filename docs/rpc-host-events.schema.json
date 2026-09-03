@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omp.sh/schemas/rpc-host-events.schema.json",
+  "title": "OMP RPC host negotiation and terminal events",
+  "oneOf": [
+    { "$ref": "#/$defs/ready" },
+    { "$ref": "#/$defs/promptEnd" }
+  ],
+  "$defs": {
+    "ready": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "serverVersion",
+        "protocolVersion",
+        "supportedProtocolVersions",
+        "maxFrameBytes",
+        "maxReassembledFrameBytes",
+        "capabilities"
+      ],
+      "properties": {
+        "type": { "const": "ready" },
+        "serverVersion": { "type": "string", "minLength": 1 },
+        "protocolVersion": { "const": 1 },
+        "supportedProtocolVersions": {
+          "type": "array",
+          "prefixItems": [{ "const": 1 }, { "const": 2 }],
+          "items": false
+        },
+        "maxFrameBytes": { "type": "integer", "minimum": 1 },
+        "maxReassembledFrameBytes": { "type": "integer", "minimum": 1 },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "protocolNegotiation",
+            "chunkedFrames",
+            "promptTerminal",
+            "deterministicDisconnectCleanup"
+          ],
+          "properties": {
+            "protocolNegotiation": { "const": true },
+            "chunkedFrames": { "const": true },
+            "promptTerminal": { "const": true },
+            "deterministicDisconnectCleanup": { "const": true }
+          }
+        }
+      }
+    },
+    "promptEnd": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "promptId", "sessionId", "outcome"],
+      "properties": {
+        "type": { "const": "prompt_end" },
+        "promptId": { "type": "string", "minLength": 1 },
+        "sessionId": { "type": "string", "minLength": 1 },
+        "sessionFile": { "type": "string", "minLength": 1 },
+        "outcome": { "enum": ["completed", "aborted", "failed"] }
+      }
+    }
+  }
+}
