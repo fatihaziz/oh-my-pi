@@ -18,7 +18,8 @@ Single source of truth
       P10 git concurrency limiter        DEFERRED at 18.1.4 rebase: upstream
                                          removed utils/git.ts (VCS moved to
                                          @oh-my-pi/pi-natives/vcs); re-home
-                                         pending, upstream #9936 open
+                                         pending; upstream PR #9936 closed
+                                         unmerged by owner 2026-09-03
 
     Retired: P3 (thinking label "max") — upstream-native since 17.3.x.
     Retired: P5 (fresh-session vibe autostart) — removed 2026-08-20 by user
