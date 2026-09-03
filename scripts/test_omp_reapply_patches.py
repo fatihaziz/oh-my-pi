@@ -32,8 +32,12 @@ def make_diff(path: str, old: str, new: str) -> str:
 
 
 SRC_PATH = "packages/coding-agent/src/thinking.ts"
+AI_SRC_PATH = "packages/ai/src/providers/failure.ts"
 TEST_PATH = "packages/coding-agent/test/thinking.test.ts"
 CHANGELOG_PATH = "packages/coding-agent/CHANGELOG.md"
+MULTI_PATCH = make_diff(SRC_PATH, "const a = 1;", "const a = 2;") + make_diff(
+    AI_SRC_PATH, "const b = 1;", "const b = 2;"
+)
 MIXED_PATCH = (
     make_diff(CHANGELOG_PATH, "old changelog", "new changelog")
     + make_diff(SRC_PATH, "const a = 1;", "const a = 2;")
@@ -54,7 +58,17 @@ class FilterPatchTests(unittest.TestCase):
 
     def test_patched_source_paths_are_package_relative(self):
         filtered = ENGINE.filter_patch_for_package(MIXED_PATCH)
-        self.assertEqual(["src/thinking.ts"], ENGINE.patched_source_paths(filtered))
+        self.assertEqual({"pi-coding-agent": ["src/thinking.ts"]}, ENGINE.patched_source_paths(filtered))
+
+    def test_multi_package_paths_split_per_installed_package(self):
+        filtered = ENGINE.filter_patch_for_package(MULTI_PATCH)
+        self.assertEqual(
+            {"pi-coding-agent": ["src/thinking.ts"], "pi-ai": ["src/providers/failure.ts"]},
+            ENGINE.patched_source_paths(filtered),
+        )
+        grouped = ENGINE.sections_by_package(filtered)
+        self.assertEqual({"pi-coding-agent", "pi-ai"}, set(grouped))
+        self.assertIn("b/packages/ai/src/providers/failure.ts", grouped["pi-ai"])
 
 
 @unittest.skipIf(subprocess.run(["git", "--version"], capture_output=True).returncode != 0, "git unavailable")
@@ -62,8 +76,12 @@ class ClassifySourceStateTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        (self.root / "src").mkdir()
-        self.target = self.root / "src" / "thinking.ts"
+        self.package = self.root / "node_modules" / "@oh-my-pi" / "pi-coding-agent"
+        (self.package / "src").mkdir(parents=True)
+        self.cli = self.package / "dist" / "cli.js"
+        self.cli.parent.mkdir(parents=True, exist_ok=True)
+        self.cli.write_text("bundle-bytes", encoding="utf-8")
+        self.target = self.package / "src" / "thinking.ts"
         self.patch = ENGINE.filter_patch_for_package(make_diff(SRC_PATH, "const a = 1;", "const a = 2;"))
 
     def tearDown(self):
@@ -71,17 +89,17 @@ class ClassifySourceStateTests(unittest.TestCase):
 
     def test_pristine_when_forward_check_passes(self):
         self.target.write_text("const a = 1;\n", encoding="utf-8")
-        state, detail, strays = ENGINE.classify_source_state(self.root, self.patch)
-        self.assertEqual(("pristine", "", []), (state, detail, strays))
+        state, detail, strays = ENGINE.classify_source_state(self.cli, self.patch)
+        self.assertEqual(("pristine", "", {}), (state, detail, strays))
 
     def test_patched_when_reverse_check_passes(self):
         self.target.write_text("const a = 2;\n", encoding="utf-8")
-        state, _, strays = ENGINE.classify_source_state(self.root, self.patch)
-        self.assertEqual(("patched", []), (state, strays))
+        state, _, strays = ENGINE.classify_source_state(self.cli, self.patch)
+        self.assertEqual(("patched", {}), (state, strays))
 
     def test_conflict_when_source_diverged(self):
         self.target.write_text("const a = 999;\n", encoding="utf-8")
-        state, detail, _ = ENGINE.classify_source_state(self.root, self.patch)
+        state, detail, _ = ENGINE.classify_source_state(self.cli, self.patch)
         self.assertEqual("conflict", state)
         self.assertTrue(detail)
 
@@ -99,14 +117,32 @@ class ClassifySourceStateTests(unittest.TestCase):
             "@@ -0,0 +1 @@\n"
             "+export const fresh = true;\n"
         )
-        (self.root / "src" / "new-file.ts").write_text("stale bytes\n", encoding="utf-8")
+        (self.package / "src" / "new-file.ts").write_text("stale bytes\n", encoding="utf-8")
         patch = ENGINE.filter_patch_for_package(
             make_diff(SRC_PATH, "const a = 1;", "const a = 2;") + create_diff
         )
-        state, detail, strays = ENGINE.classify_source_state(self.root, patch)
-        self.assertEqual(("pristine", "", ["src/new-file.ts"]), (state, detail, strays))
+        state, detail, strays = ENGINE.classify_source_state(self.cli, patch)
+        self.assertEqual(("pristine", "", {"pi-coding-agent": ["src/new-file.ts"]}), (state, detail, strays))
         # The probe never deletes; only the rebuild transaction does.
-        self.assertTrue((self.root / "src" / "new-file.ts").exists())
+        self.assertTrue((self.package / "src" / "new-file.ts").exists())
+
+    def test_multi_package_pristine_when_both_forward_checks_pass(self):
+        ai_package = self.root / "node_modules" / "@oh-my-pi" / "pi-ai" / "src" / "providers"
+        ai_package.mkdir(parents=True, exist_ok=True)
+        (ai_package / "failure.ts").write_text("const b = 1;\n", encoding="utf-8")
+        self.target.write_text("const a = 1;\n", encoding="utf-8")
+        filtered = ENGINE.filter_patch_for_package(MULTI_PATCH)
+        state, _, _ = ENGINE.classify_source_state(self.cli, filtered)
+        self.assertEqual("pristine", state)
+
+    def test_mixed_package_states_conflict(self):
+        ai_package = self.root / "node_modules" / "@oh-my-pi" / "pi-ai" / "src" / "providers"
+        ai_package.mkdir(parents=True, exist_ok=True)
+        (ai_package / "failure.ts").write_text("const b = 2;\n", encoding="utf-8")
+        self.target.write_text("const a = 1;\n", encoding="utf-8")
+        filtered = ENGINE.filter_patch_for_package(MULTI_PATCH)
+        state, _, _ = ENGINE.classify_source_state(self.cli, filtered)
+        self.assertEqual("conflict", state)
 
 
 class MarkerTests(unittest.TestCase):
@@ -115,6 +151,9 @@ class MarkerTests(unittest.TestCase):
         'if(p.endsWith(".json"))return"json";'
         "ask call per reply, one to three questions in that call\\n"
         "- Ask only what recon cannot answer."
+        'omp-editor-x windowsHide:process.platform==="win32";'
+        'reject("without opening the file");omp-fork:P11-openrouter-usage'
+        'let statusText=response.statusText.trim();'
     )
 
     def test_all_markers_present_on_patched_bundle(self):
@@ -125,7 +164,7 @@ class MarkerTests(unittest.TestCase):
         results = ENGINE.evaluate_markers("pristine upstream bundle text")
         self.assertFalse(any(r["present"] for r in results))
         self.assertEqual(
-            ["S1", "P1", "P6", "P7"],
+            ["S1", "P1", "P6", "P7", "P8", "P9", "P11", "P12"],
             [r["marker"]["id"] for r in results],
         )
 
@@ -186,11 +225,12 @@ class UnifiedPatchFileTests(unittest.TestCase):
     def test_patch_file_targets_package_sources(self):
         patch_text = ENGINE.UNIFIED_PATCH.read_text(encoding="utf-8")
         filtered = ENGINE.filter_patch_for_package(patch_text)
-        self.assertTrue(filtered, "unified patch has no packages/coding-agent/src/ sections")
+        self.assertTrue(filtered, "unified patch has no shippable packages/*/src/ sections")
         paths = ENGINE.patched_source_paths(filtered)
-        self.assertIn("src/thinking.ts", paths)
-        self.assertIn("src/prompts/goals/guided-goal-interview.md", paths)
-        self.assertTrue(all(p.startswith("src/") for p in paths))
+        self.assertIn("src/thinking.ts", paths["pi-coding-agent"])
+        self.assertIn("src/prompts/goals/guided-goal-interview.md", paths["pi-coding-agent"])
+        for rels in paths.values():
+            self.assertTrue(all(p.startswith("src/") for p in rels))
 
 
 if __name__ == "__main__":

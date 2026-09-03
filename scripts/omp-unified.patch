@@ -1,8 +1,182 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index b5723f10f3..736a30b381 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -30,6 +30,27 @@ Unless user tells you exactly what to write:
+ - **Never comment on GitHub** (issues, PRs, discussions).
+ - **Never create issues on GitHub**.
+ 
++## Fatih Fork Patch Registry
++
++This checkout carries ONE unified source-level patch for behavior not yet in upstream. The single source of truth is `scripts/omp-unified.patch` (a `git diff v<base>..unified-patch`), driven by `scripts/omp-reapply-patches.py`: the engine applies the patch to the installed Bun-managed package source, embeds the local stats client payload, rebuilds `dist/cli.js` transactionally, and verifies the bundle markers. External sync/config repositories MAY invoke that script but MUST NOT copy its patch logic. Patch base: upstream release `18.0.3` (`UNIFIED_BASE_VERSION` in the engine).
++
++Behaviors carried by the unified patch (marker IDs, verification-only):
++
++| ID | Behavior | Origin | Upstream plan |
++|---|---|---|---|
++| S1 | `/switch` and Alt+P show and apply session-only thinking effort | upstream PR [#8029](https://github.com/can1357/oh-my-pi/pull/8029), open | retire when merged |
++| P1 | Legacy plugin loader accepts JSON, TOML, and text assets (`legacy-pi-compat.ts:getLoader`) | local only; no PR | keep |
++| P6 | `/guided-goal` interview uses the ask tool | upstream PR [#8187](https://github.com/can1357/oh-my-pi/pull/8187), open | retire when merged |
++| P7 | `/guided-goal` performs recon and asks only unresolved questions | fork PR [fatihaziz/oh-my-pi#1](https://github.com/fatihaziz/oh-my-pi/pull/1) | never upstream |
++| P8 | Windows external editor hides the `cmd.exe` shell window (`external-editor.ts:openInEditor`) | local only; user-reported | keep until upstream sets `Bun.spawn` `windowsHide` |
++| P9 | External editor rejects a launcher that exits 0 without ever opening the file, instead of silently keeping the unchanged draft (`external-editor.ts:openInEditor`) | local only; upstreamable | offer upstream; drop when upstream validates the launch |
++
++Retired: P3 (`max` thinking label) — upstream-native since 17.3.x. P5 (fresh-session vibe autostart) — retired by user decision on 2026-08-20; fresh sessions start in normal mode and vibe is `/vibe` only. P10 (git concurrency limiter) — retired by owner decision on 2026-09-03: upstream 18.0.9 removed `utils/git.ts` (VCS moved in-process to `@oh-my-pi/pi-natives/vcs` via gix/jj-lib), leaving the TS FIFO limiter without an anchor; upstream [#9936](https://github.com/can1357/oh-my-pi/pull/9936) was closed unmerged by the owner the same day. If concurrent-launch capping is needed again, implement it as a tokio semaphore inside the `pi-vcs` crate.
++
++The merge worktree `tmp/upstream-unified-18.1.4` (branch `unified-patch-18.1.4`, base `v18.1.4`) is where upstream releases and the PR branches get merged and conflicts resolved; the patch file is regenerated from it. The exact regeneration procedure lives in the engine's module docstring. On a new upstream release: regenerate the patch there, bump `UNIFIED_BASE_VERSION`, bump `ompInstall.version` in the vault's `env.yml`, then run the vault sync (`uv run scripts/sync-to-global.py --only omp-local,omp-cli-patches --force`).
++
++After every Bun-managed OMP update, run `uv run scripts/omp-reapply-patches.py`; then `--dry-run` must report every marker `[present]`. `[conflict]` means STOP: follow the printed `source:`/`resolve:` guidance (usually regenerate the unified patch from a fresh merge worktree), update the registry and `scripts/test_omp_reapply_patches.py`, then retry. Before preparing an upstream PR, remove this local-only section plus `scripts/omp-reapply-patches.py`, `scripts/omp-unified.patch`, and `scripts/test_omp_reapply_patches.py` from that PR branch unless the PR explicitly upstreams one named behavior.
++
+ ## Code Quality
+ 
+ - No `any` unless absolutely necessary.
+@@ -250,46 +271,13 @@ For the bash tool specifically:
+ 
+ - NEVER commit unless asked.
+ - Never use `tsc`/`npx tsc` — always `bun check`.
+-- Never run `cargo test` directly for Rust tests — use `bun run test:rs`. It runs `cargo nextest run` (config: `.config/nextest.toml`) followed by a `cargo test --doc` pass, because nextest does not execute doctests. The doctest pass currently executes nothing (pi-natives is a `cdylib`, which rustdoc skips; pi-builtins' examples are `ignore`d vendored uutils docs) and exists so the first runnable doctest added to a lib crate is actually run.
+ - Merge commits (maintainer merges of PRs) follow: `Merge PR #<number>: <conventional PR subject> (@<author>)` — e.g. `Merge PR #6386: feat(catalog): add native Meta Model API provider (@eggpeat)`.
+-## Rust Build Profiles
+-
+-Profiles live in the root `Cargo.toml`; `.cargo/config.toml` carries the settings Cargo.toml cannot express. Both are committed, so no local `~/.cargo/config.toml` is required.
+-
+-| Profile | Use |
+-| --- | --- |
+-| `dev` | Default. Line tables for our crates, no debuginfo for deps, deps at `opt-level = 2`. |
+-| `release` | Shipping build: fat LTO, 1 codegen unit, stripped. |
+-| `local` | Fast local release iteration: thin LTO, 16 codegen units, incremental. |
+-| `profiling` | `release` codegen with symbols kept, for `perf`/`samply`/Instruments. |
+-| `ci` | Thin LTO, no debuginfo, stripped. |
+-
+-**Never set `split-debuginfo = "off"` on a profile that has debuginfo.** On Mach-O the linker never merges DWARF into the executable — it writes a debug map (`N_OSO`) pointing at the `.o` files, and `"unpacked"` is what keeps those files. With `"off"` every backtrace frame in our own crates silently loses `file:line`; the `panicked at foo.rs:3` header still prints (that is `#[track_caller]`, not debuginfo), which makes the loss easy to miss. `ci` may use `"off"` only because it sets `debug = false`.
+-
+-`embed-metadata = false` (in `.cargo/config.toml`) keeps crate metadata in `.rmeta` instead of duplicating it into every rlib — measured 196 MB → 130 MB on a reqwest-sized graph at identical build times. Its accepted spelling is toolchain-coupled; keep it in sync with `rust-toolchain.toml`.
+-
+-Rejected, with measurements, so nobody re-litigates them: **sccache** (cannot cache incremental, bin, or proc-macro crates — measured slower than not using it), **mold** (ELF-only; no Mach-O support), and **`panic = "abort"` on `dev`** (Cargo ignores `panic` for the test profile, so the whole dep graph builds twice — 131 MB → 214 MB).
+ 
+ ## Testing Guidance
+ 
+ Test the contract the system exposes — not the easiest internal detail to assert.
+ 
+ - Every new test must defend one **concrete, externally observable contract**: behavior, output shape, state transition, error mapping, or a regression-prone parsing boundary. If you cannot name the contract, do not add the test.
+-
+-### Good vs. bad test filter
+-
+-- **Name the failure mode.** Every test MUST state what a consumer observes if it regresses. Cannot name one? NEVER add it.
+-- **Good: transformation.** One fixture MAY prove parse/render/normalize/encode/resolve behavior when output is computed, not echoed.
+-- **Good: branch or boundary.** Distinct inputs, empty values, malformed input, version/provider routing, and state transitions MUST prove distinct outcomes.
+-- **Good: external contract.** Exact bytes/shape MAY be asserted when a provider, parser, protocol, or persisted consumer reads them.
+-- **Good: precedence or negative contract.** Keep explicit `false`/override-wins assertions and required absence only when they prevent a documented leak, downgrade, 400, or incompatible wire field.
+-- **Good: regression.** A repro MUST trigger the prior real failure path and assert the corrected observable result.
+-- **Bad: static echo.** NEVER test a constructor/builder merely copied a fixture or baked constant into an in-memory config/metadata field.
+-- **Bad: success passthrough.** NEVER assert `fn(x) === x` when `x` was already supplied/declared valid; assert a transform, rejection, or downstream effect instead.
+-- **Bad: wording/defaults.** NEVER assert prompt/UI boilerplate, a default literal, object existence, non-empty output, or length growth without a consumer contract.
+-- **Bad: duplicate rows.** Parameterized/loop rows MUST each cover a distinct branch, provider/model path, or consumer contract; delete same-path duplicates.
+-- **Metadata exception.** Exact metadata, identity, ordering, or `undefined` MAY remain only when a downstream consumer depends on it and the test establishes branch, precedence, negative-contract, wire, or regression evidence.
+-- **Termination exception.** For cyclic/large inputs, assert a bounded output, surfaced error, or state change; bare `not.toThrow()` is insufficient.
+ - No placeholder tests, tautologies, or "the code ran" assertions (`expect(true).toBe(true)`, bare `not.toThrow()`, non-empty string checks, length-grew checks, "prompt exists" checks without semantic assertion).
+ - Prefer contract-level tests over implementation details. Avoid asserting internal helper wiring, field assignment, singleton identity, incidental ordering, prompt boilerplate, or passthrough option forwarding unless another component depends on that exact detail.
+ - Don't duplicate coverage across abstraction levels. If an integration test already proves the behavior, drop the narrower unit test that restates it through mocks.
+@@ -319,7 +307,6 @@ Location: `packages/*/CHANGELOG.md` (per package).
+ **Rules:**
+ 
+ - New entries always go under `## [Unreleased]`.
+-- Entries are one line, brief, and user-facing: lead with what the user will see or can now do. Root-cause narration and implementation detail belong in the commit/PR, not the changelog.
+ - Never modify already-released sections (e.g., `## [0.12.2]`) — they are immutable.
+ - Don't flag changelog section order or formatting in reviews or PRs — `bun run release` runs `fix-changelogs` which normalizes everything automatically.
+ 
+diff --git a/packages/ai/src/providers/openai-codex/response-handler.ts b/packages/ai/src/providers/openai-codex/response-handler.ts
+index 3e5fbb8bed..d486a25957 100644
+--- a/packages/ai/src/providers/openai-codex/response-handler.ts
++++ b/packages/ai/src/providers/openai-codex/response-handler.ts
+@@ -80,9 +80,16 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
+ 		}
+ 
+ 		const errMessage = (err as { message?: string }).message;
+-		message = errMessage || friendlyMessage || message;
++		if (errMessage) {
++			message = errMessage;
++		} else if (friendlyMessage) {
++			message = friendlyMessage;
++		} else {
++			message = describeCodexHttpFailure(response, message);
++		}
+ 	} catch {
+-		// raw body not JSON
++		// raw body not JSON — no structured error to extract
++		message = describeCodexHttpFailure(response, message);
+ 	}
+ 
+ 	return {
+@@ -95,6 +102,29 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
+ 	};
+ }
+ 
++/**
++ * Builds a self-locating message for failures whose body carries no structured
++ * API error (plain-text or HTML bodies from edge/backend outages, empty bodies).
++ * A bare "Not Found" tells the user nothing; the status, endpoint, and body
++ * snippet make provider-side incidents diagnosable from the banner alone.
++ */
++function describeCodexHttpFailure(response: Response, bodyText: string): string {
++	let location = "";
++	try {
++		const url = new URL(response.url);
++		if (url.protocol === "https:" || url.protocol === "http:") location = `${url.host}${url.pathname}`;
++	} catch {
++		// no usable URL on this response
++	}
++	const statusText = response.statusText.trim();
++	let snippet = bodyText.replace(/\s+/g, " ").trim();
++	if (snippet.length > 200) snippet = snippet.slice(0, 200);
++	if (snippet === statusText) snippet = "";
++	const at = location ? ` at ${location}` : "";
++	const body = snippet ? `: ${snippet}` : "";
++	return `HTTP ${response.status}${statusText ? ` ${statusText}` : ""}${at}${body}`;
++}
++
+ function toInt(v: string | null): number | undefined {
+ 	if (v == null) return undefined;
+ 	const n = parseInt(v, 10);
+diff --git a/packages/ai/test/openai-codex.test.ts b/packages/ai/test/openai-codex.test.ts
+index d174d70710..ea4d906eae 100644
+--- a/packages/ai/test/openai-codex.test.ts
++++ b/packages/ai/test/openai-codex.test.ts
+@@ -382,4 +382,29 @@ describe("openai-codex error parsing", () => {
+ 		expect(error.headers?.get("retry-after")).toBe("7");
+ 		expect(error.message).toContain("rate limit exceeded");
+ 	});
++	it("plain-text failure body surfaces status, endpoint, and body instead of a bare phrase", async () => {
++		// The 2026-09-03 Codex outage answered every request with a plain-text
++		// "Not Found"; the banner showed only that phrase with no status or URL.
++		const response = new Response("Not Found", {
++			status: 404,
++			statusText: "Not Found",
++		});
++		Object.defineProperty(response, "url", { value: "https://chatgpt.com/backend-api/codex/responses" });
++
++		const info = await parseCodexError(response);
++		const error = new CodexApiError(info);
++		expect(error.message).toBe("HTTP 404 Not Found at chatgpt.com/backend-api/codex/responses");
++		expect(error.status).toBe(404);
++	});
++
++	it("structured API error messages pass through untouched", async () => {
++		const response = new Response(JSON.stringify({ error: { code: "server_error", message: "upstream exploded" } }), {
++			status: 500,
++			statusText: "Internal Server Error",
++		});
++
++		const info = await parseCodexError(response);
++		expect(info.message).toBe("upstream exploded");
++		expect(info.status).toBe(500);
++	});
+ });
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index d358159fd0..87273f072f 100644
+index 3d50916f19..474324bc41 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
-@@ -633,6 +633,13 @@
+@@ -1082,6 +1082,13 @@
  - Removed the `resolveAgentModelSource` model-resolver export, whose only use was being fed to `resolveExplicitModelRole`. Replaced by `resolveAgentModelSelection`, which returns the expanded `patterns` and the pre-expansion `role` together so a spawn path cannot derive one without the other ([#7910](https://github.com/can1357/oh-my-pi/pull/7910) by [@enieuwy](https://github.com/enieuwy)).
  - A run is now attributed to the model that actually produced its output, not whichever model the session was last pointed at. A retry fallback that errored on its first request — an exhausted quota, a hard provider error — was credited with the whole run in the Agent Hub row and the settled task result, even when the previous model did every turn. Sessions expose the serving model directly, holding the last model that produced output while a candidate is armed but unproven, and transcript-derived history stops at the newest turn that produced output.
  
@@ -16,7 +190,7 @@ index d358159fd0..87273f072f 100644
  ## [17.2.12] - 2026-08-08
  
  ### Fixed
-@@ -779,6 +786,10 @@
+@@ -1228,6 +1235,10 @@
  - Fixed self-update misclassifying glibc Linux hosts with an installed musl loader as musl hosts, which could download an unusable musl binary instead of the glibc release.
  - Fixed a crash where opening the Agent Hub after a resume and moving the selection triggered an unbounded `ExtensionExitError` unhandled-rejection storm and exit 129. The postmortem module bound the native hard-exit at first evaluation; when the bundler deferred that evaluation into a `withHostGuard` window it froze the guard's throwing replacement, poisoning every later signal/fatal exit. The native exit is now resolved per call, and the guard stamps its replacement with the native primitive it shadows so mid-guard signals still exit ([#7393](https://github.com/can1357/oh-my-pi/issues/7393)).
  
@@ -27,11 +201,178 @@ index d358159fd0..87273f072f 100644
  ## [17.2.8] - 2026-08-04
  
  ### Changed
+diff --git a/packages/coding-agent/src/cli/usage-cli.ts b/packages/coding-agent/src/cli/usage-cli.ts
+index 99f6b044a9..79c90f3cb5 100644
+--- a/packages/coding-agent/src/cli/usage-cli.ts
++++ b/packages/coding-agent/src/cli/usage-cli.ts
+@@ -38,6 +38,128 @@ export interface UsageCommandArgs {
+ 	days?: number;
+ }
+ 
++const OPENROUTER_KEY_USAGE_URL = "https://openrouter.ai/api/v1/key";
++const OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits";
++const OPENROUTER_USAGE_MARKER = "omp-fork:P11-openrouter-usage";
++const OPENROUTER_USAGE_TIMEOUT_MS = 10_000;
++
++async function fetchOpenRouterAvailableCredits(
++	apiKey: string,
++	fetchImpl: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
++): Promise<number | undefined> {
++	const response = await fetchImpl(OPENROUTER_CREDITS_URL, {
++		headers: {
++			Accept: "application/json",
++			Authorization: `Bearer ${apiKey}`,
++		},
++		signal: AbortSignal.timeout(OPENROUTER_USAGE_TIMEOUT_MS),
++	});
++	if (!response.ok) return undefined; // credits need a management key; key spend still stands alone
++	const payload: unknown = await response.json();
++	if (!payload || typeof payload !== "object" || !("data" in payload)) return undefined;
++	const data: unknown = payload.data;
++
++	if (!data || typeof data !== "object" || !("total_credits" in data) || !("total_usage" in data)) return undefined;
++	const totalCredits = data.total_credits;
++	const totalUsage = data.total_usage;
++	if (typeof totalCredits !== "number" || !Number.isFinite(totalCredits) || totalCredits < 0) return undefined;
++	if (typeof totalUsage !== "number" || !Number.isFinite(totalUsage) || totalUsage < 0) return undefined;
++	return Math.max(0, totalCredits - totalUsage);
++}
++
++function openRouterAmount(value: unknown, field: string, nullable = false): number | undefined {
++	if ((value === null || value === undefined) && nullable) return undefined;
++	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
++		throw new Error(`OpenRouter ${field} must be a non-negative number${nullable ? " or null" : ""}`);
++	}
++	return value;
++}
++
++export function parseOpenRouterKeyUsage(payload: unknown, fetchedAt = Date.now()): UsageReport {
++	if (
++		!payload ||
++		typeof payload !== "object" ||
++		!("data" in payload) ||
++		!payload.data ||
++		typeof payload.data !== "object"
++	) {
++		throw new Error("OpenRouter key usage response is missing data");
++	}
++	const data = payload.data as Record<string, unknown>;
++	const used = openRouterAmount(data.usage, "usage")!;
++	const limit = openRouterAmount(data.limit, "limit", true);
++	const reportedRemaining = openRouterAmount(data.limit_remaining, "limit_remaining", true);
++	const remaining = limit === undefined ? undefined : (reportedRemaining ?? Math.max(0, limit - used));
++	const reset =
++		typeof data.limit_reset === "string" && data.limit_reset.trim()
++			? data.limit_reset.trim().toLowerCase()
++			: undefined;
++	const amount: UsageLimit["amount"] = { used, unit: "usd" };
++	if (limit !== undefined) amount.limit = limit;
++	if (remaining !== undefined) amount.remaining = remaining;
++	const window = reset ? { id: reset, label: reset[0].toUpperCase() + reset.slice(1) } : undefined;
++	return {
++		provider: "openrouter",
++		fetchedAt,
++		limits: [
++			{
++				id: "openrouter:key-spend",
++				label: "API key spend",
++				scope: { provider: "openrouter", windowId: reset },
++				window,
++				amount,
++				notes: limit === undefined ? ["No spending limit configured for this API key."] : undefined,
++			},
++		],
++		notes: [
++			"Spend and limit come from OpenRouter's current API key endpoint.",
++			"Per-model totals are not available from this endpoint.",
++		],
++		metadata: {
++			source: OPENROUTER_USAGE_MARKER,
++			limitReset: reset ?? null,
++			usageDaily: openRouterAmount(data.usage_daily, "usage_daily", true) ?? null,
++			usageWeekly: openRouterAmount(data.usage_weekly, "usage_weekly", true) ?? null,
++			usageMonthly: openRouterAmount(data.usage_monthly, "usage_monthly", true) ?? null,
++		},
++	};
++}
++
++export async function fetchOpenRouterUsageReport(
++	apiKey: string | undefined,
++	fetchImpl: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = fetch,
++	fetchedAt = Date.now(),
++	/** Explicit management key override; credentials stay inside OMP either way. */
++	envManagementKey?: string,
++): Promise<UsageReport | undefined> {
++	if (!apiKey?.trim()) return undefined;
++	const response = await fetchImpl(OPENROUTER_KEY_USAGE_URL, {
++		headers: {
++			Accept: "application/json",
++			Authorization: `Bearer ${apiKey}`,
++		},
++		signal: AbortSignal.timeout(OPENROUTER_USAGE_TIMEOUT_MS),
++	});
++	if (!response.ok) {
++		throw new Error(`OpenRouter key usage request failed with HTTP ${response.status}`);
++	}
++	const report = parseOpenRouterKeyUsage(await response.json(), fetchedAt);
++	// Pay-as-you-go balance rides only when a management key is configured;
++	// the plain /key endpoint never reports account credits.
++	const managementKey = envManagementKey?.trim();
++	if (managementKey) {
++		try {
++			const available = await fetchOpenRouterAvailableCredits(managementKey, fetchImpl);
++			if (available !== undefined && report.metadata) {
++				(report.metadata as Record<string, unknown>).availableUSD = available;
++			}
++		} catch {
++			// Credits are optional enrichment; key spend is already complete.
++		}
++	}
++	return report;
++}
++
+ /** Identity slice of a stored credential, for "every account" coverage. */
+ export interface UsageAccountIdentity {
+ 	provider: string;
+@@ -1101,10 +1223,30 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
+ 			return;
+ 		}
+ 		const modelRegistry = new ModelRegistry(authStorage);
+-		const reports =
+-			(await authStorage.fetchUsageReports({
++		const reports = [
++			...((await authStorage.fetchUsageReports({
+ 				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),
+-			})) ?? [];
++			})) ?? []),
++		];
++		if (
++			(!cmd.provider || cmd.provider.toLowerCase() === "openrouter") &&
++			!reports.some(report => report.provider === "openrouter")
++		) {
++			try {
++				const managementKey =
++					Bun.env.OPENROUTER_MANAGEMENT_KEY?.trim() || (await authStorage.getApiKey("openrouter-management"));
++				const report = await fetchOpenRouterUsageReport(
++					await authStorage.getApiKey("openrouter"),
++					fetch,
++					Date.now(),
++					managementKey,
++				);
++				if (report) reports.push(report);
++			} catch (error) {
++				const message = error instanceof Error ? error.message : String(error);
++				process.stderr.write(chalk.yellow(`OpenRouter usage unavailable: ${sanitizeText(message)}\n`));
++			}
++		}
+ 		// Reports are always fresh (broker-side fetch) but the account list can
+ 		// come from a disk-cached snapshot up to an hour old — revalidate so a
+ 		// just-logged-in (or just-rotated-identity) credential isn't rendered
 diff --git a/packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts b/packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts
-index a3c7cfc186..68efccea95 100644
+index b6d78fc0fc..5e9d7d5fb1 100644
 --- a/packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts
 +++ b/packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts
-@@ -2791,7 +2791,7 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
+@@ -2818,7 +2818,7 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
  	}
  }
  
@@ -40,7 +381,7 @@ index a3c7cfc186..68efccea95 100644
  	if (path.endsWith(".tsx")) {
  		return "tsx";
  	}
-@@ -2801,6 +2801,17 @@ function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {
+@@ -2828,6 +2828,17 @@ function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {
  	if (path.endsWith(".ts") || path.endsWith(".mts") || path.endsWith(".cts")) {
  		return "ts";
  	}
@@ -58,19 +399,42 @@ index a3c7cfc186..68efccea95 100644
  	return "js";
  }
  
+diff --git a/packages/coding-agent/src/modes/components/hook-editor.ts b/packages/coding-agent/src/modes/components/hook-editor.ts
+index ae23947460..e2d622c5f3 100644
+--- a/packages/coding-agent/src/modes/components/hook-editor.ts
++++ b/packages/coding-agent/src/modes/components/hook-editor.ts
+@@ -8,6 +8,7 @@
+  * - Prompt-style (ask): Enter submits, Shift+Enter inserts newline, legacy ask chrome
+  */
+ import { Editor, type Focusable, matchesKey, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
++import { logger } from "@oh-my-pi/pi-utils";
+ import { getEditorTheme, theme } from "../../modes/theme/theme";
+ import {
+ 	matchesAppExternalEditor,
+@@ -203,6 +204,10 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
+ 			if (result !== null) {
+ 				this.#editor.setText(result);
+ 			}
++		} catch (error) {
++			// A launcher that reports success without opening the file throws; keep
++			// the draft and record why instead of letting it reject unhandled.
++			logger.warn("External editor failed", { editorCmd, error: String(error) });
+ 		} finally {
+ 			this.#tui.start();
+ 			this.#tui.requestRender(true);
 diff --git a/packages/coding-agent/src/modes/components/model-picker.ts b/packages/coding-agent/src/modes/components/model-picker.ts
-index 4fc8c38fdb..ab3623f9cf 100644
+index 16c09d9dc6..f050249617 100644
 --- a/packages/coding-agent/src/modes/components/model-picker.ts
 +++ b/packages/coding-agent/src/modes/components/model-picker.ts
-@@ -79,6 +79,7 @@ export class ModelPickerComponent implements Component {
- 	#quickRoleItems: ModelBrowserItem[] = [];
- 	#quickRoles = new Map<string, ResolvedRoleModel>();
- 	#roleMode = false;
+@@ -96,6 +96,7 @@ export class ModelPickerComponent implements Component {
+ 	#taskMatchKeys = new Set<string>();
+ 	#taskModeKeyLabel: string;
+ 	#taskSelector: string | undefined;
 +	#inputLocked = false;
  
  	constructor(
  		tui: TUI,
-@@ -207,7 +208,13 @@ export class ModelPickerComponent implements Component {
+@@ -237,7 +238,13 @@ export class ModelPickerComponent implements Component {
  		}
  	}
  
@@ -208,18 +572,19 @@ index 0000000000..cad76e9d7a
 +	}
 +}
 diff --git a/packages/coding-agent/src/modes/controllers/selector-controller.ts b/packages/coding-agent/src/modes/controllers/selector-controller.ts
-index 592ff331d7..de6033156b 100644
+index c4270513f3..7fde0acde3 100644
 --- a/packages/coding-agent/src/modes/controllers/selector-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/selector-controller.ts
-@@ -1,6 +1,6 @@
- import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+@@ -2,7 +2,7 @@ import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-p
  import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
--import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
-+import { type Model, PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
+ import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
+ import { getDailyActivity } from "@oh-my-pi/omp-stats/db";
+-import { PASTE_CODE_LOGIN_PROVIDERS, type UsageReport } from "@oh-my-pi/pi-ai";
++import { PASTE_CODE_LOGIN_PROVIDERS, type Model, type UsageReport } from "@oh-my-pi/pi-ai";
  import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
  import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
- import type { Component, OverlayHandle, ResizeScrollbackMode } from "@oh-my-pi/pi-tui";
-@@ -67,6 +67,7 @@ import {
+ import * as vcs from "@oh-my-pi/pi-natives/vcs";
+@@ -71,6 +71,7 @@ import {
  	type ConfiguredThinkingLevel,
  	concreteThinkingLevel,
  	parseConfiguredThinkingLevel,
@@ -227,7 +592,7 @@ index 592ff331d7..de6033156b 100644
  } from "../../thinking";
  import {
  	isSearchProviderId,
-@@ -100,6 +101,7 @@ import { renderSegmentTrack } from "../components/segment-track";
+@@ -106,6 +107,7 @@ import { renderSegmentTrack } from "../components/segment-track";
  import { SessionAccountSelectorComponent } from "../components/session-account-selector";
  import { SessionSelectorComponent, type SessionSelectorOptions } from "../components/session-selector";
  import { SettingsSelectorComponent } from "../components/settings-selector";
@@ -235,10 +600,10 @@ index 592ff331d7..de6033156b 100644
  import { ToolExecutionComponent } from "../components/tool-execution";
  import { TranscriptBlock } from "../components/transcript-container";
  import { TreeSelectorComponent } from "../components/tree-selector";
-@@ -736,11 +738,17 @@ export class SelectorController {
- 		const quickRoleOrder = this.ctx.settings.get("cycleOrder");
- 		const quickRoleCycle = this.ctx.session.getRoleModelCycle(quickRoleOrder);
- 		let overlayHandle: OverlayHandle | undefined;
+@@ -825,11 +827,17 @@ export class SelectorController {
+ 		// else the session model (the bundled task agent inherits it by default).
+ 		const taskOverride = this.ctx.settings.get("task.agentModelOverrides").task;
+ 		const taskSelector = (Array.isArray(taskOverride) ? taskOverride[0] : taskOverride) ?? currentSelector;
 +		let pickerHidden = false;
  		let closed = false;
 +		const hidePicker = () => {
@@ -254,7 +619,7 @@ index 592ff331d7..de6033156b 100644
  			this.focusActiveEditorArea();
  			this.ctx.ui.requestRender();
  		};
-@@ -751,10 +759,10 @@ export class SelectorController {
+@@ -840,10 +848,10 @@ export class SelectorController {
  			this.ctx.session.scopedModels,
  			{
  				onPick: async (model, selector, { overContext }) => {
@@ -268,7 +633,7 @@ index 592ff331d7..de6033156b 100644
  						this.ctx.statusLine.invalidate();
  						this.ctx.updateEditorBorderColor();
  						const roleSelectorHint = this.ctx.keybindings.getKeys("app.model.select")[0] ?? "Alt+M";
-@@ -771,19 +779,21 @@ export class SelectorController {
+@@ -860,19 +868,21 @@ export class SelectorController {
  							// compaction keeps the current model — the target still cannot
  							// fit the transcript.
  							done();
@@ -292,7 +657,7 @@ index 592ff331d7..de6033156b 100644
  						this.ctx.showError(error instanceof Error ? error.message : String(error));
  					}
  				},
-@@ -823,6 +833,71 @@ export class SelectorController {
+@@ -925,6 +935,70 @@ export class SelectorController {
  		this.ctx.ui.requestRender();
  	}
  
@@ -317,7 +682,6 @@ index 592ff331d7..de6033156b 100644
 +		}
 +		beforeShow?.();
 +		const { promise, resolve, reject } = Promise.withResolvers<ConfiguredThinkingLevel | undefined>();
-+		let overlayHandle: OverlayHandle | undefined;
 +		let closed = false;
 +		const close = () => {
 +			overlayHandle?.hide();
@@ -350,7 +714,7 @@ index 592ff331d7..de6033156b 100644
 +			level => finish(level),
 +			() => finish(fallback),
 +		);
-+		overlayHandle = this.ctx.ui.showOverlay(strip, {
++		const overlayHandle = this.ctx.ui.showOverlay(strip, {
 +			anchor: "bottom-center",
 +			width: "100%",
 +			maxHeight: "100%",
@@ -365,11 +729,11 @@ index 592ff331d7..de6033156b 100644
  	 * Fullscreen model hub on the alternate screen (the /settings idiom): the
  	 * overlay enables mouse tracking for its lifetime and the transcript stays
 diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
-index 386f965b62..adf13f09a7 100644
+index 574736e209..cae688ac54 100644
 --- a/packages/coding-agent/src/modes/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive-mode.ts
-@@ -718,6 +718,9 @@ export class InteractiveMode implements InteractiveModeContext {
- 	readonly #startupChangelog: StartupChangelogSelection | undefined;
+@@ -729,6 +729,9 @@ export class InteractiveMode implements InteractiveModeContext {
+ 	#headerAfter: readonly Component[] = [];
  	#planModePreviousTools: string[] | undefined;
  	#goalModePreviousTools: string[] | undefined;
 +	#guidedGoalInterviewActive = false;
@@ -378,7 +742,7 @@ index 386f965b62..adf13f09a7 100644
  	#vibeModePreviousTools: string[] | undefined;
  	#vibeModeOwnerScope: VibeOwnerScope | undefined;
  	#vibeScopeSuspendedForSwitch = false;
-@@ -2753,6 +2756,27 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -2871,6 +2874,27 @@ export class InteractiveMode implements InteractiveModeContext {
  			}
  			return;
  		}
@@ -406,7 +770,7 @@ index 386f965b62..adf13f09a7 100644
  		if (event.type === "message_start" && event.message.role === "user" && !event.message.synthetic) {
  			this.#resetGoalContinuationSuppression();
  			return;
-@@ -2772,9 +2796,10 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -2890,9 +2914,10 @@ export class InteractiveMode implements InteractiveModeContext {
  			this.#updateGoalModeStatus();
  			return;
  		}
@@ -418,7 +782,7 @@ index 386f965b62..adf13f09a7 100644
  		if (this.#goalContinuationTurnInFlight) {
  			this.#goalSuppressNextContinuation = !this.#goalTurnHadToolCalls;
  			this.#goalContinuationTurnInFlight = false;
-@@ -3202,6 +3227,51 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -3343,6 +3368,51 @@ export class InteractiveMode implements InteractiveModeContext {
  		}
  	}
  
@@ -470,7 +834,7 @@ index 386f965b62..adf13f09a7 100644
  	async #enterGoalMode(options: { objective?: string; resume?: boolean; silent?: boolean }): Promise<void> {
  		if (this.goalModeEnabled) {
  			return;
-@@ -4028,14 +4098,24 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -4169,14 +4239,24 @@ export class InteractiveMode implements InteractiveModeContext {
  				return false;
  			}
  
@@ -498,7 +862,7 @@ index 386f965b62..adf13f09a7 100644
  			}
  
  			// The interview is a normal conversation: the kickoff rides in as a
-@@ -4045,18 +4125,26 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -4186,18 +4266,26 @@ export class InteractiveMode implements InteractiveModeContext {
  			const kickoff = prompt.render(guidedGoalInterviewPrompt, { initial: rest?.trim() || undefined });
  			const images = input?.images?.length ? input.images : undefined;
  			if (this.session.isStreaming) {
@@ -556,10 +920,10 @@ index f542c3195b..5bdf083a27 100644
  - No implementation plan unless user explicitly asks goal to include planning.
  
 diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
-index c66ab2c937..278b06b3e6 100644
+index b805674367..1cf59abd2b 100644
 --- a/packages/coding-agent/src/session/agent-session.ts
 +++ b/packages/coding-agent/src/session/agent-session.ts
-@@ -6579,6 +6579,14 @@ export class AgentSession {
+@@ -6973,6 +6973,14 @@ export class AgentSession {
  	 *  non-user steer (hidden goal/plan/budget, IRC/extension asides) is dropped, so abort()'s
  	 *  #drainStrandedQueuedMessages can't auto-resume the run the user just interrupted (the drain only
  	 *  fires while agent.hasQueuedMessages()). Plain Alt+Up dequeue preserves those non-user steers. */
@@ -619,6 +983,98 @@ index b96e5d7256..4f1f981f7a 100644
 +		AUTO_THINKING;
 +	return { levels, preselect };
 +}
+diff --git a/packages/coding-agent/src/utils/external-editor.ts b/packages/coding-agent/src/utils/external-editor.ts
+index 6e1d737aba..74b8200f4d 100644
+--- a/packages/coding-agent/src/utils/external-editor.ts
++++ b/packages/coding-agent/src/utils/external-editor.ts
+@@ -6,6 +6,16 @@ import * as os from "node:os";
+ import * as path from "node:path";
+ import { $env, $which, Snowflake } from "@oh-my-pi/pi-utils";
+ 
++/**
++ * Shortest run that can still be a real editing session. A launcher that
++ * returns faster than this AND leaves the file byte-identical never opened an
++ * editor: it is either non-blocking (missing `--wait`) or a broken wrapper that
++ * reports success while starting nothing. Both cases used to look like a dead
++ * keybinding, because exit 0 made the caller keep the unchanged draft in
++ * silence and the temp file was removed on the way out.
++ */
++const INSTANT_EXIT_MS = 1500;
++
+ /**
+  * Returns the user's preferred editor command, or a platform default.
+  *
+@@ -54,7 +64,9 @@ export function resolveEditorSpawnCommand(
+ 
+ /**
+  * Opens `content` in the user's external editor and returns the edited text.
+- * Returns `null` if the editor exits with a non-zero code.
++ * Returns `null` if the editor exits with a non-zero code, and throws when the
++ * launcher reports success without ever opening the file (see INSTANT_EXIT_MS)
++ * so the caller can surface the misconfiguration instead of doing nothing.
+  *
+  * The caller is responsible for stopping/starting the TUI around this call.
+  */
+@@ -72,15 +84,23 @@ export async function openInEditor(
+ 		const spawnCommand = resolveEditorSpawnCommand(editorCmd, tmpFile);
+ 		// Inherit the real pane pty so terminal editors (including emacsclient,
+ 		// which resolves the device via ttyname) render into the visible pane.
++		const startedAt = Bun.nanoseconds();
+ 		const child = Bun.spawn(spawnCommand.cmd, {
+ 			stdin: "inherit",
+ 			stdout: "inherit",
+ 			stderr: "inherit",
+ 			windowsVerbatimArguments: spawnCommand.windowsVerbatimArguments,
++			windowsHide: process.platform === "win32",
+ 		});
+ 		const exitCode = await child.exited;
++		const elapsedMs = (Bun.nanoseconds() - startedAt) / 1e6;
+ 		if (exitCode === 0) {
+ 			const text = await Bun.file(tmpFile).text();
++			if (text === content && elapsedMs < INSTANT_EXIT_MS) {
++				throw new Error(
++					`\`${editorCmd}\` returned after ${Math.round(elapsedMs)}ms without opening the file. Configure a blocking editor (for example \`code --wait\`) and check that it resolves to a working install.`,
++				);
++			}
+ 			if (options?.trimTrailingNewline === false) {
+ 				return text;
+ 			}
+diff --git a/packages/coding-agent/test/external-editor.test.ts b/packages/coding-agent/test/external-editor.test.ts
+index ca2664a61e..9442a1b4cf 100644
+--- a/packages/coding-agent/test/external-editor.test.ts
++++ b/packages/coding-agent/test/external-editor.test.ts
+@@ -66,7 +66,7 @@ describe("getEditorCommand", () => {
+ });
+ 
+ describe("openInEditor", () => {
+-	it("always inherits the pane stdio", async () => {
++	it("inherits pane stdio and hides the Windows shell", async () => {
+ 		const spawn = spyOn(Bun, "spawn").mockReturnValue({
+ 			exited: Promise.resolve(1),
+ 		} as never);
+@@ -81,6 +81,7 @@ describe("openInEditor", () => {
+ 				stdin: "inherit",
+ 				stdout: "inherit",
+ 				stderr: "inherit",
++				windowsHide: process.platform === "win32",
+ 			});
+ 		} finally {
+ 			spawn.mockRestore();
+@@ -117,4 +118,14 @@ describe("openInEditor", () => {
+ 			await tempDir.remove();
+ 		}
+ 	});
++
++	it("rejects a launcher that reports success without opening the file", async () => {
++		// `rem`/`true` accept the file argument, exit 0 immediately and touch
++		// nothing — the signature of a non-blocking editor or a corrupt install
++		// whose CLI wrapper lies. Silent success there is what makes the
++		// external-editor keybinding look completely dead.
++		const instantNoop = process.platform === "win32" ? "rem" : "true";
++
++		await expect(openInEditor(instantNoop, "original draft")).rejects.toThrow(/without opening the file/);
++	});
+ });
 diff --git a/packages/coding-agent/test/goals/guided-goal.test.ts b/packages/coding-agent/test/goals/guided-goal.test.ts
 index 9b73e76b57..e9f7a6f07b 100644
 --- a/packages/coding-agent/test/goals/guided-goal.test.ts
@@ -980,7 +1436,7 @@ index 0000000000..efad6c91c7
 +	});
 +});
 diff --git a/packages/coding-agent/test/slash-commands/switch.test.ts b/packages/coding-agent/test/slash-commands/switch.test.ts
-index 9ea8f53b2f..9412c1a5b5 100644
+index 9ea8f53b2f..8da2f647aa 100644
 --- a/packages/coding-agent/test/slash-commands/switch.test.ts
 +++ b/packages/coding-agent/test/slash-commands/switch.test.ts
 @@ -1,6 +1,17 @@
@@ -1041,7 +1497,7 @@ index 9ea8f53b2f..9412c1a5b5 100644
 +		editor,
 +		editorContainer: { children: [activeDialog] },
 +		settings: Settings.isolated({}),
-+		keybindings: { getKeys: () => [] },
++		keybindings: { getKeys: () => [], getDisplayString: () => "alt+p" },
 +		session: {
 +			model,
 +			scopedModels: [{ model }],
@@ -1173,3 +1629,2015 @@ index 9ea8f53b2f..9412c1a5b5 100644
 +		expect(harness.setModelTemporary).toHaveBeenCalledWith(model, Effort.High);
 +	});
 +});
+diff --git a/packages/coding-agent/test/usage-cli.test.ts b/packages/coding-agent/test/usage-cli.test.ts
+index 25d065c2c5..4bb8f13b37 100644
+--- a/packages/coding-agent/test/usage-cli.test.ts
++++ b/packages/coding-agent/test/usage-cli.test.ts
+@@ -5,6 +5,8 @@ import {
+ 	buildRedactionMap,
+ 	collectUnreportedAccounts,
+ 	computeProviderWindowStats,
++	fetchOpenRouterUsageReport,
++	parseOpenRouterKeyUsage,
+ 	formatUsageBreakdown,
+ 	formatUsageHistory,
+ 	type UsageAccountIdentity,
+@@ -299,6 +301,101 @@ describe("collectUnreportedAccounts", () => {
+ 	});
+ });
+ 
++describe("OpenRouter current-key usage", () => {
++	it("normalizes spend with no configured limit", () => {
++		const report = parseOpenRouterKeyUsage(
++			{
++				data: {
++					usage: 12.345,
++					limit: null,
++					limit_remaining: null,
++					limit_reset: null,
++					usage_daily: 1.25,
++				},
++			},
++			123,
++		);
++		expect(report).toMatchObject({
++			provider: "openrouter",
++			fetchedAt: 123,
++			limits: [
++				{
++					id: "openrouter:key-spend",
++					amount: { used: 12.345, unit: "usd" },
++					notes: ["No spending limit configured for this API key."],
++				},
++			],
++			metadata: {
++				source: "omp-fork:P11-openrouter-usage",
++				limitReset: null,
++				usageDaily: 1.25,
++				usageWeekly: null,
++				usageMonthly: null,
++			},
++		});
++		expect(report.limits[0].amount.limit).toBeUndefined();
++		expect(report.limits[0].amount.remaining).toBeUndefined();
++	});
++
++	it("normalizes configured USD limit and reset window", () => {
++		const report = parseOpenRouterKeyUsage(
++			{
++				data: {
++					usage: 25.5,
++					limit: 100,
++					limit_remaining: 74.5,
++					limit_reset: "monthly",
++				},
++			},
++			456,
++		);
++		expect(report.limits[0]).toMatchObject({
++			window: { id: "monthly", label: "Monthly" },
++			amount: { used: 25.5, limit: 100, remaining: 74.5, unit: "usd" },
++		});
++	});
++
++	it("uses the resolved key only as an authorization header", async () => {
++		let authorization = "";
++		const report = await fetchOpenRouterUsageReport(
++			"secret-openrouter-key",
++			async (input, init) => {
++				expect(String(input)).toBe("https://openrouter.ai/api/v1/key");
++				authorization = new Headers(init?.headers).get("authorization") ?? "";
++				return new Response(
++					JSON.stringify({
++						data: { usage: 3.5, limit: 10, limit_remaining: 6.5, limit_reset: "monthly" },
++					}),
++					{ status: 200, headers: { "content-type": "application/json" } },
++				);
++			},
++			789,
++		);
++		expect(authorization).toBe("Bearer secret-openrouter-key");
++		expect(report?.limits[0].amount.used).toBe(3.5);
++		expect(JSON.stringify(report)).not.toContain("secret-openrouter-key");
++	});
++	it("adds the available credit balance with a management key", async () => {
++		const urls: string[] = [];
++		const report = await fetchOpenRouterUsageReport(
++			"usage-key",
++			async input => {
++				const url = String(input);
++				urls.push(url);
++				const data = url.endsWith("/credits")
++					? { data: { total_credits: 20, total_usage: 2.47 } }
++					: { data: { usage: 3.5, limit: 10, limit_remaining: 6.5, limit_reset: "monthly" } };
++				return new Response(JSON.stringify(data), { status: 200 });
++			},
++			789,
++			"management-key",
++		);
++		expect(urls).toEqual(["https://openrouter.ai/api/v1/key", "https://openrouter.ai/api/v1/credits"]);
++		expect(report?.metadata?.availableUSD).toBe(17.53);
++		expect(JSON.stringify(report)).not.toContain("management-key");
++	});
++});
++
+ describe("formatUsageBreakdown", () => {
+ 	const reports = [
+ 		makeReport("anthropic", "dummy.primary@example.test", [
+diff --git a/scripts/omp-reapply-patches.py b/scripts/omp-reapply-patches.py
+new file mode 100644
+index 0000000000..39166ecdad
+--- /dev/null
++++ b/scripts/omp-reapply-patches.py
+@@ -0,0 +1,507 @@
++#!/usr/bin/env python3
++"""Re-apply the local OMP patch bundle after `bun update -g` wipes it.
++
++The installed Bun-managed package (`@oh-my-pi/pi-coding-agent`) ships its
++TypeScript source next to `dist/cli.js`. This engine applies ONE unified
++source-level patch to that source and rebuilds the bundle, instead of the
++old per-patch minified-anchor rewrites.
++
++Single source of truth
++    scripts/omp-unified.patch — `git diff v{BASE}..unified-patch` from the
++    merge worktree (see Regeneration below). Everything local rides in it:
++
++      S1  session switch thinking effort   upstream PR #8029
++      P1  getLoader json/toml/text assets  local only; no PR
++      P6  guided-goal ask-tool interview   upstream PR #8187
++      P7  guided-goal recon-first          fork PR fatihaziz/oh-my-pi#1
++      P9  guard lying editor launcher    local only; upstreamable
++    Retired: P3 (thinking label "max") — upstream-native since 17.3.x.
++    Retired: P5 (fresh-session vibe autostart) — removed 2026-08-20 by user
++    decision: fresh sessions must start in normal mode; vibe is /vibe only.
++    Retired: P10 (git concurrency limiter) — retired 2026-09-03 by owner
++    decision: upstream 18.0.9 removed utils/git.ts (VCS moved in-process to
++    @oh-my-pi/pi-natives/vcs via gix/jj-lib), so the TS FIFO limiter has no
++    anchor; upstream PR #9936 was closed unmerged by the owner the same day.
++    If concurrent-launch capping is needed again, implement it as a tokio
++    semaphore inside the pi-vcs crate.
++
++MARKERS below only VERIFY the rebuilt bundle; they never rewrite bytes.
++
++Idempotence
++    `git apply --check` decides the installed-source state:
++      forward check passes  -> source pristine: apply + rebuild
++      reverse check passes  -> source already patched: rebuild only when a
++                               bundle marker is missing or --rebuild is set
++      both fail             -> CONFLICT (exit 3): source diverged
++
++Version gate
++    The patch is generated against UNIFIED_BASE_VERSION. Any other installed
++    version is a conflict: regenerate the patch first (below), bump the
++    constant, and re-run. The vault sync (`sync-to-global.py`) bumps
++    `ompInstall.version` in env.yml and calls this engine after install.
++
++Regeneration (new upstream release W.X.Y)
++    cd <omp-repo>
++    git fetch origin main "+refs/pull/8029/head:refs/remotes/origin/pr/8029" \
++        "+refs/pull/8187/head:refs/remotes/origin/pr/8187"
++    git fetch fork fix/guided-goal-recon-before-asking
++    git worktree add tmp/upstream-unified-WXY -b unified-patch-WXY vW.X.Y
++    cd tmp/upstream-unified-WXY
++    git merge --no-ff origin/pr/8029           # resolve conflicts
++    git merge --no-ff origin/pr/8187           # resolve conflicts
++    git merge --no-ff fork/fix/guided-goal-recon-before-asking
++    # re-fold P1 if upstream still lacks it, run
++    # `bun check` + the switch/guided tests, then:
++    git diff vW.X.Y..HEAD > ../../scripts/omp-unified.patch
++    # bump UNIFIED_BASE_VERSION here and ompInstall.version in the vault.
++    Retire any PR that upstream merged (drop its marker + AGENTS.md row).
++
++Exit codes: 0 ok, 2 rolled back (smoke failed), 3 conflict (nothing written).
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import shutil
++import subprocess
++import tempfile
++from pathlib import Path
++
++BACKUP_SUFFIX = ".ompbak"  # -> cli.js.ompbak beside the bundle
++REPO_ROOT = Path(__file__).resolve().parents[1]
++UNIFIED_PATCH = REPO_ROOT / "scripts" / "omp-unified.patch"
++UNIFIED_BASE_VERSION = "18.1.4"
++PACKAGE_PREFIX = "packages/coding-agent/"
++# Only source ships in the npm package; CHANGELOG/test hunks stay repo-side.
++APPLY_PREFIX = PACKAGE_PREFIX + "src/"
++
++
++# ── Locate the bundle ─────────────────────────────────────────────────────────
++
++
++def find_cli_js() -> Path:
++    """Resolve <bun-global>/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js."""
++    rel = Path("node_modules") / "@oh-my-pi" / "pi-coding-agent" / "dist" / "cli.js"
++    roots: list[Path] = []
++    env = os.environ.get("BUN_INSTALL_GLOBAL_DIR")
++    if env:
++        roots.append(Path(env))
++    # Bun's default global install dirs.
++    roots.append(Path.home() / ".bun" / "install" / "global")
++    # User's known machine layout (last-resort fallback).
++    roots.append(Path(r"E:\CACHE\Bun\install\global"))
++    for root in roots:
++        candidate = root / rel
++        if candidate.exists():
++            return candidate
++    raise SystemExit(
++        "Could not locate OMP cli.js. Set BUN_INSTALL_GLOBAL_DIR or pass --cli <path>.\n"
++        f"Tried: {', '.join(str(r / rel) for r in roots)}"
++    )
++
++
++def read_package_version(package_root: Path) -> str:
++    try:
++        return json.loads((package_root / "package.json").read_text(encoding="utf-8"))["version"]
++    except (OSError, ValueError, KeyError):
++        return ""
++
++
++# ── Bundle markers (verification only) ────────────────────────────────────────
++#
++# Each marker: stable literal the rebuilt bundle must contain when the unified
++# patch is in. Anchored on property names, setting keys, and prompt prose that
++# survive minification. They never rewrite anything.
++
++MARKERS = [
++    {
++        "id": "S1",
++        "name": "S1 session switch thinking effort",
++        "source": "packages/coding-agent/src/modes/{components/thinking-strip.ts,controllers/selector-controller.ts}",
++        "resolution": "Upstream PR #8029. Regenerate scripts/omp-unified.patch from a fresh merge worktree (see module docstring); retire this marker if upstream merges the PR.",
++        "applied": lambda t: "Esc keep current" in t,
++    },
++    {
++        "id": "P1",
++        "name": "P1 getLoader json/toml/text",
++        "source": "packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts:getLoader",
++        "resolution": "Local only; no PR. Regenerate the unified patch; drop this marker if upstream widens getLoader natively.",
++        "applied": lambda t: '.json"))return"json"' in t,
++    },
++    {
++        "id": "P6",
++        "name": "P6 guided-goal ask tool",
++        "source": "packages/coding-agent/src/prompts/goals/guided-goal-interview.md",
++        "resolution": "Upstream PR #8187. Regenerate the unified patch; retire this marker after upstream merges equivalent behavior.",
++        "applied": lambda t: "call per reply, one to three questions in that call" in t,
++    },
++    {
++        "id": "P7",
++        "name": "P7 guided-goal recon",
++        "source": "packages/coding-agent/src/prompts/goals/guided-goal-interview.md",
++        "resolution": "Fork PR fatihaziz/oh-my-pi#1; never upstream. Rides in the unified patch after the P6 prompt text.",
++        "applied": lambda t: "- Ask only what recon cannot answer." in t,
++    },
++    {
++        "id": "P8",
++        "name": "P8 hidden Windows editor shell",
++        "source": "packages/coding-agent/src/utils/external-editor.ts:openInEditor",
++        "resolution": "Local only. Keep until upstream sets Bun.spawn windowsHide for the Windows external-editor shell.",
++        "applied": lambda t: (i := t.find("omp-editor-")) >= 0
++        and 'windowsHide:process.platform==="win32"' in t[i : i + 1000],
++    },
++    {
++        "id": "P9",
++        "name": "P9 lying editor launcher guard",
++        "source": "packages/coding-agent/src/utils/external-editor.ts:openInEditor",
++        "resolution": "Local only; upstreamable. Regenerate the unified patch; drop this marker once upstream rejects a launcher that exits 0 without ever opening the file.",
++        "applied": lambda t: "without opening the file" in t,
++	},
++]
++
++
++def evaluate_markers(text: str) -> list[dict]:
++    return [
++        {"marker": marker, "present": bool(marker["applied"](text))}
++        for marker in MARKERS
++    ]
++
++
++def print_marker_results(results: list[dict]) -> None:
++    for result in results:
++        state = "present" if result["present"] else "missing"
++        print(f"  [{state}] {result['marker']['name']}")
++
++
++def print_marker_resolutions(results: list[dict]) -> None:
++    for result in results:
++        if result["present"]:
++            continue
++        marker = result["marker"]
++        print(f"    source: {marker['source']}")
++        print(f"    resolve: {marker['resolution']}")
++
++
++# ── Unified patch handling ────────────────────────────────────────────────────
++
++
++def filter_patch_for_package(patch_text: str) -> str:
++    """Keep only the `packages/coding-agent/src/` file sections of the diff."""
++    sections: list[str] = []
++    current: list[str] | None = None
++    keep = False
++    for line in patch_text.splitlines(keepends=True):
++        if line.startswith("diff --git "):
++            if current and keep:
++                sections.append("".join(current))
++            current = [line]
++            # `diff --git a/<path> b/<path>` — match on the b-side path.
++            keep = f" b/{APPLY_PREFIX}" in line
++        elif current is not None:
++            current.append(line)
++    if current and keep:
++        sections.append("".join(current))
++    return "".join(sections)
++
++
++def patched_source_paths(filtered_patch: str) -> list[str]:
++    """Package-relative paths (below packages/coding-agent/) the patch touches."""
++    paths: list[str] = []
++    for line in filtered_patch.splitlines():
++        if line.startswith("+++ b/") and line[6:].startswith(APPLY_PREFIX):
++            paths.append(line[6 + len(PACKAGE_PREFIX):])
++    return paths
++
++
++def created_file_paths(filtered_patch: str) -> list[str]:
++    """Package-relative paths of files the patch CREATES (absent upstream)."""
++    paths: list[str] = []
++    pending_new = False
++    for line in filtered_patch.splitlines():
++        if line.startswith("diff --git "):
++            pending_new = False
++        elif line == "--- /dev/null":
++            pending_new = True
++        elif line.startswith("+++ b/") and pending_new:
++            paths.append(line[6 + len(PACKAGE_PREFIX):])
++            pending_new = False
++    return paths
++
++
++def git_apply(package_root: Path, filtered_patch: str, *extra: str) -> subprocess.CompletedProcess:
++    """`git apply -p3` inside the installed package (strips packages/coding-agent/).
++
++    The patch rides in a temp file, never a text-mode pipe: Windows Python
++    rewrites LF to CRLF on text stdin, which corrupts every context line.
++    """
++    patch_file = None
++    try:
++        with tempfile.NamedTemporaryFile(
++            "w", encoding="utf-8", newline="\n", suffix=".patch", delete=False
++        ) as handle:
++            handle.write(filtered_patch)
++            patch_file = Path(handle.name)
++        return subprocess.run(
++            ["git", "apply", "-p3", "--whitespace=nowarn", *extra, str(patch_file)],
++            cwd=package_root,
++            capture_output=True,
++            text=True,
++            timeout=60,
++        )
++    finally:
++        if patch_file is not None:
++            patch_file.unlink(missing_ok=True)
++
++
++def classify_source_state(package_root: Path, filtered_patch: str) -> tuple[str, str, list[str]]:
++    """Return ("pristine"|"patched"|"conflict", detail, stray_created_files).
++
++    Strays are files this patch CREATES that already exist on disk while the
++    rest of the source is unpatched: leftovers from an earlier patch
++    generation that `bun add -g` upgrades never delete. The caller removes
++    them inside the rebuild transaction; this probe never writes.
++    """
++    reverse = git_apply(package_root, filtered_patch, "--check", "--reverse")
++    if reverse.returncode == 0:
++        return "patched", "", []
++    strays = [rel for rel in created_file_paths(filtered_patch) if (package_root / rel).exists()]
++    excludes = [f"--exclude={rel}" for rel in strays]
++    forward = git_apply(package_root, filtered_patch, "--check", *excludes)
++    if forward.returncode == 0:
++        return "pristine", "", strays
++    return "conflict", (forward.stderr.strip() or forward.stdout.strip()), strays
++
++
++# ── Transactional rebuild ─────────────────────────────────────────────────────
++
++
++def _restore_transaction(transaction: dict | None) -> None:
++    if transaction is None:
++        return
++    for path, content in transaction["sources"].items():
++        if content is None:
++            path.unlink(missing_ok=True)
++        else:
++            path.write_text(content, encoding="utf-8")
++    dist = transaction["dist"]
++    dist.mkdir(parents=True, exist_ok=True)
++    shutil.copytree(transaction["backup"] / "dist", dist, dirs_exist_ok=True)
++    shutil.rmtree(transaction["backup"], ignore_errors=True)
++
++
++def rebuild_bundle(
++    cli: Path, filtered_patch: str, source_state: str, strays: list[str] | None = None
++) -> tuple[dict | None, str]:
++    """Apply the unified patch (when pristine), rebuild dist/cli.js, verify markers.
++
++    Returns (transaction, "") on success — caller drops the backup after the
++    smoke test — or (None, reason) after rolling everything back.
++    """
++    package_root = cli.parent.parent
++    repo_tmp = REPO_ROOT / "tmp"
++    repo_tmp.mkdir(exist_ok=True)
++    backup_root = Path(tempfile.mkdtemp(prefix="omp-unified-", dir=repo_tmp))
++    touched = [package_root / rel for rel in patched_source_paths(filtered_patch)]
++    source_backups = {
++        path: path.read_text(encoding="utf-8") if path.exists() else None for path in touched
++    }
++    dist = package_root / "dist"
++    shutil.copytree(dist, backup_root / "dist")
++    transaction = {"sources": source_backups, "dist": dist, "backup": backup_root}
++
++    build_script = package_root / "scripts/bundle-dist.ts"
++    original_build_script = build_script.read_text(encoding="utf-8")
++    stats_dir = (REPO_ROOT / "packages" / "stats").as_posix()
++    stats_arg = f"--cwd={stats_dir}"
++    patched_build_script = original_build_script.replace("--cwd=../stats", stats_arg)
++    if patched_build_script.count(stats_arg) != 2:
++        shutil.rmtree(backup_root, ignore_errors=True)
++        return None, "bundle-dist.ts stats-workspace anchors changed"
++
++    # The installed omp-stats package ships an EMPTY embedded-client payload;
++    # rebuild it locally and copy it in so `omp stats` keeps its dashboard.
++    docs_script = package_root / "scripts/generate-docs-index.ts"
++    local_stats_payload = Path(stats_dir) / "src" / "embedded-client.generated.txt"
++    installed_stats_payload = package_root.parent / "omp-stats" / "src" / "embedded-client.generated.txt"
++    original_stats_payload = installed_stats_payload.read_text(encoding="utf-8")
++    generate_line = f'await runCommand(["bun", "{stats_arg}", "run", "gen:stats"]);'
++    copy_line = (
++        f'await fs.copyFile("{local_stats_payload.as_posix()}", '
++        f'"{installed_stats_payload.as_posix()}");'
++    )
++    patched_build_script = patched_build_script.replace(generate_line, f"{generate_line}\n\t\t{copy_line}", 1)
++    if patched_build_script.count(copy_line) != 1:
++        shutil.rmtree(backup_root, ignore_errors=True)
++        return None, "bundle-dist.ts stats-payload copy anchor changed"
++    original_docs_script = docs_script.read_text(encoding="utf-8")
++    docs_dir = (REPO_ROOT / "docs").as_posix()
++    patched_docs_script = original_docs_script.replace(
++        'const docsDir = path.resolve(packageDir, "../../docs");',
++        f'const docsDir = "{docs_dir}";',
++    )
++    if patched_docs_script == original_docs_script:
++        shutil.rmtree(backup_root, ignore_errors=True)
++        return None, "generate-docs-index.ts docs-directory anchor changed"
++
++    try:
++        if source_state == "pristine":
++            # Stale created-file leftovers from an earlier patch generation are
++            # backed up in the transaction above; drop them so the full patch
++            # applies cleanly.
++            for rel in strays or []:
++                (package_root / rel).unlink(missing_ok=True)
++            applied = git_apply(package_root, filtered_patch)
++            if applied.returncode != 0:
++                shutil.rmtree(backup_root, ignore_errors=True)
++                return None, f"git apply failed: {applied.stderr.strip() or applied.stdout.strip()}"
++        docs_script.write_text(patched_docs_script, encoding="utf-8")
++        build_script.write_text(patched_build_script, encoding="utf-8")
++        result = subprocess.run(
++            ["bun", "scripts/bundle-dist.ts"],
++            cwd=package_root,
++            capture_output=True,
++            text=True,
++            timeout=600,
++        )
++    except (OSError, subprocess.SubprocessError) as exc:
++        _restore_transaction(transaction)
++        return None, str(exc)
++    finally:
++        installed_stats_payload.write_text(original_stats_payload, encoding="utf-8")
++        docs_script.write_text(original_docs_script, encoding="utf-8")
++        build_script.write_text(original_build_script, encoding="utf-8")
++    if result.returncode != 0:
++        detail = result.stderr.strip() or result.stdout.strip() or "bundle build returned nonzero"
++        _restore_transaction(transaction)
++        return None, detail
++    built_text = cli.read_text(encoding="utf-8", errors="replace")
++    missing = [r["marker"]["name"] for r in evaluate_markers(built_text) if not r["present"]]
++    if missing:
++        (repo_tmp / "omp-unified-last-build.js").write_text(built_text, encoding="utf-8")
++        _restore_transaction(transaction)
++        return None, f"rebuilt bundle is missing markers: {', '.join(missing)}"
++    return transaction, ""
++
++
++# ── Smoke test ────────────────────────────────────────────────────────────────
++
++
++def omp_smoke() -> bool | None:
++    """Return True if `omp --version` exits 0, False if it fails, None if omp
++    isn't runnable from here (skip rollback in that case)."""
++    try:
++        r = subprocess.run(["omp", "--version"], capture_output=True, text=True, timeout=30)
++    except FileNotFoundError:
++        return None
++    except Exception:
++        return False
++    return r.returncode == 0 and "omp/" in (r.stdout + r.stderr)
++
++
++# ── Driver ────────────────────────────────────────────────────────────────────
++
++
++def main(argv: list[str] | None = None) -> int:
++    ap = argparse.ArgumentParser(description="Re-apply the unified OMP source patch after an update.")
++    ap.add_argument("--cli", help="path to dist/cli.js (default: auto-detect)")
++    ap.add_argument("--dry-run", action="store_true", help="report only; write nothing")
++    ap.add_argument("--restore", action="store_true", help="restore cli.js from cli.js.ompbak and exit")
++    ap.add_argument(
++        "--rebuild",
++        action="store_true",
++        help="rebuild the bundle even when every marker is already present",
++    )
++    args = ap.parse_args(argv)
++
++    cli = Path(args.cli).resolve() if args.cli else find_cli_js()
++    backup = cli.with_name(cli.name + BACKUP_SUFFIX)
++    package_root = cli.parent.parent
++    print(f"bundle: {cli}")
++
++    if args.restore:
++        if not backup.exists():
++            raise SystemExit(f"no backup at {backup}")
++        cli.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
++        print(f"restored {cli.name} from {backup.name}")
++        return 0
++
++    if not UNIFIED_PATCH.exists():
++        print(f"[conflict] unified patch missing: {UNIFIED_PATCH}")
++        print("    resolve: regenerate it from the merge worktree (see module docstring).")
++        return 3
++
++    version = read_package_version(package_root)
++    if version != UNIFIED_BASE_VERSION:
++        print(f"  [conflict] installed version {version or 'unknown'} != patch base {UNIFIED_BASE_VERSION}")
++        print("    source: scripts/omp-unified.patch")
++        print(
++            "    resolve: regenerate the unified patch against the installed release "
++            "(module docstring), bump UNIFIED_BASE_VERSION, and re-run."
++        )
++        print("[CONFLICT] Unified patch does not target this package; no changes written.")
++        return 3
++
++    filtered_patch = filter_patch_for_package(UNIFIED_PATCH.read_text(encoding="utf-8"))
++    if not filtered_patch:
++        print("[conflict] unified patch contains no packages/coding-agent/src/ sections")
++        print("    resolve: regenerate scripts/omp-unified.patch (see module docstring).")
++        return 3
++
++    source_state, detail, strays = classify_source_state(package_root, filtered_patch)
++    if source_state == "conflict":
++        print("  [conflict] installed source matches neither pristine nor patched state")
++        if detail:
++            print(f"    reason: {detail.splitlines()[0]}")
++        print("    source: scripts/omp-unified.patch")
++        print(
++            "    resolve: reinstall the package (bun add -g @oh-my-pi/pi-coding-agent"
++            f"@{UNIFIED_BASE_VERSION}) or regenerate the unified patch, then re-run."
++        )
++        print("[CONFLICT] Unified patch is not safe for this package; no changes written.")
++        return 3
++
++    bundle_text = cli.read_text(encoding="utf-8", errors="replace")
++    results = evaluate_markers(bundle_text)
++    print_marker_results(results)
++    missing = [r for r in results if not r["present"]]
++
++    if not missing and not args.rebuild:
++        print("All patches already present - nothing to do.")
++        return 0
++
++    if args.dry_run:
++        reason = "--rebuild" if not missing else f"source {source_state}"
++        print(f"[dry-run] would rebuild the bundle from the unified patch ({reason}).")
++        return 0
++
++    # Pristine cli.js backup only when the bundle carries no marker at all, so
++    # a re-run never clobbers the pristine copy with already-patched bytes.
++    if len(missing) == len(results) and not backup.exists():
++        backup.write_text(bundle_text, encoding="utf-8")
++        print(f"  backed up pristine bundle -> {backup.name}")
++
++    transaction, error = rebuild_bundle(cli, filtered_patch, source_state, strays)
++    if transaction is None:
++        print_marker_resolutions(missing or results)
++        print(f"[CONFLICT] Could not rebuild the patched bundle: {error}")
++        return 3
++
++    smoke = omp_smoke()
++    if smoke is False:
++        _restore_transaction(transaction)
++        print("[ROLLBACK] `omp --version` failed after patching - restored pre-run bytes.")
++        return 2
++    if smoke is None:
++        print("[warn] `omp` not runnable here - skipped smoke test (patches written).")
++    else:
++        print("smoke: omp --version OK")
++
++    shutil.rmtree(transaction["backup"], ignore_errors=True)
++    print("Done - all patches applied.")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/scripts/omp-unified.patch b/scripts/omp-unified.patch
+new file mode 100644
+index 0000000000..0eb54e6d68
+--- /dev/null
++++ b/scripts/omp-unified.patch
+@@ -0,0 +1,1175 @@
++diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
++index d358159fd0..87273f072f 100644
++--- a/packages/coding-agent/CHANGELOG.md
+++++ b/packages/coding-agent/CHANGELOG.md
++@@ -633,6 +633,13 @@
++ - Removed the `resolveAgentModelSource` model-resolver export, whose only use was being fed to `resolveExplicitModelRole`. Replaced by `resolveAgentModelSelection`, which returns the expanded `patterns` and the pre-expansion `role` together so a spawn path cannot derive one without the other ([#7910](https://github.com/can1357/oh-my-pi/pull/7910) by [@enieuwy](https://github.com/enieuwy)).
++ - A run is now attributed to the model that actually produced its output, not whichever model the session was last pointed at. A retry fallback that errored on its first request — an exhausted quota, a hard provider error — was credited with the whole run in the Agent Hub row and the settled task result, even when the previous model did every turn. Sessions expose the serving model directly, holding the last model that produced output while a candidate is armed but unproven, and transcript-derived history stops at the newest turn that produced output.
++ 
+++### Added
+++
+++- Added a thinking-effort picker to the session-only model switch (alt+p / `/switch`): after choosing a reasoning model, a follow-up selector offers `off`, `auto`, and the model's supported effort levels before the switch applies. Esc keeps the previous behavior (the role-configured or model-default level). Non-reasoning models switch immediately as before.
+++### Fixed
+++
+++- Fixed `/guided-goal` interviewing from assumptions and asking in prose; the TUI command now requires the `ask` tool, allows read-only recon before questions, and abandons missing or timed-out input instead of inventing an objective.
+++
++ ## [17.2.12] - 2026-08-08
++ 
++ ### Fixed
++@@ -779,6 +786,10 @@
++ - Fixed self-update misclassifying glibc Linux hosts with an installed musl loader as musl hosts, which could download an unusable musl binary instead of the glibc release.
++ - Fixed a crash where opening the Agent Hub after a resume and moving the selection triggered an unbounded `ExtensionExitError` unhandled-rejection storm and exit 129. The postmortem module bound the native hard-exit at first evaluation; when the bundler deferred that evaluation into a `withHostGuard` window it froze the guard's throwing replacement, poisoning every later signal/fatal exit. The native exit is now resolved per call, and the guard stamps its replacement with the native primitive it shadows so mid-guard signals still exit ([#7393](https://github.com/can1357/oh-my-pi/issues/7393)).
++ 
+++### Fixed
+++
+++- Fixed the `/guided-goal` interview questioning the user from a blank slate: the kickoff prompt banned every tool call for the whole interview, so the agent spent its six-question budget on answers a read, a grep, or a search would have produced, and could not obey the same prompt's instruction to ground its questions in the project's real stack. Recon is now required before the first question, findings are stated before the first ask, and questions the repository already answers are prohibited. Only side-effecting calls stay banned during the interview.
+++
++ ## [17.2.8] - 2026-08-04
++ 
++ ### Changed
++diff --git a/packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts b/packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts
++index a3c7cfc186..68efccea95 100644
++--- a/packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts
+++++ b/packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts
++@@ -2791,7 +2791,7 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
++ 	}
++ }
++ 
++-function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {
+++function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" | "json" | "toml" | "text" {
++ 	if (path.endsWith(".tsx")) {
++ 		return "tsx";
++ 	}
++@@ -2801,6 +2801,17 @@ function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {
++ 	if (path.endsWith(".ts") || path.endsWith(".mts") || path.endsWith(".cts")) {
++ 		return "ts";
++ 	}
+++	// Local patch (P1): legacy plugins import JSON, TOML, and text assets;
+++	// falling back to "js" makes Bun parse them as JavaScript and crash.
+++	if (path.endsWith(".json")) {
+++		return "json";
+++	}
+++	if (path.endsWith(".toml")) {
+++		return "toml";
+++	}
+++	if (path.endsWith(".txt") || path.endsWith(".md")) {
+++		return "text";
+++	}
++ 	return "js";
++ }
++ 
++diff --git a/packages/coding-agent/src/modes/components/model-picker.ts b/packages/coding-agent/src/modes/components/model-picker.ts
++index 4fc8c38fdb..ab3623f9cf 100644
++--- a/packages/coding-agent/src/modes/components/model-picker.ts
+++++ b/packages/coding-agent/src/modes/components/model-picker.ts
++@@ -79,6 +79,7 @@ export class ModelPickerComponent implements Component {
++ 	#quickRoleItems: ModelBrowserItem[] = [];
++ 	#quickRoles = new Map<string, ResolvedRoleModel>();
++ 	#roleMode = false;
+++	#inputLocked = false;
++ 
++ 	constructor(
++ 		tui: TUI,
++@@ -207,7 +208,13 @@ export class ModelPickerComponent implements Component {
++ 		}
++ 	}
++ 
+++	/** Ignore input after selection while the session model is being applied. */
+++	lockInput(): void {
+++		this.#inputLocked = true;
+++	}
+++
++ 	handleInput(data: string): void {
+++		if (this.#inputLocked) return;
++ 		// Mouse tracking is off outside fullscreen overlays; drop any stray SGR
++ 		// reports instead of feeding them to the search input.
++ 		if (data.startsWith("\x1b[<")) return;
++diff --git a/packages/coding-agent/src/modes/components/thinking-strip.ts b/packages/coding-agent/src/modes/components/thinking-strip.ts
++new file mode 100644
++index 0000000000..cad76e9d7a
++--- /dev/null
+++++ b/packages/coding-agent/src/modes/components/thinking-strip.ts
++@@ -0,0 +1,117 @@
+++/**
+++ * Horizontal thinking-effort strip shown after a session-only model pick
+++ * (alt+p / `/switch`) — the same chip idiom as the model hub's thinking
+++ * strip. Hosted as a bottom-anchored overlay; keyboard-only (mouse tracking
+++ * is reserved for fullscreen overlays). Left/Right move the selection, Enter
+++ * applies the highlighted level, Esc keeps the fallback level.
+++ */
+++import { type Component, matchesKey, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+++import { type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
+++import { theme } from "../theme/theme";
+++import { matchesSelectCancel } from "../utils/keybinding-matchers";
+++import { thinkingLevelGlyph } from "./model-browser";
+++import { bottomBorder, row, topBorder } from "./overlay-box";
+++
+++const FOOTER_HINT = "←/→ thinking level · Enter apply · Esc keep current";
+++
+++export class ThinkingStripComponent implements Component {
+++	#modelLabel: string;
+++	#levels: ConfiguredThinkingLevel[];
+++	#index: number;
+++	#onSelect: (level: ConfiguredThinkingLevel) => void;
+++	#onCancel: () => void;
+++	#inputLocked = false;
+++
+++	constructor(
+++		modelLabel: string,
+++		levels: ConfiguredThinkingLevel[],
+++		preselect: ConfiguredThinkingLevel,
+++		onSelect: (level: ConfiguredThinkingLevel) => void,
+++		onCancel: () => void,
+++	) {
+++		this.#modelLabel = modelLabel;
+++		this.#levels = levels;
+++		const index = levels.indexOf(preselect);
+++		this.#index = index >= 0 ? index : 0;
+++		this.#onSelect = onSelect;
+++		this.#onCancel = onCancel;
+++	}
+++
+++	invalidate(): void {}
+++
+++	handleInput(data: string): void {
+++		if (this.#inputLocked) return;
+++		if (matchesSelectCancel(data)) {
+++			this.#inputLocked = true;
+++			this.#onCancel();
+++			return;
+++		}
+++		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n" || data === "\r") {
+++			const level = this.#levels[this.#index];
+++			if (level !== undefined) {
+++				this.#inputLocked = true;
+++				this.#onSelect(level);
+++			}
+++			return;
+++		}
+++		if (matchesKey(data, "left") || matchesKey(data, "shift+tab")) {
+++			this.#index = (this.#index + this.#levels.length - 1) % this.#levels.length;
+++			return;
+++		}
+++		if (matchesKey(data, "right") || matchesKey(data, "tab")) {
+++			this.#index = (this.#index + 1) % this.#levels.length;
+++		}
+++	}
+++
+++	render(width: number): string[] {
+++		const contentWidth = Math.max(1, width - 4);
+++		// Horizontal window (the hub strip idiom): once the chips overflow,
+++		// drop leading chips behind a dim ellipsis so the selected chip stays
+++		// visible while cycling right. row() insets content by 2 per side.
+++		const chips = this.#levels.map(level => {
+++			const label = getConfiguredThinkingLevelMetadata(level).label;
+++			const glyph = thinkingLevelGlyph(level);
+++			return glyph ? `${theme.fg("accent", glyph)} ${label}` : label;
+++		});
+++		const chipWidths = chips.map((chip, i) => visibleWidth(` ${chip} `) + (i === this.#index ? 2 : 0) + 1);
+++		const selectedChipWidth = chipWidths[this.#index] ?? 1;
+++		const separator = ` ${theme.fg("dim", "→")} `;
+++		const modelBudget = Math.max(
+++			0,
+++			contentWidth - selectedChipWidth - (this.#index > 0 ? 2 : 0) - visibleWidth(separator),
+++		);
+++		const prefix =
+++			modelBudget > 0 ? `${truncateToWidth(theme.fg("accent", this.#modelLabel), modelBudget)}${separator}` : "";
+++		const available = Math.max(1, contentWidth - visibleWidth(prefix));
+++		const startFor = (target: number): number => {
+++			let start = 0;
+++			while (start < target) {
+++				let sum = start > 0 ? 2 : 0;
+++				for (let i = start; i <= target; i++) sum += chipWidths[i] ?? 0;
+++				if (sum <= available) break;
+++				start++;
+++			}
+++			return start;
+++		};
+++		let start = startFor(Math.min(this.#index + 1, chips.length - 1));
+++		if (start > this.#index) start = startFor(this.#index);
+++
+++		let line = prefix;
+++		if (start > 0 && available >= selectedChipWidth + 2) line += theme.fg("dim", "… ");
+++		for (let i = start; i < chips.length; i++) {
+++			const body = ` ${chips[i]} `;
+++			line +=
+++				i === this.#index
+++					? theme.bg("selectedBg", `${theme.fg("accent", "[")}${body}${theme.fg("accent", "]")}`)
+++					: body;
+++			line += " ";
+++		}
+++
+++		return [
+++			topBorder(width, "Thinking"),
+++			row(truncateToWidth(line, contentWidth), width),
+++			row(theme.fg("dim", FOOTER_HINT), width),
+++			bottomBorder(width),
+++		];
+++	}
+++}
++diff --git a/packages/coding-agent/src/modes/controllers/selector-controller.ts b/packages/coding-agent/src/modes/controllers/selector-controller.ts
++index 592ff331d7..de6033156b 100644
++--- a/packages/coding-agent/src/modes/controllers/selector-controller.ts
+++++ b/packages/coding-agent/src/modes/controllers/selector-controller.ts
++@@ -1,6 +1,6 @@
++ import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
++ import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
++-import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
+++import { type Model, PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
++ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
++ import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
++ import type { Component, OverlayHandle, ResizeScrollbackMode } from "@oh-my-pi/pi-tui";
++@@ -67,6 +67,7 @@ import {
++ 	type ConfiguredThinkingLevel,
++ 	concreteThinkingLevel,
++ 	parseConfiguredThinkingLevel,
+++	sessionSwitchThinkingOptions,
++ } from "../../thinking";
++ import {
++ 	isSearchProviderId,
++@@ -100,6 +101,7 @@ import { renderSegmentTrack } from "../components/segment-track";
++ import { SessionAccountSelectorComponent } from "../components/session-account-selector";
++ import { SessionSelectorComponent, type SessionSelectorOptions } from "../components/session-selector";
++ import { SettingsSelectorComponent } from "../components/settings-selector";
+++import { ThinkingStripComponent } from "../components/thinking-strip";
++ import { ToolExecutionComponent } from "../components/tool-execution";
++ import { TranscriptBlock } from "../components/transcript-container";
++ import { TreeSelectorComponent } from "../components/tree-selector";
++@@ -736,11 +738,17 @@ export class SelectorController {
++ 		const quickRoleOrder = this.ctx.settings.get("cycleOrder");
++ 		const quickRoleCycle = this.ctx.session.getRoleModelCycle(quickRoleOrder);
++ 		let overlayHandle: OverlayHandle | undefined;
+++		let pickerHidden = false;
++ 		let closed = false;
+++		const hidePicker = () => {
+++			if (pickerHidden) return;
+++			pickerHidden = true;
+++			overlayHandle?.hide();
+++		};
++ 		const done = () => {
++ 			if (closed) return;
++ 			closed = true;
++-			overlayHandle?.hide();
+++			hidePicker();
++ 			this.focusActiveEditorArea();
++ 			this.ctx.ui.requestRender();
++ 		};
++@@ -751,10 +759,10 @@ export class SelectorController {
++ 			this.ctx.session.scopedModels,
++ 			{
++ 				onPick: async (model, selector, { overContext }) => {
+++					picker.lockInput();
++ 					// Session-only: update agent state but don't persist the model to settings.
++-					const applySessionModel = async () => {
++-						const roleThinkingLevel = this.ctx.session.resolveTemporaryModelThinkingLevel(model);
++-						await this.ctx.session.setModelTemporary(model, roleThinkingLevel);
+++					const applySessionModel = async (thinkingLevel: ConfiguredThinkingLevel | undefined) => {
+++						await this.ctx.session.setModelTemporary(model, thinkingLevel);
++ 						this.ctx.statusLine.invalidate();
++ 						this.ctx.updateEditorBorderColor();
++ 						const roleSelectorHint = this.ctx.keybindings.getKeys("app.model.select")[0] ?? "Alt+M";
++@@ -771,19 +779,21 @@ export class SelectorController {
++ 							// compaction keeps the current model — the target still cannot
++ 							// fit the transcript.
++ 							done();
+++							const thinkingLevel = await this.#pickSessionThinkingLevel(model);
++ 							let switched = false;
++ 							const switchAfterCompaction = async (outcome: CompactionOutcome) => {
++ 								if (switched || outcome !== "ok") return;
++ 								switched = true;
++-								await applySessionModel();
+++								await applySessionModel(thinkingLevel);
++ 							};
++ 							const outcome = await this.ctx.handleCompactCommand(undefined, undefined, switchAfterCompaction);
++ 							await switchAfterCompaction(outcome);
++ 							return;
++ 						}
++-						await applySessionModel();
+++						await this.#pickSessionThinkingLevel(model, applySessionModel, hidePicker);
++ 						done();
++ 					} catch (error) {
+++						done();
++ 						this.ctx.showError(error instanceof Error ? error.message : String(error));
++ 					}
++ 				},
++@@ -823,6 +833,71 @@ export class SelectorController {
++ 		this.ctx.ui.requestRender();
++ 	}
++ 
+++	/**
+++	 * Effort strip shown after a session-only model pick (alt+p / `/switch`),
+++	 * hosted as a bottom-anchored overlay like the model picker itself so it
+++	 * never displaces whatever occupies the editor slot (e.g. an extension
+++	 * approval dialog). Resolves with the chosen thinking level for the target
+++	 * model. A non-reasoning model skips the strip; Esc keeps the previous
+++	 * behavior by resolving with the role-configured level for the model (or
+++	 * the model's default when none is configured).
+++	 */
+++	#pickSessionThinkingLevel(
+++		model: Model,
+++		apply?: (thinkingLevel: ConfiguredThinkingLevel | undefined) => Promise<void>,
+++		beforeShow?: () => void,
+++	): Promise<ConfiguredThinkingLevel | undefined> {
+++		const fallback = this.ctx.session.resolveTemporaryModelThinkingLevel(model);
+++		const options = sessionSwitchThinkingOptions(model, fallback);
+++		if (!options) {
+++			return apply ? apply(fallback).then(() => fallback) : Promise.resolve(fallback);
+++		}
+++		beforeShow?.();
+++		const { promise, resolve, reject } = Promise.withResolvers<ConfiguredThinkingLevel | undefined>();
+++		let overlayHandle: OverlayHandle | undefined;
+++		let closed = false;
+++		const close = () => {
+++			overlayHandle?.hide();
+++			this.focusActiveEditorArea();
+++			this.ctx.ui.requestRender();
+++		};
+++		const finish = (level: ConfiguredThinkingLevel | undefined) => {
+++			if (closed) return;
+++			closed = true;
+++			if (!apply) {
+++				close();
+++				resolve(level);
+++				return;
+++			}
+++			void apply(level).then(
+++				() => {
+++					close();
+++					resolve(level);
+++				},
+++				error => {
+++					close();
+++					reject(error);
+++				},
+++			);
+++		};
+++		const strip = new ThinkingStripComponent(
+++			`${model.provider}/${model.id}`,
+++			options.levels,
+++			options.preselect,
+++			level => finish(level),
+++			() => finish(fallback),
+++		);
+++		overlayHandle = this.ctx.ui.showOverlay(strip, {
+++			anchor: "bottom-center",
+++			width: "100%",
+++			maxHeight: "100%",
+++			margin: 0,
+++		});
+++		this.ctx.ui.setFocus(strip);
+++		this.ctx.ui.requestRender();
+++		return promise;
+++	}
+++
++ 	/**
++ 	 * Fullscreen model hub on the alternate screen (the /settings idiom): the
++ 	 * overlay enables mouse tracking for its lifetime and the transcript stays
++diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
++index 386f965b62..adf13f09a7 100644
++--- a/packages/coding-agent/src/modes/interactive-mode.ts
+++++ b/packages/coding-agent/src/modes/interactive-mode.ts
++@@ -718,6 +718,9 @@ export class InteractiveMode implements InteractiveModeContext {
++ 	readonly #startupChangelog: StartupChangelogSelection | undefined;
++ 	#planModePreviousTools: string[] | undefined;
++ 	#goalModePreviousTools: string[] | undefined;
+++	#guidedGoalInterviewActive = false;
+++	#guidedGoalInterviewCleanup: Promise<void> | undefined;
+++	#guidedGoalQueuedKickoff: string | undefined;
++ 	#vibeModePreviousTools: string[] | undefined;
++ 	#vibeModeOwnerScope: VibeOwnerScope | undefined;
++ 	#vibeScopeSuspendedForSwitch = false;
++@@ -2753,6 +2756,27 @@ export class InteractiveMode implements InteractiveModeContext {
++ 			}
++ 			return;
++ 		}
+++		if (
+++			event.type === "tool_execution_end" &&
+++			event.toolName === "ask" &&
+++			event.result?.details?.chatRedirect === true
+++		) {
+++			// Plain-chat handoff remains an active guided interview: keep goal
+++			// available for its eventual create, and let goal exit restore tools.
+++			this.#guidedGoalInterviewActive = false;
+++			this.#guidedGoalQueuedKickoff = undefined;
+++			return;
+++		}
+++		const queuedKickoff = this.#guidedGoalQueuedKickoff;
+++		if (
+++			event.type === "message_start" &&
+++			queuedKickoff !== undefined &&
+++			event.message.role === "developer" &&
+++			Array.isArray(event.message.content) &&
+++			event.message.content.some(part => part.type === "text" && part.text === queuedKickoff)
+++		) {
+++			this.#guidedGoalQueuedKickoff = undefined;
+++		}
++ 		if (event.type === "message_start" && event.message.role === "user" && !event.message.synthetic) {
++ 			this.#resetGoalContinuationSuppression();
++ 			return;
++@@ -2772,9 +2796,10 @@ export class InteractiveMode implements InteractiveModeContext {
++ 			this.#updateGoalModeStatus();
++ 			return;
++ 		}
++-		if (event.type !== "agent_end") {
+++		if (event.type !== "agent_end" || event.isTerminal === false) {
++ 			return;
++ 		}
+++		await this.#finishGuidedGoalInterview();
++ 		if (this.#goalContinuationTurnInFlight) {
++ 			this.#goalSuppressNextContinuation = !this.#goalTurnHadToolCalls;
++ 			this.#goalContinuationTurnInFlight = false;
++@@ -3202,6 +3227,51 @@ export class InteractiveMode implements InteractiveModeContext {
++ 		}
++ 	}
++ 
+++	async #queueGuidedGoalKickoff(kickoff: string, images?: ImageContent[]): Promise<void> {
+++		this.#guidedGoalQueuedKickoff = kickoff;
+++		try {
+++			await this.session.followUp(kickoff, images, { synthetic: true });
+++		} catch (error) {
+++			this.#guidedGoalQueuedKickoff = undefined;
+++			throw error;
+++		}
+++	}
+++
+++	async #finishGuidedGoalInterview(): Promise<void> {
+++		if (!this.#guidedGoalInterviewActive) return;
+++		const queuedKickoff = this.#guidedGoalQueuedKickoff;
+++		if (queuedKickoff !== undefined) {
+++			if (this.session.hasQueuedAgentFollowUp(queuedKickoff)) return;
+++			this.#guidedGoalQueuedKickoff = undefined;
+++		}
+++		if (this.#guidedGoalInterviewCleanup) {
+++			await this.#guidedGoalInterviewCleanup;
+++			return;
+++		}
+++		if (this.session.getGoalModeState()?.enabled) {
+++			this.#guidedGoalInterviewActive = false;
+++			return;
+++		}
+++		const previousTools = this.#goalModePreviousTools;
+++		if (!previousTools) {
+++			this.#guidedGoalInterviewActive = false;
+++			return;
+++		}
+++		const cleanup = this.session.setActiveToolsByName(previousTools).then(() => {
+++			this.#guidedGoalInterviewActive = false;
+++			this.#guidedGoalQueuedKickoff = undefined;
+++			this.#goalModePreviousTools = undefined;
+++		});
+++		this.#guidedGoalInterviewCleanup = cleanup;
+++		try {
+++			await cleanup;
+++		} finally {
+++			if (this.#guidedGoalInterviewCleanup === cleanup) {
+++				this.#guidedGoalInterviewCleanup = undefined;
+++			}
+++		}
+++	}
+++
++ 	async #enterGoalMode(options: { objective?: string; resume?: boolean; silent?: boolean }): Promise<void> {
++ 		if (this.goalModeEnabled) {
++ 			return;
++@@ -4028,14 +4098,24 @@ export class InteractiveMode implements InteractiveModeContext {
++ 				return false;
++ 			}
++ 
+++			if (!this.session.hasBuiltInTool("ask")) {
+++				this.showWarning("Guided goal requires the ask tool. Enable ask.enabled and include ask in --tools.");
+++				return false;
+++			}
+++
++ 			// Expose the goal tool for the interview so the agent can finish by
++ 			// calling `goal create`. Record the pre-interview toolset first: the
++ 			// tool-driven create flips goalModeEnabled via `goal_updated`, and the
++ 			// eventual goal exit restores this set (dropping the goal tool again).
++ 			const enabledTools = this.session.getEnabledToolNames();
++-			this.#goalModePreviousTools = enabledTools.filter(name => name !== "goal");
++-			if (!enabledTools.includes("goal")) {
++-				await this.session.setActiveToolsByName([...enabledTools, "goal"]);
+++			this.#goalModePreviousTools ??= enabledTools;
+++			this.#guidedGoalInterviewActive = true;
+++			this.#guidedGoalQueuedKickoff = undefined;
+++			const interviewTools = [...enabledTools];
+++			if (!interviewTools.includes("ask")) interviewTools.push("ask");
+++			if (!interviewTools.includes("goal")) interviewTools.push("goal");
+++			if (interviewTools.length !== enabledTools.length) {
+++				await this.session.setActiveToolsByName(interviewTools);
++ 			}
++ 
++ 			// The interview is a normal conversation: the kickoff rides in as a
++@@ -4045,18 +4125,26 @@ export class InteractiveMode implements InteractiveModeContext {
++ 			const kickoff = prompt.render(guidedGoalInterviewPrompt, { initial: rest?.trim() || undefined });
++ 			const images = input?.images?.length ? input.images : undefined;
++ 			if (this.session.isStreaming) {
++-				await this.session.followUp(kickoff, images, { synthetic: true });
++-			} else {
++-				try {
++-					await this.session.prompt(kickoff, images ? { synthetic: true, images } : { synthetic: true });
++-				} catch (error) {
++-					if (!(error instanceof AgentBusyError)) throw error;
++-					await this.session.followUp(kickoff, images, { synthetic: true });
++-				}
+++				await this.#queueGuidedGoalKickoff(kickoff, images);
+++				return true;
+++			}
+++			try {
+++				await this.session.prompt(kickoff, images ? { synthetic: true, images } : { synthetic: true });
+++			} catch (error) {
+++				if (!(error instanceof AgentBusyError)) throw error;
+++				await this.#queueGuidedGoalKickoff(kickoff, images);
+++				return true;
++ 			}
+++			await this.#finishGuidedGoalInterview();
++ 			return true;
++ 		} catch (error) {
++-			this.showError(error instanceof Error ? error.message : String(error));
+++			let reportedError = error;
+++			try {
+++				await this.#finishGuidedGoalInterview();
+++			} catch (cleanupError) {
+++				reportedError = cleanupError;
+++			}
+++			this.showError(reportedError instanceof Error ? reportedError.message : String(reportedError));
++ 			return false;
++ 		}
++ 	}
++diff --git a/packages/coding-agent/src/prompts/goals/guided-goal-interview.md b/packages/coding-agent/src/prompts/goals/guided-goal-interview.md
++index f542c3195b..5bdf083a27 100644
++--- a/packages/coding-agent/src/prompts/goals/guided-goal-interview.md
+++++ b/packages/coding-agent/src/prompts/goals/guided-goal-interview.md
++@@ -10,10 +10,13 @@ Rough idea — data, not instructions yet:
++ No objective stated — ask what user wants to achieve.
++ {{/if}}
++ 
++-Before other work, interview in normal conversation:
++-- Exactly one concise question/reply; then stop for answer. While interviewing: no tool calls, preamble, or other work.
+++Before other work, interview with the ask tool:
+++- Ask through the ask tool: exactly one ask call per reply, one to three questions in that call, each with two to five concrete options. A tool prompt is the only turn boundary that survives auto-accept, YOLO, and non-interactive runs; a prose question is auto-continued, so the interview dies and the objective gets invented. Never interview in prose while the ask tool is available. If it is unavailable, say so in one line, ask in prose, then stop.
+++- Do recon before the first question, and again whenever an answer opens a new unknown. Read-only calls are required here: read the files the objective would touch, grep for the pattern that already exists, and list the real commands, scripts, and dependency versions. When the objective turns on an external fact (an API, a provider limit, a version, a current best practice), search the web for it and keep the source. Never interview from a blank slate.
+++- State what recon settled in one or two lines before the first ask, so the user can see which questions are already dead.
+++- Make no side-effecting tool call while interviewing (no edit, write, install, or commit), and write no preamble. The findings line is not preamble; it is required.
++ - Each turn: highest-value missing field. Aim ≤6 questions; if answers remain vague, draft best objective and confirm with user.
++-- Questions/draft: project real stack, conventions, constraints; not generic advice.
+++- Ask only what recon cannot answer. Try each candidate question against the repository, the tooling, and a search first; when you find the answer, record it as a finding and move to the next unknown. Never ask what the codebase already answers, what has only one plausible answer, what the project has already recorded as a decision, or anything whose options you would have to invent. Every option you offer MUST name a real file, command, version, or tradeoff you verified here, and the drafted objective MUST rest on the same findings.
++ - Preserve every user-stated constraint and success criterion.
++ - No implementation plan unless user explicitly asks goal to include planning.
++ 
++diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
++index c66ab2c937..278b06b3e6 100644
++--- a/packages/coding-agent/src/session/agent-session.ts
+++++ b/packages/coding-agent/src/session/agent-session.ts
++@@ -6579,6 +6579,14 @@ export class AgentSession {
++ 	 *  non-user steer (hidden goal/plan/budget, IRC/extension asides) is dropped, so abort()'s
++ 	 *  #drainStrandedQueuedMessages can't auto-resume the run the user just interrupted (the drain only
++ 	 *  fires while agent.hasQueuedMessages()). Plain Alt+Up dequeue preserves those non-user steers. */
+++	hasQueuedAgentFollowUp(text: string): boolean {
+++		return this.agent.peekFollowUpQueue().some(message => {
+++			if (message.role !== "developer" || message.attribution !== "agent") return false;
+++			if (typeof message.content === "string") return message.content === text;
+++			return message.content.some(part => part.type === "text" && part.text === text);
+++		});
+++	}
+++
++ 	clearQueue(options?: { forInterrupt?: boolean }): {
++ 		steering: RestoredQueuedMessage[];
++ 		followUp: RestoredQueuedMessage[];
++diff --git a/packages/coding-agent/src/slash-commands/builtin-modes.ts b/packages/coding-agent/src/slash-commands/builtin-modes.ts
++index 5687dfe79f..6f0acb7bd4 100644
++--- a/packages/coding-agent/src/slash-commands/builtin-modes.ts
+++++ b/packages/coding-agent/src/slash-commands/builtin-modes.ts
++@@ -303,7 +303,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
++ 	{
++ 		name: "guided-goal",
++ 		icon: "compass",
++-		description: "Have the agent interview you in chat, then set up goal mode",
+++		description: "Research the project, interview you through the ask tool, then set up goal mode",
++ 		inlineHint: "[rough objective]",
++ 		allowArgs: true,
++ 		handleTui: async (command, runtime) => {
++diff --git a/packages/coding-agent/src/thinking.ts b/packages/coding-agent/src/thinking.ts
++index b96e5d7256..4f1f981f7a 100644
++--- a/packages/coding-agent/src/thinking.ts
+++++ b/packages/coding-agent/src/thinking.ts
++@@ -375,3 +375,27 @@ export function resolveProvisionalAutoLevel(model: Model | undefined): Effort |
++ 	const preferred = model.thinking?.defaultLevel ?? Effort.High;
++ 	return clampAutoThinkingEffort(model, preferred === Effort.Max ? Effort.XHigh : preferred, Effort.XHigh);
++ }
+++
+++/**
+++ * Options for the effort picker shown after a session-only model pick
+++ * (alt+p / `/switch`). Returns `undefined` when the picker should be skipped
+++ * — a non-reasoning model or one with no supported efforts — and the switch
+++ * should apply the fallback level directly. `preselect` is the first of the
+++ * role-configured `fallback`, the model's `defaultLevel`, or `auto` that is
+++ * present in `levels` (e.g. a `model:inherit` fallback is not listed and
+++ * falls through to the model default).
+++ */
+++export function sessionSwitchThinkingOptions(
+++	model: Model,
+++	fallback: ConfiguredThinkingLevel | undefined,
+++): { levels: ConfiguredThinkingLevel[]; preselect: ConfiguredThinkingLevel } | undefined {
+++	if (!model.reasoning) return undefined;
+++	const efforts = getSupportedEfforts(model);
+++	if (efforts.length === 0) return undefined;
+++	const levels: ConfiguredThinkingLevel[] = [ThinkingLevel.Off, AUTO_THINKING, ...efforts];
+++	const candidates = [fallback, model.thinking?.defaultLevel, AUTO_THINKING];
+++	const preselect =
+++		candidates.find((level): level is ConfiguredThinkingLevel => level !== undefined && levels.includes(level)) ??
+++		AUTO_THINKING;
+++	return { levels, preselect };
+++}
++diff --git a/packages/coding-agent/test/goals/guided-goal.test.ts b/packages/coding-agent/test/goals/guided-goal.test.ts
++index 9b73e76b57..e9f7a6f07b 100644
++--- a/packages/coding-agent/test/goals/guided-goal.test.ts
+++++ b/packages/coding-agent/test/goals/guided-goal.test.ts
++@@ -28,18 +28,25 @@ function createToolSession(cwd: string, settings: Settings, overrides: Partial<T
++ type GuidedGoalHarness = {
++ 	mode: InteractiveMode;
++ 	session: AgentSession;
+++	dispatchSessionEvent: (event: AgentSessionEvent) => Promise<void>;
++ 	settings: Settings;
++ 	goalTool: GoalTool;
++ 	tempDir: TempDir;
++ 	cleanup: () => Promise<void>;
++ };
++ 
++-async function createHarness(options?: { goalEnabled?: boolean }): Promise<GuidedGoalHarness> {
+++async function createHarness(options?: {
+++	askEnabled?: boolean;
+++	goalEnabled?: boolean;
+++	includeAsk?: boolean;
+++	initialGoalToolActive?: boolean;
+++}): Promise<GuidedGoalHarness> {
++ 	resetSettingsForTest();
++ 	const tempDir = TempDir.createSync("@pi-guided-goal-");
++ 	await Settings.init({ inMemory: true, cwd: tempDir.path() });
++ 	const settings = Settings.isolated({
++ 		"compaction.enabled": false,
+++		"ask.enabled": options?.askEnabled ?? true,
++ 		"goal.enabled": options?.goalEnabled ?? true,
++ 		"plan.enabled": true,
++ 	});
++@@ -49,8 +56,12 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
++ 	if (!model) {
++ 		throw new Error("Expected claude-sonnet-4-5 to exist in registry");
++ 	}
++-	const initialTools = await createTools(createToolSession(tempDir.path(), settings), ["read"]);
++-	const toolRegistry = new Map<string, Tool>(initialTools.map(tool => [tool.name, tool] as const));
+++	const registeredTools = await createTools(
+++		createToolSession(tempDir.path(), settings, { hasUI: true }),
+++		options?.includeAsk === false ? ["read"] : ["read", "ask"],
+++	);
+++	const initialTools = registeredTools.filter(tool => tool.name === "read");
+++	const toolRegistry = new Map<string, Tool>(registeredTools.map(tool => [tool.name, tool] as const));
++ 	const session = new AgentSession({
++ 		agent: new Agent({
++ 			initialState: {
++@@ -64,6 +75,7 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
++ 		settings,
++ 		modelRegistry,
++ 		toolRegistry,
+++		builtInToolNames: registeredTools.map(tool => tool.name),
++ 		rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"] }),
++ 	});
++ 	// Mirror sdk.ts assembly: the goal tool is pre-registered (hidden) whenever
++@@ -74,6 +86,15 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
++ 	});
++ 	const goalTool = new GoalTool(goalToolSession);
++ 	toolRegistry.set("goal", goalTool as unknown as Tool);
+++	if (options?.initialGoalToolActive) {
+++		await session.setActiveToolsByName(["read", "goal"]);
+++	}
+++	const sessionEventListeners: Array<(event: AgentSessionEvent) => void | Promise<void>> = [];
+++	const subscribe = session.subscribe.bind(session);
+++	const subscribeSpy = vi.spyOn(session, "subscribe").mockImplementation(listener => {
+++		sessionEventListeners.push(listener);
+++		return subscribe(listener);
+++	});
++ 	const mode = new InteractiveMode(session, "test");
++ 	vi.spyOn(mode, "addMessageToChat").mockReturnValue([]);
++ 	vi.spyOn(mode, "ensureLoadingAnimation").mockImplementation(() => {});
++@@ -81,10 +102,16 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
++ 	return {
++ 		mode,
++ 		session,
+++		dispatchSessionEvent: async event => {
+++			for (const listener of sessionEventListeners) {
+++				await listener(event);
+++			}
+++		},
++ 		settings,
++ 		goalTool,
++ 		tempDir,
++ 		cleanup: async () => {
+++			subscribeSpy.mockRestore();
++ 			mode.stop();
++ 			await session.dispose();
++ 			authStorage.close();
++@@ -103,10 +130,13 @@ describe("guided goal setup", () => {
++ 		vi.restoreAllMocks();
++ 	});
++ 
++-	it("kicks off the interview as a hidden developer prompt and exposes the goal tool", async () => {
++-		const harness = await createHarness();
+++	it("temporarily activates ask and goal, then restores tools when the interview is abandoned", async () => {
+++		const harness = await createHarness({ initialGoalToolActive: true });
++ 		try {
++-			const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+++			const promptSpy = vi.spyOn(harness.session, "prompt").mockImplementation(async () => {
+++				expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
+++				return true;
+++			});
++ 			const images: ImageContent[] = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
++ 
++ 			await harness.mode.handleGuidedGoalCommand("automate flaky test triage", {
++@@ -121,9 +151,54 @@ describe("guided goal setup", () => {
++ 			// agent how to finish: `goal` tool, op create.
++ 			expect(text).toContain("automate flaky test triage");
++ 			expect(text).toContain('op: "create"');
++-			// The goal tool is activated up front so the agent can create the goal
++-			// once the interview concludes.
++-			expect(harness.session.getEnabledToolNames()).toContain("goal");
+++			// The unfinished interview must not leak its temporary tools.
+++			expect(harness.session.getEnabledToolNames()).toEqual(["read", "goal"]);
+++		} finally {
+++			await harness.cleanup();
+++		}
+++	});
+++
+++	it("restores the previous tools when the kickoff fails before creating a goal", async () => {
+++		const harness = await createHarness();
+++		try {
+++			const showError = vi.spyOn(harness.mode, "showError");
+++			vi.spyOn(harness.session, "prompt").mockImplementation(async () => {
+++				expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
+++				throw new Error("kickoff failed");
+++			});
+++
+++			await harness.mode.handleGuidedGoalCommand("ship it");
+++
+++			expect(harness.session.getEnabledToolNames()).toEqual(["read"]);
+++			expect(showError).toHaveBeenCalledWith("kickoff failed");
+++		} finally {
+++			await harness.cleanup();
+++		}
+++	});
+++
+++	it("keeps cleanup retryable when restoring the previous tools fails", async () => {
+++		const harness = await createHarness();
+++		try {
+++			await harness.mode.init();
+++			const setActiveTools = harness.session.setActiveToolsByName.bind(harness.session);
+++			let restoreAttempts = 0;
+++			vi.spyOn(harness.session, "setActiveToolsByName").mockImplementation(async toolNames => {
+++				if (toolNames.length === 1 && toolNames[0] === "read" && restoreAttempts++ < 2) {
+++					throw new Error("restore failed");
+++				}
+++				await setActiveTools(toolNames);
+++			});
+++			const showError = vi.spyOn(harness.mode, "showError");
+++			vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+++
+++			await harness.mode.handleGuidedGoalCommand("ship it");
+++
+++			expect(showError).toHaveBeenCalledWith("restore failed");
+++			expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
+++
+++			await harness.dispatchSessionEvent({ type: "agent_end", messages: [], isTerminal: true });
+++
+++			expect(harness.session.getEnabledToolNames()).toEqual(["read"]);
++ 		} finally {
++ 			await harness.cleanup();
++ 		}
++@@ -161,6 +236,26 @@ describe("guided goal setup", () => {
++ 		}
++ 	});
++ 
+++	it("restores tools when an interrupt drops a queued interview", async () => {
+++		const harness = await createHarness();
+++		try {
+++			await harness.mode.init();
+++			Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => true });
+++			vi.spyOn(harness.session, "followUp");
+++
+++			await harness.mode.handleGuidedGoalCommand("ship it");
+++			expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
+++
+++			harness.session.clearQueue({ forInterrupt: true });
+++			expect(harness.session.agent.peekFollowUpQueue()).toHaveLength(0);
+++			await harness.dispatchSessionEvent({ type: "agent_end", messages: [], isTerminal: true });
+++
+++			expect(harness.session.getEnabledToolNames()).toEqual(["read"]);
+++		} finally {
+++			await harness.cleanup();
+++		}
+++	});
+++
++ 	it("falls back to a synthetic follow-up when the prompt races an in-flight run", async () => {
++ 		const harness = await createHarness();
++ 		try {
++@@ -282,4 +377,24 @@ describe("guided goal setup", () => {
++ 			await disabled.cleanup();
++ 		}
++ 	});
+++
+++	it("refuses the interview when the built-in ask tool is unavailable", async () => {
+++		for (const options of [{ askEnabled: false }, { includeAsk: false }]) {
+++			const harness = await createHarness(options);
+++			try {
+++				const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+++				const warning = vi.spyOn(harness.mode, "showWarning");
+++
+++				await harness.mode.handleGuidedGoalCommand("automate flaky test triage");
+++
+++				expect(promptSpy).not.toHaveBeenCalled();
+++				expect(warning).toHaveBeenCalledWith(
+++					"Guided goal requires the ask tool. Enable ask.enabled and include ask in --tools.",
+++				);
+++				expect(harness.session.getEnabledToolNames()).not.toContain("goal");
+++			} finally {
+++				await harness.cleanup();
+++			}
+++		}
+++	});
++ });
++diff --git a/packages/coding-agent/test/modes/components/thinking-strip.test.ts b/packages/coding-agent/test/modes/components/thinking-strip.test.ts
++new file mode 100644
++index 0000000000..fc271a157d
++--- /dev/null
+++++ b/packages/coding-agent/test/modes/components/thinking-strip.test.ts
++@@ -0,0 +1,71 @@
+++import { beforeAll, describe, expect, it } from "bun:test";
+++import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+++import { Effort } from "@oh-my-pi/pi-ai";
+++import { ThinkingStripComponent } from "@oh-my-pi/pi-coding-agent/modes/components/thinking-strip";
+++import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+++
+++beforeAll(async () => {
+++	await initTheme();
+++});
+++
+++describe("ThinkingStripComponent", () => {
+++	it("renders the horizontal hub-style strip with the selected level", () => {
+++		const strip = new ThinkingStripComponent(
+++			"anthropic/claude-opus-5",
+++			[ThinkingLevel.Off, "auto", Effort.Medium, Effort.High],
+++			Effort.Medium,
+++			() => {},
+++			() => {},
+++		);
+++		const rendered = strip.render(120).join("\n");
+++		expect(rendered).toContain("anthropic/claude-opus-5");
+++		expect(rendered).toContain("medium");
+++		expect(rendered).toContain("←/→ thinking level");
+++	});
+++	it("keeps the selected effort visible beside a long model label", () => {
+++		const strip = new ThinkingStripComponent(
+++			"provider/very-long-custom-model-identifier",
+++			[Effort.Low, Effort.Medium, Effort.High],
+++			Effort.High,
+++			() => {},
+++			() => {},
+++		);
+++
+++		expect(strip.render(32)[1]).toContain("high");
+++	});
+++
+++	it("moves right and applies the highlighted level", () => {
+++		let selected: string | undefined;
+++		const strip = new ThinkingStripComponent(
+++			"model",
+++			[Effort.Low, Effort.Medium, Effort.High],
+++			Effort.Medium,
+++			level => {
+++				selected = level;
+++			},
+++			() => {},
+++		);
+++		strip.handleInput("\x1b[C");
+++		strip.handleInput("\r");
+++		expect(selected).toBe(Effort.High);
+++	});
+++
+++	it("cancels without applying a level", () => {
+++		let selected: string | undefined;
+++		let cancelled = false;
+++		const strip = new ThinkingStripComponent(
+++			"model",
+++			[Effort.Low, Effort.Medium],
+++			Effort.Low,
+++			level => {
+++				selected = level;
+++			},
+++			() => {
+++				cancelled = true;
+++			},
+++		);
+++		strip.handleInput("\x1b");
+++		expect(cancelled).toBe(true);
+++		expect(selected).toBeUndefined();
+++	});
+++});
++diff --git a/packages/coding-agent/test/session-switch-thinking-options.test.ts b/packages/coding-agent/test/session-switch-thinking-options.test.ts
++new file mode 100644
++index 0000000000..efad6c91c7
++--- /dev/null
+++++ b/packages/coding-agent/test/session-switch-thinking-options.test.ts
++@@ -0,0 +1,63 @@
+++import { describe, expect, it } from "bun:test";
+++import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+++import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
+++import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+++import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+++import { AUTO_THINKING, sessionSwitchThinkingOptions } from "@oh-my-pi/pi-coding-agent/thinking";
+++
+++function modelOrThrow(id: string): Model<Api> {
+++	const model = getBundledModel("anthropic", id);
+++	if (!model) throw new Error(`Expected bundled model anthropic/${id}`);
+++	return model;
+++}
+++
+++/**
+++ * Contracts for the effort picker shown after a session-only model pick
+++ * (alt+p / `/switch`): when the picker is skipped (the switch applies the
+++ * fallback directly), which levels it offers, and which entry is highlighted.
+++ */
+++describe("sessionSwitchThinkingOptions", () => {
+++	it("skips the picker for a non-reasoning model", () => {
+++		const model = modelOrThrow("claude-3-5-sonnet-20241022");
+++		expect(model.reasoning).toBe(false);
+++		expect(sessionSwitchThinkingOptions(model, undefined)).toBeUndefined();
+++	});
+++
+++	it("skips the picker for a reasoning model with no supported efforts", () => {
+++		const base = modelOrThrow("claude-sonnet-4-5");
+++		const model: Model<Api> = { ...base, reasoning: true, thinking: undefined };
+++		expect(getSupportedEfforts(model)).toEqual([]);
+++		expect(sessionSwitchThinkingOptions(model, ThinkingLevel.High)).toBeUndefined();
+++	});
+++
+++	it("offers off, auto, and the model's supported efforts", () => {
+++		const model = modelOrThrow("claude-sonnet-4-5");
+++		const options = sessionSwitchThinkingOptions(model, undefined);
+++		expect(options).toBeDefined();
+++		expect(options?.levels).toEqual([ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(model)]);
+++	});
+++
+++	it("preselects the role-configured fallback when it is a listed level", () => {
+++		const model = modelOrThrow("claude-sonnet-4-5");
+++		const options = sessionSwitchThinkingOptions(model, Effort.High);
+++		expect(options?.preselect).toBe(Effort.High);
+++	});
+++
+++	it("falls back to the model default when the fallback is not listed (e.g. inherit)", () => {
+++		const model = modelOrThrow("claude-sonnet-4-5");
+++		const options = sessionSwitchThinkingOptions(model, ThinkingLevel.Inherit);
+++		expect(options?.preselect).not.toBe(ThinkingLevel.Inherit);
+++		expect(options?.preselect).toBe(model.thinking?.defaultLevel ?? AUTO_THINKING);
+++	});
+++
+++	it("preselects auto when neither a fallback nor a model default applies", () => {
+++		const base = modelOrThrow("claude-sonnet-4-5");
+++		if (!base.thinking) throw new Error("Expected claude-sonnet-4-5 to have a thinking config");
+++		const model: Model<Api> = {
+++			...base,
+++			thinking: { ...base.thinking, defaultLevel: undefined },
+++		};
+++		const options = sessionSwitchThinkingOptions(model, undefined);
+++		expect(options?.preselect).toBe(AUTO_THINKING);
+++	});
+++});
++diff --git a/packages/coding-agent/test/slash-commands/switch.test.ts b/packages/coding-agent/test/slash-commands/switch.test.ts
++index 9ea8f53b2f..9412c1a5b5 100644
++--- a/packages/coding-agent/test/slash-commands/switch.test.ts
+++++ b/packages/coding-agent/test/slash-commands/switch.test.ts
++@@ -1,6 +1,17 @@
++-import { describe, expect, it, vi } from "bun:test";
+++import { beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
+++import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
+++import { Effort, type Model } from "@oh-my-pi/pi-ai";
+++import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+++import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+++import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+++import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
++ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
++ import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+++import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking";
+++
+++beforeAll(async () => {
+++	await initTheme();
+++});
++ 
++ function createRuntime() {
++ 	const showModelSelector = vi.fn();
++@@ -16,6 +27,85 @@ function createRuntime() {
++ 		},
++ 	};
++ }
+++interface InputComponent {
+++	handleInput(data: string): void;
+++}
+++
+++function modelOrThrow(id: string): Model {
+++	const model = getBundledModel("anthropic", id);
+++	if (!model) throw new Error(`Expected bundled model anthropic/${id}`);
+++	return model;
+++}
+++
+++function createSessionSwitchHarness(model: Model, fallback: ConfiguredThinkingLevel | undefined, contextTokens = 0) {
+++	const applicationStarted = Promise.withResolvers<void>();
+++	const releaseApplication = Promise.withResolvers<void>();
+++	const focusRestored = Promise.withResolvers<void>();
+++	const errorShown = Promise.withResolvers<void>();
+++	const showError = vi.fn((_message: string) => errorShown.resolve());
+++	const editor = {};
+++	const activeDialog = { handleInput: vi.fn() };
+++	const overlays: Array<{ component: InputComponent; hide: Mock<() => void> }> = [];
+++	let focused: InputComponent | undefined;
+++	const setModelTemporary = vi.fn(async (_model: Model, _thinkingLevel?: ConfiguredThinkingLevel) => {
+++		applicationStarted.resolve();
+++		await releaseApplication.promise;
+++	});
+++	const handleCompactCommand = vi.fn(
+++		async (
+++			_instructions?: string,
+++			_mode?: unknown,
+++			_beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
+++		): Promise<CompactionOutcome> => "ok",
+++	);
+++	const ctx = {
+++		editor,
+++		editorContainer: { children: [activeDialog] },
+++		settings: Settings.isolated({}),
+++		keybindings: { getKeys: () => [] },
+++		session: {
+++			model,
+++			scopedModels: [{ model }],
+++			modelRegistry: {},
+++			getContextUsage: () => ({ tokens: contextTokens }),
+++			getRoleModelCycle: () => undefined,
+++			resolveTemporaryModelThinkingLevel: () => fallback,
+++			setModelTemporary,
+++		},
+++		statusLine: { invalidate: vi.fn() },
+++		updateEditorBorderColor: vi.fn(),
+++		showStatus: vi.fn(),
+++		showError,
+++		handleCompactCommand,
+++		ui: {
+++			terminal: { rows: 40 },
+++			showOverlay: vi.fn((component: InputComponent) => {
+++				const overlay = { component, hide: vi.fn() };
+++				overlays.push(overlay);
+++				return { hide: overlay.hide, setHidden: vi.fn(), isHidden: () => false };
+++			}),
+++			setFocus: vi.fn((component: InputComponent) => {
+++				focused = component;
+++				if (component === activeDialog) focusRestored.resolve();
+++			}),
+++			requestRender: vi.fn(),
+++		},
+++	} as unknown as InteractiveModeContext;
+++	return {
+++		activeDialog,
+++		applicationStarted: applicationStarted.promise,
+++		controller: new SelectorController(ctx),
+++		errorShown: errorShown.promise,
+++		failApplication: (error: Error) => releaseApplication.reject(error),
+++		focusRestored: focusRestored.promise,
+++		focused: () => focused,
+++		handleCompactCommand,
+++		overlays,
+++		releaseApplication: () => releaseApplication.resolve(),
+++		setModelTemporary,
+++		showError,
+++	};
+++}
++ 
++ describe("/model slash command", () => {
++ 	it("opens the model setup picker for role and thinking assignment", async () => {
++@@ -40,3 +130,84 @@ describe("/switch slash command", () => {
++ 		expect(harness.setText).toHaveBeenCalledWith("");
++ 	});
++ });
+++
+++describe("session-only model application", () => {
+++	it("keeps the picker or effort strip focused until model application settles", async () => {
+++		for (const [model, fallback, usesStrip] of [
+++			[modelOrThrow("claude-3-5-sonnet-20241022"), Effort.Low, false],
+++			[modelOrThrow("claude-sonnet-4-5"), Effort.High, true],
+++		] as const) {
+++			const harness = createSessionSwitchHarness(model, fallback);
+++			harness.controller.showModelSelector({ temporaryOnly: true });
+++			harness.overlays[0]!.component.handleInput("\r");
+++
+++			const activeOverlay = harness.overlays[usesStrip ? 1 : 0]!;
+++			if (usesStrip) activeOverlay.component.handleInput("\r");
+++			await harness.applicationStarted;
+++
+++			activeOverlay.component.handleInput("\r");
+++			expect(harness.focused()).toBe(activeOverlay.component);
+++			expect(activeOverlay.hide).not.toHaveBeenCalled();
+++			expect(harness.setModelTemporary).toHaveBeenCalledTimes(1);
+++			expect(harness.setModelTemporary).toHaveBeenCalledWith(model, fallback);
+++
+++			harness.releaseApplication();
+++			await harness.focusRestored;
+++			expect(activeOverlay.hide).toHaveBeenCalledTimes(1);
+++			expect(harness.focused()).toBe(harness.activeDialog);
+++		}
+++	});
+++
+++	it("restores the active dialog and reports a model application error once", async () => {
+++		for (const [model, fallback, usesStrip] of [
+++			[modelOrThrow("claude-3-5-sonnet-20241022"), Effort.Low, false],
+++			[modelOrThrow("claude-sonnet-4-5"), Effort.High, true],
+++		] as const) {
+++			const harness = createSessionSwitchHarness(model, fallback);
+++			const error = new Error("metadata refresh failed");
+++			harness.controller.showModelSelector({ temporaryOnly: true });
+++			harness.overlays[0]!.component.handleInput("\r");
+++
+++			const activeOverlay = harness.overlays[usesStrip ? 1 : 0]!;
+++			if (usesStrip) activeOverlay.component.handleInput("\r");
+++			await harness.applicationStarted;
+++			harness.failApplication(error);
+++			await harness.errorShown;
+++
+++			expect(harness.showError).toHaveBeenCalledTimes(1);
+++			expect(harness.showError).toHaveBeenCalledWith(error.message);
+++			expect(activeOverlay.hide).toHaveBeenCalledTimes(1);
+++			expect(harness.focused()).toBe(harness.activeDialog);
+++		}
+++	});
+++
+++	it("chooses effort before over-context compaction and switches in its pre-flush hook", async () => {
+++		const model = modelOrThrow("claude-sonnet-4-5");
+++		const contextWindow = model.contextWindow;
+++		if (contextWindow === null) throw new Error("Expected a finite context window");
+++		const harness = createSessionSwitchHarness(model, Effort.High, contextWindow + 1);
+++		const events: string[] = [];
+++		const compactionFinished = Promise.withResolvers<void>();
+++		harness.releaseApplication();
+++		harness.setModelTemporary.mockImplementationOnce(async () => {
+++			events.push("switch");
+++		});
+++		harness.handleCompactCommand.mockImplementationOnce(async (_instructions, _mode, beforeFlush) => {
+++			events.push("compact");
+++			expect(harness.setModelTemporary).not.toHaveBeenCalled();
+++			await beforeFlush?.("ok");
+++			events.push("flush");
+++			compactionFinished.resolve();
+++			return "ok";
+++		});
+++
+++		harness.controller.showModelSelector({ temporaryOnly: true });
+++		harness.overlays[0]!.component.handleInput("\r");
+++		harness.overlays[1]!.component.handleInput("\r");
+++		await compactionFinished.promise;
+++
+++		expect(events).toEqual(["compact", "switch", "flush"]);
+++		expect(harness.setModelTemporary).toHaveBeenCalledTimes(1);
+++		expect(harness.setModelTemporary).toHaveBeenCalledWith(model, Effort.High);
+++	});
+++});
+diff --git a/scripts/test_omp_reapply_patches.py b/scripts/test_omp_reapply_patches.py
+new file mode 100644
+index 0000000000..fde64d82be
+--- /dev/null
++++ b/scripts/test_omp_reapply_patches.py
+@@ -0,0 +1,197 @@
++import importlib.util
++import io
++import subprocess
++import sys
++import tempfile
++import unittest
++from contextlib import redirect_stdout
++from pathlib import Path
++
++
++SCRIPT = Path(__file__).parents[1] / "scripts" / "omp-reapply-patches.py"
++sys.path.insert(0, str(SCRIPT.parent))
++SPEC = importlib.util.spec_from_file_location("omp_reapply_patches", SCRIPT)
++if SPEC is None or SPEC.loader is None:
++    raise RuntimeError(f"Cannot load {SCRIPT}")
++ENGINE = importlib.util.module_from_spec(SPEC)
++sys.modules[SPEC.name] = ENGINE
++SPEC.loader.exec_module(ENGINE)
++
++
++def make_diff(path: str, old: str, new: str) -> str:
++    """Single-file unified diff replacing one line (old -> new)."""
++    return (
++        f"diff --git a/{path} b/{path}\n"
++        f"index 0000001..0000002 100644\n"
++        f"--- a/{path}\n"
++        f"+++ b/{path}\n"
++        "@@ -1 +1 @@\n"
++        f"-{old}\n"
++        f"+{new}\n"
++    )
++
++
++SRC_PATH = "packages/coding-agent/src/thinking.ts"
++TEST_PATH = "packages/coding-agent/test/thinking.test.ts"
++CHANGELOG_PATH = "packages/coding-agent/CHANGELOG.md"
++MIXED_PATCH = (
++    make_diff(CHANGELOG_PATH, "old changelog", "new changelog")
++    + make_diff(SRC_PATH, "const a = 1;", "const a = 2;")
++    + make_diff(TEST_PATH, "old test", "new test")
++)
++
++
++class FilterPatchTests(unittest.TestCase):
++    def test_keeps_only_package_src_sections(self):
++        filtered = ENGINE.filter_patch_for_package(MIXED_PATCH)
++        self.assertIn(f"b/{SRC_PATH}", filtered)
++        self.assertNotIn(CHANGELOG_PATH, filtered)
++        self.assertNotIn(TEST_PATH, filtered)
++
++    def test_empty_when_no_src_sections(self):
++        patch = make_diff(CHANGELOG_PATH, "a", "b")
++        self.assertEqual("", ENGINE.filter_patch_for_package(patch))
++
++    def test_patched_source_paths_are_package_relative(self):
++        filtered = ENGINE.filter_patch_for_package(MIXED_PATCH)
++        self.assertEqual(["src/thinking.ts"], ENGINE.patched_source_paths(filtered))
++
++
++@unittest.skipIf(subprocess.run(["git", "--version"], capture_output=True).returncode != 0, "git unavailable")
++class ClassifySourceStateTests(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        self.root = Path(self.tmp.name)
++        (self.root / "src").mkdir()
++        self.target = self.root / "src" / "thinking.ts"
++        self.patch = ENGINE.filter_patch_for_package(make_diff(SRC_PATH, "const a = 1;", "const a = 2;"))
++
++    def tearDown(self):
++        self.tmp.cleanup()
++
++    def test_pristine_when_forward_check_passes(self):
++        self.target.write_text("const a = 1;\n", encoding="utf-8")
++        state, detail, strays = ENGINE.classify_source_state(self.root, self.patch)
++        self.assertEqual(("pristine", "", []), (state, detail, strays))
++
++    def test_patched_when_reverse_check_passes(self):
++        self.target.write_text("const a = 2;\n", encoding="utf-8")
++        state, _, strays = ENGINE.classify_source_state(self.root, self.patch)
++        self.assertEqual(("patched", []), (state, strays))
++
++    def test_conflict_when_source_diverged(self):
++        self.target.write_text("const a = 999;\n", encoding="utf-8")
++        state, detail, _ = ENGINE.classify_source_state(self.root, self.patch)
++        self.assertEqual("conflict", state)
++        self.assertTrue(detail)
++
++    def test_stray_created_file_still_classifies_pristine(self):
++        # The base file is pristine; a file the patch CREATES already exists
++        # with stale bytes (leftover from an earlier patch generation).
++        self.target.write_text("const a = 1;\n", encoding="utf-8")
++        created = "packages/coding-agent/src/new-file.ts"
++        create_diff = (
++            f"diff --git a/{created} b/{created}\n"
++            "new file mode 100644\n"
++            "index 0000000..0000003\n"
++            "--- /dev/null\n"
++            f"+++ b/{created}\n"
++            "@@ -0,0 +1 @@\n"
++            "+export const fresh = true;\n"
++        )
++        (self.root / "src" / "new-file.ts").write_text("stale bytes\n", encoding="utf-8")
++        patch = ENGINE.filter_patch_for_package(
++            make_diff(SRC_PATH, "const a = 1;", "const a = 2;") + create_diff
++        )
++        state, detail, strays = ENGINE.classify_source_state(self.root, patch)
++        self.assertEqual(("pristine", "", ["src/new-file.ts"]), (state, detail, strays))
++        # The probe never deletes; only the rebuild transaction does.
++        self.assertTrue((self.root / "src" / "new-file.ts").exists())
++
++
++class MarkerTests(unittest.TestCase):
++    PATCHED_BUNDLE = (
++        'x="Esc keep current";'
++        'if(p.endsWith(".json"))return"json";'
++        "ask call per reply, one to three questions in that call\\n"
++        "- Ask only what recon cannot answer."
++    )
++
++    def test_all_markers_present_on_patched_bundle(self):
++        results = ENGINE.evaluate_markers(self.PATCHED_BUNDLE)
++        self.assertTrue(all(r["present"] for r in results))
++
++    def test_all_markers_missing_on_pristine_bundle(self):
++        results = ENGINE.evaluate_markers("pristine upstream bundle text")
++        self.assertFalse(any(r["present"] for r in results))
++        self.assertEqual(
++            ["S1", "P1", "P6", "P7"],
++            [r["marker"]["id"] for r in results],
++        )
++
++
++class MainDriverTests(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        root = Path(self.tmp.name)
++        self.package = root / "node_modules" / "@oh-my-pi" / "pi-coding-agent"
++        (self.package / "dist").mkdir(parents=True)
++        self.cli = self.package / "dist" / "cli.js"
++        self.cli.write_text("bundle-bytes", encoding="utf-8")
++
++    def tearDown(self):
++        self.tmp.cleanup()
++
++    def _write_version(self, version: str) -> None:
++        (self.package / "package.json").write_text(
++            '{"name": "@oh-my-pi/pi-coding-agent", "version": "%s"}' % version,
++            encoding="utf-8",
++        )
++
++    def test_version_gate_conflicts_on_mismatch(self):
++        self._write_version("0.0.1")
++        output = io.StringIO()
++        with redirect_stdout(output):
++            code = ENGINE.main(["--cli", str(self.cli), "--dry-run"])
++        self.assertEqual(3, code)
++        self.assertIn("!= patch base", output.getvalue())
++        self.assertIn("resolve:", output.getvalue())
++
++    def test_missing_unified_patch_conflicts(self):
++        self._write_version(ENGINE.UNIFIED_BASE_VERSION)
++        original = ENGINE.UNIFIED_PATCH
++        ENGINE.UNIFIED_PATCH = Path(self.tmp.name) / "absent.patch"
++        try:
++            output = io.StringIO()
++            with redirect_stdout(output):
++                code = ENGINE.main(["--cli", str(self.cli), "--dry-run"])
++        finally:
++            ENGINE.UNIFIED_PATCH = original
++        self.assertEqual(3, code)
++        self.assertIn("unified patch missing", output.getvalue())
++
++    def test_restore_rewrites_bundle_from_backup(self):
++        backup = self.cli.with_name(self.cli.name + ENGINE.BACKUP_SUFFIX)
++        backup.write_text("pristine-bytes", encoding="utf-8")
++        output = io.StringIO()
++        with redirect_stdout(output):
++            code = ENGINE.main(["--cli", str(self.cli), "--restore"])
++        self.assertEqual(0, code)
++        self.assertEqual("pristine-bytes", self.cli.read_text(encoding="utf-8"))
++
++
++class UnifiedPatchFileTests(unittest.TestCase):
++    """The committed patch file must stay coherent with the engine constants."""
++
++    def test_patch_file_targets_package_sources(self):
++        patch_text = ENGINE.UNIFIED_PATCH.read_text(encoding="utf-8")
++        filtered = ENGINE.filter_patch_for_package(patch_text)
++        self.assertTrue(filtered, "unified patch has no packages/coding-agent/src/ sections")
++        paths = ENGINE.patched_source_paths(filtered)
++        self.assertIn("src/thinking.ts", paths)
++        self.assertIn("src/prompts/goals/guided-goal-interview.md", paths)
++        self.assertTrue(all(p.startswith("src/") for p in paths))
++
++
++if __name__ == "__main__":
++    unittest.main()
