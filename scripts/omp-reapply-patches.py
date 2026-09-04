@@ -78,7 +78,7 @@ from pathlib import Path
 BACKUP_SUFFIX = ".ompbak"  # -> cli.js.ompbak beside the bundle
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UNIFIED_PATCH = REPO_ROOT / "scripts" / "omp-unified.patch"
-UNIFIED_BASE_VERSION = "18.1.4"
+UNIFIED_BASE_VERSION = "18.1.9"
 PACKAGE_PREFIXES = {
     # Repo package prefix -> installed npm package name under @oh-my-pi.
     # Only source ships in the npm packages; CHANGELOG/test hunks stay repo-side.
@@ -145,7 +145,7 @@ MARKERS = [
         "name": "P6 guided-goal ask tool",
         "source": "packages/coding-agent/src/prompts/goals/guided-goal-interview.md",
         "resolution": "Upstream PR #8187. Regenerate the unified patch; retire this marker after upstream merges equivalent behavior.",
-        "applied": lambda t: "call per reply, one to three questions in that call" in t,
+        "applied": lambda t: "Research first, then interview the user through" in t,
     },
     {
         "id": "P7",

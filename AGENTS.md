@@ -32,7 +32,7 @@ Unless user tells you exactly what to write:
 
 ## Fatih Fork Patch Registry
 
-This checkout carries ONE unified source-level patch for behavior not yet in upstream. The single source of truth is `scripts/omp-unified.patch` (a `git diff v<base>..unified-patch`), driven by `scripts/omp-reapply-patches.py`: the engine applies the patch to the installed Bun-managed package sources (`packages/coding-agent/` and `packages/ai/` map to their installed `@oh-my-pi/*` packages per `PACKAGE_PREFIXES` in the engine), embeds the local stats client payload, rebuilds `dist/cli.js` transactionally, and verifies the bundle markers. External sync/config repositories MAY invoke that script but MUST NOT copy its patch logic. Patch base: upstream release `18.1.4` (`UNIFIED_BASE_VERSION` in the engine).
+This checkout carries ONE unified source-level patch for behavior not yet in upstream. The single source of truth is `scripts/omp-unified.patch` (a `git diff v<base>..unified-patch`), driven by `scripts/omp-reapply-patches.py`: the engine applies the patch to the installed Bun-managed package sources (`packages/coding-agent/` and `packages/ai/` map to their installed `@oh-my-pi/*` packages per `PACKAGE_PREFIXES` in the engine), embeds the local stats client payload, rebuilds `dist/cli.js` transactionally, and verifies the bundle markers. External sync/config repositories MAY invoke that script but MUST NOT copy its patch logic. Patch base: upstream release `18.1.9` (`UNIFIED_BASE_VERSION` in the engine).
 
 Behaviors carried by the unified patch (marker IDs, verification-only):
 
