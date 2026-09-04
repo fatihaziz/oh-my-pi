@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed non-structured Codex HTTP failures surfacing a bare body phrase (e.g. "Not Found") with no context: `parseCodexError` now prefixes status, status text, endpoint host/path, and a whitespace-collapsed body snippet so provider-side incidents are diagnosable from the error banner.
 ## [18.1.9] - 2026-09-04
 
 ### Added

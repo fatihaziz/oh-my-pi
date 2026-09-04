@@ -30,6 +30,29 @@ Unless user tells you exactly what to write:
 - **Never comment on GitHub** (issues, PRs, discussions).
 - **Never create issues on GitHub**.
 
+## Fatih Fork Patch Registry
+
+This checkout carries ONE unified source-level patch for behavior not yet in upstream. The single source of truth is `scripts/omp-unified.patch` (a `git diff v<base>..unified-patch`), driven by `scripts/omp-reapply-patches.py`: the engine applies the patch to the installed Bun-managed package sources (`packages/coding-agent/` and `packages/ai/` map to their installed `@oh-my-pi/*` packages per `PACKAGE_PREFIXES` in the engine), embeds the local stats client payload, rebuilds `dist/cli.js` transactionally, and verifies the bundle markers. External sync/config repositories MAY invoke that script but MUST NOT copy its patch logic. Patch base: upstream release `18.1.9` (`UNIFIED_BASE_VERSION` in the engine).
+
+Behaviors carried by the unified patch (marker IDs, verification-only):
+
+| ID | Behavior | Origin | Upstream plan |
+|---|---|---|---|
+| S1 | `/switch` and Alt+P show and apply session-only thinking effort | upstream PR [#8029](https://github.com/can1357/oh-my-pi/pull/8029), open | retire when merged |
+| P1 | Legacy plugin loader accepts JSON, TOML, and text assets (`legacy-pi-compat.ts:getLoader`) | local only; no PR | keep |
+| P6 | `/guided-goal` interview uses the ask tool | upstream PR [#8187](https://github.com/can1357/oh-my-pi/pull/8187), open | retire when merged |
+| P7 | `/guided-goal` performs recon and asks only unresolved questions | fork PR [fatihaziz/oh-my-pi#1](https://github.com/fatihaziz/oh-my-pi/pull/1) | never upstream |
+| P8 | Windows external editor hides the `cmd.exe` shell window (`external-editor.ts:openInEditor`) | local only; user-reported | keep until upstream sets `Bun.spawn` `windowsHide` |
+| P9 | External editor rejects a launcher that exits 0 without ever opening the file, instead of silently keeping the unchanged draft (`external-editor.ts:openInEditor`) | local only; upstreamable | offer upstream; drop when upstream validates the launch |
+| P11 | `omp usage` (and `--json`) appends an OpenRouter current-key usage row: USD spend, optional key limit/remaining/reset, plus explicit no-limit and per-model-unavailable notes (`usage-cli.ts:runUsageCommand`) | local only; user-requested 2026-09-03 | upstreamable if upstream adds an OpenRouter usage provider |
+| P12 | Non-structured Codex HTTP failures surface `HTTP <status> <statusText> at <host/path>` plus a body snippet instead of a bare phrase like "Not Found" (`response-handler.ts:parseCodexError`) | local only; upstreamable | offer upstream; drop when upstream adds failure context |
+
+Retired: P3 (`max` thinking label) — upstream-native since 17.3.x. P5 (fresh-session vibe autostart) — retired by user decision on 2026-08-20; fresh sessions start in normal mode and vibe is `/vibe` only. P10 (git concurrency limiter) — retired by owner decision on 2026-09-03: upstream 18.0.9 removed `utils/git.ts` (VCS moved in-process to `@oh-my-pi/pi-natives/vcs` via gix/jj-lib), leaving the TS FIFO limiter without an anchor; upstream [#9936](https://github.com/can1357/oh-my-pi/pull/9936) was closed unmerged by the owner the same day. If concurrent-launch capping is needed again, implement it as a tokio semaphore inside the `pi-vcs` crate.
+
+The merge worktree `tmp/upstream-unified-18.1.4` (branch `unified-patch-18.1.4`, base `v18.1.4`) is where upstream releases and the PR branches get merged and conflicts resolved; the patch file is regenerated from it. The exact regeneration procedure lives in the engine's module docstring. On a new upstream release: regenerate the patch there, bump `UNIFIED_BASE_VERSION`, bump `ompInstall.version` in the vault's `env.yml`, then run the vault sync (`uv run scripts/sync-to-global.py --only omp-local,omp-cli-patches --force`).
+
+After every Bun-managed OMP update, run `uv run scripts/omp-reapply-patches.py`; then `--dry-run` must report every marker `[present]`. `[conflict]` means STOP: follow the printed `source:`/`resolve:` guidance (usually regenerate the unified patch from a fresh merge worktree), update the registry and `scripts/test_omp_reapply_patches.py`, then retry. Before preparing an upstream PR, remove this local-only section plus `scripts/omp-reapply-patches.py`, `scripts/omp-unified.patch`, and `scripts/test_omp_reapply_patches.py` from that PR branch unless the PR explicitly upstreams one named behavior.
+
 ## Code Quality
 
 - No `any` unless absolutely necessary.
@@ -171,37 +194,18 @@ Manual reader loops only when the protocol requires it (SSE, streaming JSON-RPC)
 - **String width**: `Bun.stringWidth(text, { countAnsiEscapeCodes?: false })`.
 - **Wrapping**: `Bun.wrapAnsi(text, width, { wordWrap, hard, trim })`.
 
-## Model/Provider Policy Lives in KDL
-
-**NEVER hard-code model- or provider-conditional policy in TypeScript.** No `id.includes("claude")`, no model-name regexes, no per-model lookup tables (effort ladders, pricing, context windows, modalities, API routing, quirk flags). All of it belongs in the KDL rule tree at `packages/catalog/src/compat/rules/`, compiled by `bun run gen:compat` into the committed `rules.json` and resolved at build time via `resolveModelPolicy`/`buildModel`.
-
-Ownership strata (see `src/compat/rules/README.md`):
-
-- `taxonomy/*.kdl` — identity: class membership, families, revision extraction, reviewed overrides, suffix collapse.
-- `classes/*.kdl` — model-lineage truths (behavior inherent to a model line, on any host).
-- `providers/*.kdl` — deployment contracts (behavior a host imposes), plus documented exact-id residue.
-- `runtime/behavior.kdl` — heuristics that run before/outside exact model lookup (`api-routes`, `model-limits`, `exclude-models`, `pricing-peer`, hosted defaults).
-
-Rules for TS code:
-
-- Branching on model identity in TS is allowed **only** through structured facts from `classifyModel()` (`class`/`family`/`revision`/effort facts) — never through string matching on ids, and prefer a KDL axis when one can express the policy.
-- Discovery mappers map authoritative upstream fields as reported; seed neutral values only for fields the upstream omits or misreports **and** KDL explicitly owns via a correction axis (`input-modalities`, `cost-patch`, `limits-patch`, `context-window-floor`, thinking axes). Assert rule-owned corrections through `buildModel`; raw discovery specs remain the right assertion surface for parsing/normalization contracts.
-- An id that no selector can isolate gets an exact-id `models` residue rule with a comment — never a special case in TS.
-- Equal-rank rule overlaps throw `AmbiguousOverlapError` at resolve time; fix with an explicit `priority=` in KDL, not code.
-- After editing rules: `bun run gen:compat` and commit `rules.json` alongside the `.kdl` change.
-
 ## Generated Files
 
-**NEVER edit `packages/catalog/src/models.json` directly.** It is generated from upstream sources (stencil.so, provider catalog discovery, OpenCode docs) by `packages/catalog/scripts/generate-models.ts` and the descriptors/resolvers in `packages/catalog/src/provider-models/`. Hand-edits get overwritten on the next regen. The same applies to `packages/catalog/src/compat/rules.json`, compiled from the KDL tree by `bun run gen:compat`.
+**NEVER edit `packages/catalog/src/models.json` directly.** It is generated from upstream sources (stencil.so, provider catalog discovery, OpenCode docs) by `packages/catalog/scripts/generate-models.ts` and the descriptors/resolvers in `packages/catalog/src/provider-models/`. Hand-edits get overwritten on the next regen.
 
 To change an entry, fix the source:
 
-- **Model/provider policy** (identity, thinking ladders, wire quirks, modality/limit/pricing corrections, API routing, roster exclusions) → the KDL tree in `packages/catalog/src/compat/rules/` (see the section above).
+- **Resolution rules / per-id overrides** → relevant resolver in `packages/catalog/src/provider-models/openai-compat.ts` (e.g. `createOpenCodeApiResolution`'s id-override map).
 - **Provider catalog entries** (default model, discovery factory/flags) → the `CATALOG_PROVIDERS` table in `packages/catalog/src/provider-models/descriptors.ts`.
-- **Discovery/request plumbing** (endpoint shapes, auth, response parsing) → the mappers in `packages/catalog/src/provider-models/openai-compat.ts`.
-- **Generator wiring** (upstream merges, premium multipliers, post-processing order) → `packages/catalog/scripts/generate-models.ts`.
+- **Generator-level fixups** (premium multipliers, codex pricing fallback, fallback models, post-processing) → `packages/catalog/scripts/generate-models.ts`.
+- **Thinking metadata / generated policies** → `packages/catalog/src/model-thinking.ts` (`applyGeneratedModelPolicies`); model-id classification (family/version parsing) lives in `packages/catalog/src/identity/classify.ts`.
 
-Regenerate with `bun run gen:compat` and/or `bun run gen:models` and commit the generated files alongside the source change. Add a regression test against the **rule/descriptor/mapper**, not the bundled JSON, so it survives upstream metadata shifts.
+Regenerate with `bun run gen:models` and commit `models.json` alongside the source change. Add a regression test against the **resolver/descriptor**, not the bundled JSON, so it survives upstream metadata shifts.
 
 ## Logging and CLI Output
 
@@ -250,46 +254,13 @@ For the bash tool specifically:
 
 - NEVER commit unless asked.
 - Never use `tsc`/`npx tsc` — always `bun check`.
-- Never run `cargo test` directly for Rust tests — use `bun run test:rs`. It runs `cargo nextest run` (config: `.config/nextest.toml`) followed by a `cargo test --doc` pass, because nextest does not execute doctests. The doctest pass currently executes nothing (pi-natives is a `cdylib`, which rustdoc skips; pi-builtins' examples are `ignore`d vendored uutils docs) and exists so the first runnable doctest added to a lib crate is actually run.
 - Merge commits (maintainer merges of PRs) follow: `Merge PR #<number>: <conventional PR subject> (@<author>)` — e.g. `Merge PR #6386: feat(catalog): add native Meta Model API provider (@eggpeat)`.
-## Rust Build Profiles
-
-Profiles live in the root `Cargo.toml`; `.cargo/config.toml` carries the settings Cargo.toml cannot express. Both are committed, so no local `~/.cargo/config.toml` is required.
-
-| Profile | Use |
-| --- | --- |
-| `dev` | Default. Line tables for our crates, no debuginfo for deps, deps at `opt-level = 2`. |
-| `release` | Shipping build: fat LTO, 1 codegen unit, stripped. |
-| `local` | Fast local release iteration: thin LTO, 16 codegen units, incremental. |
-| `profiling` | `release` codegen with symbols kept, for `perf`/`samply`/Instruments. |
-| `ci` | Thin LTO, no debuginfo, stripped. |
-
-**Never set `split-debuginfo = "off"` on a profile that has debuginfo.** On Mach-O the linker never merges DWARF into the executable — it writes a debug map (`N_OSO`) pointing at the `.o` files, and `"unpacked"` is what keeps those files. With `"off"` every backtrace frame in our own crates silently loses `file:line`; the `panicked at foo.rs:3` header still prints (that is `#[track_caller]`, not debuginfo), which makes the loss easy to miss. `ci` may use `"off"` only because it sets `debug = false`.
-
-`embed-metadata = false` (in `.cargo/config.toml`) keeps crate metadata in `.rmeta` instead of duplicating it into every rlib — measured 196 MB → 130 MB on a reqwest-sized graph at identical build times. Its accepted spelling is toolchain-coupled; keep it in sync with `rust-toolchain.toml`.
-
-Rejected, with measurements, so nobody re-litigates them: **sccache** (cannot cache incremental, bin, or proc-macro crates — measured slower than not using it), **mold** (ELF-only; no Mach-O support), and **`panic = "abort"` on `dev`** (Cargo ignores `panic` for the test profile, so the whole dep graph builds twice — 131 MB → 214 MB).
 
 ## Testing Guidance
 
 Test the contract the system exposes — not the easiest internal detail to assert.
 
 - Every new test must defend one **concrete, externally observable contract**: behavior, output shape, state transition, error mapping, or a regression-prone parsing boundary. If you cannot name the contract, do not add the test.
-
-### Good vs. bad test filter
-
-- **Name the failure mode.** Every test MUST state what a consumer observes if it regresses. Cannot name one? NEVER add it.
-- **Good: transformation.** One fixture MAY prove parse/render/normalize/encode/resolve behavior when output is computed, not echoed.
-- **Good: branch or boundary.** Distinct inputs, empty values, malformed input, version/provider routing, and state transitions MUST prove distinct outcomes.
-- **Good: external contract.** Exact bytes/shape MAY be asserted when a provider, parser, protocol, or persisted consumer reads them.
-- **Good: precedence or negative contract.** Keep explicit `false`/override-wins assertions and required absence only when they prevent a documented leak, downgrade, 400, or incompatible wire field.
-- **Good: regression.** A repro MUST trigger the prior real failure path and assert the corrected observable result.
-- **Bad: static echo.** NEVER test a constructor/builder merely copied a fixture or baked constant into an in-memory config/metadata field.
-- **Bad: success passthrough.** NEVER assert `fn(x) === x` when `x` was already supplied/declared valid; assert a transform, rejection, or downstream effect instead.
-- **Bad: wording/defaults.** NEVER assert prompt/UI boilerplate, a default literal, object existence, non-empty output, or length growth without a consumer contract.
-- **Bad: duplicate rows.** Parameterized/loop rows MUST each cover a distinct branch, provider/model path, or consumer contract; delete same-path duplicates.
-- **Metadata exception.** Exact metadata, identity, ordering, or `undefined` MAY remain only when a downstream consumer depends on it and the test establishes branch, precedence, negative-contract, wire, or regression evidence.
-- **Termination exception.** For cyclic/large inputs, assert a bounded output, surfaced error, or state change; bare `not.toThrow()` is insufficient.
 - No placeholder tests, tautologies, or "the code ran" assertions (`expect(true).toBe(true)`, bare `not.toThrow()`, non-empty string checks, length-grew checks, "prompt exists" checks without semantic assertion).
 - Prefer contract-level tests over implementation details. Avoid asserting internal helper wiring, field assignment, singleton identity, incidental ordering, prompt boilerplate, or passthrough option forwarding unless another component depends on that exact detail.
 - Don't duplicate coverage across abstraction levels. If an integration test already proves the behavior, drop the narrower unit test that restates it through mocks.
@@ -300,7 +271,7 @@ Test the contract the system exposes — not the easiest internal detail to asse
 - Smoke tests are acceptable only when they catch a failure mode narrower tests would miss. "Package boots" or "command starts" alone is not enough.
 - Assert exact strings, ordering, and formatting only when downstream code parses or depends on the exact bytes. Otherwise assert semantic content.
 - Compile-time guarantees → type checks/type tests, not runtime placeholders.
-- **Never source-grep.** A test that reads an implementation file (`.ts`/`.rs`/build script) and asserts on its _text_ — `expect(src).toContain("someCall()")`, `.toMatch(/import .../)`, `.not.toContain("oldName")`, or "comment must say X" — is banned. It tests how code _looks_, not what it _does_: it breaks on harmless refactors (comment reflow, rename, import reorder) and passes while the behavior is broken. Assert the observable contract instead (run the code, check output/state/error), use the runtime smoke probe for wiring you cannot exercise in-process, and enforce structural invariants (no value-import of X, no self-import) with a type test or an oxlint rule — never a string scan of the source. (Reading a file your code _wrote_ — apply-patch result, generated bundle, temp fixture — and asserting on that output is fine; that is behavior, not a source grep.)
+- **Never source-grep.** A test that reads an implementation file (`.ts`/`.rs`/build script) and asserts on its _text_ — `expect(src).toContain("someCall()")`, `.toMatch(/import .../)`, `.not.toContain("oldName")`, or "comment must say X" — is banned. It tests how code _looks_, not what it _does_: it breaks on harmless refactors (comment reflow, rename, import reorder) and passes while the behavior is broken. Assert the observable contract instead (run the code, check output/state/error), use the runtime smoke probe for wiring you cannot exercise in-process, and enforce structural invariants (no value-import of X, no self-import) with a type test or a lint/biome rule — never a string scan of the source. (Reading a file your code _wrote_ — apply-patch result, generated bundle, temp fixture — and asserting on that output is fine; that is behavior, not a source grep.)
 - Don't add tests for tiny low-risk changes unless they protect a real contract or fix a regression-prone edge case.
 - Prefer focused package-local verification for the changed area.
 
@@ -319,7 +290,6 @@ Location: `packages/*/CHANGELOG.md` (per package).
 **Rules:**
 
 - New entries always go under `## [Unreleased]`.
-- Entries are one line, brief, and user-facing: lead with what the user will see or can now do. Root-cause narration and implementation detail belong in the commit/PR, not the changelog.
 - Never modify already-released sections (e.g., `## [0.12.2]`) — they are immutable.
 - Don't flag changelog section order or formatting in reviews or PRs — `bun run release` runs `fix-changelogs` which normalizes everything automatically.
 
