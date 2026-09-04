@@ -70,6 +70,7 @@ import {
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
 	parseConfiguredThinkingLevel,
+	sessionSwitchThinkingOptions,
 } from "../../thinking";
 import {
 	isSearchProviderId,
@@ -85,7 +86,6 @@ import { applyHyperlinkSetting } from "../../tui/hyperlink";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
-import { getAssistantMessageLinkTargets } from "../utils/interactive-context-helpers";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../components/advisor-config";
 import { AgentHubOverlayComponent } from "../components/agent-hub";
 import { AgentsHubComponent } from "../components/agents-hub";
@@ -107,12 +107,14 @@ import { renderSegmentTrack } from "../components/segment-track";
 import { SessionAccountSelectorComponent } from "../components/session-account-selector";
 import { SessionSelectorComponent, type SessionSelectorOptions } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
+import { ThinkingStripComponent } from "../components/thinking-strip";
 import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UsageDashboardComponent } from "../components/usage-dashboard";
-import { renderUsageReports } from "./command-controller";
 import type { SessionObserverRegistry } from "../session-observer-registry";
+import { getAssistantMessageLinkTargets } from "../utils/interactive-context-helpers";
+import { renderUsageReports } from "./command-controller";
 
 const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
 
@@ -871,11 +873,17 @@ export class SelectorController {
 		// else the session model (the bundled task agent inherits it by default).
 		const taskOverride = this.ctx.settings.get("task.agentModelOverrides").task;
 		const taskSelector = (Array.isArray(taskOverride) ? taskOverride[0] : taskOverride) ?? currentSelector;
+		let pickerHidden = false;
 		let closed = false;
+		const hidePicker = () => {
+			if (pickerHidden) return;
+			pickerHidden = true;
+			overlayHandle?.hide();
+		};
 		const done = () => {
 			if (closed) return;
 			closed = true;
-			overlayHandle?.hide();
+			hidePicker();
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
@@ -886,13 +894,28 @@ export class SelectorController {
 			this.ctx.session.scopedModels,
 			{
 				onPick: async (model, selector, { overContext }) => {
+					picker.lockInput();
+					const applySessionModel = (thinkingLevel: ConfiguredThinkingLevel | undefined) =>
+						this.#applySessionModel(model, selector, thinkingLevel, false);
 					try {
-						// Over-context pick: close the picker first so the compaction
-						// loader is visible.
-						if (overContext) done();
-						await this.#applySessionModel(model, selector, undefined, overContext);
-						if (!overContext) done();
+						if (overContext) {
+							// Close the picker before the compaction loader is visible.
+							done();
+							const thinkingLevel = await this.#pickSessionThinkingLevel(model);
+							let switched = false;
+							const switchAfterCompaction = async (outcome: CompactionOutcome) => {
+								if (switched || outcome !== "ok") return;
+								switched = true;
+								await applySessionModel(thinkingLevel);
+							};
+							const outcome = await this.ctx.handleCompactCommand(undefined, undefined, switchAfterCompaction);
+							await switchAfterCompaction(outcome);
+							return;
+						}
+						await this.#pickSessionThinkingLevel(model, applySessionModel, hidePicker);
+						done();
 					} catch (error) {
+						done();
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
 				},
@@ -943,6 +966,70 @@ export class SelectorController {
 		});
 		this.ctx.ui.setFocus(picker);
 		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Effort strip shown after a session-only model pick (alt+p / `/switch`),
+	 * hosted as a bottom-anchored overlay like the model picker itself so it
+	 * never displaces whatever occupies the editor slot (e.g. an extension
+	 * approval dialog). Resolves with the chosen thinking level for the target
+	 * model. A non-reasoning model skips the strip; Esc keeps the previous
+	 * behavior by resolving with the role-configured level for the model (or
+	 * the model's default when none is configured).
+	 */
+	#pickSessionThinkingLevel(
+		model: Model,
+		apply?: (thinkingLevel: ConfiguredThinkingLevel | undefined) => Promise<void>,
+		beforeShow?: () => void,
+	): Promise<ConfiguredThinkingLevel | undefined> {
+		const fallback = this.ctx.session.resolveTemporaryModelThinkingLevel(model);
+		const options = sessionSwitchThinkingOptions(model, fallback);
+		if (!options) {
+			return apply ? apply(fallback).then(() => fallback) : Promise.resolve(fallback);
+		}
+		beforeShow?.();
+		const { promise, resolve, reject } = Promise.withResolvers<ConfiguredThinkingLevel | undefined>();
+		let closed = false;
+		const close = () => {
+			overlayHandle?.hide();
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+		};
+		const finish = (level: ConfiguredThinkingLevel | undefined) => {
+			if (closed) return;
+			closed = true;
+			if (!apply) {
+				close();
+				resolve(level);
+				return;
+			}
+			void apply(level).then(
+				() => {
+					close();
+					resolve(level);
+				},
+				error => {
+					close();
+					reject(error);
+				},
+			);
+		};
+		const strip = new ThinkingStripComponent(
+			`${model.provider}/${model.id}`,
+			options.levels,
+			options.preselect,
+			level => finish(level),
+			() => finish(fallback),
+		);
+		const overlayHandle = this.ctx.ui.showOverlay(strip, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		this.ctx.ui.setFocus(strip);
+		this.ctx.ui.requestRender();
+		return promise;
 	}
 
 	/**
@@ -1204,7 +1291,11 @@ export class SelectorController {
 				const pluginName = atIdx > 0 ? p.id.slice(0, atIdx) : p.id;
 				const mkt = atIdx > 0 ? p.id.slice(atIdx + 1) : "unknown";
 				return {
-					plugin: { name: pluginName, version: entry?.version, description: undefined as string | undefined },
+					plugin: {
+						name: pluginName,
+						version: entry?.version,
+						description: undefined as string | undefined,
+					},
 					marketplace: mkt,
 					scope: p.scope,
 				};
@@ -1377,7 +1468,9 @@ export class SelectorController {
 		}
 		const treeRewind = this.#treeRewindBoundary(entryId, realLeafId);
 		try {
-			const result = await this.ctx.session.navigateTree(entryId, { summarize: false });
+			const result = await this.ctx.session.navigateTree(entryId, {
+				summarize: false,
+			});
 			if (result.cancelled) {
 				done();
 				this.ctx.showStatus("Navigation cancelled");
@@ -1600,7 +1693,9 @@ export class SelectorController {
 							this.ctx.sessionManager.getLeafId() === treeRewind.expectedLeafId &&
 							this.ctx.truncateTranscriptFromMessage(treeRewind.message);
 						if (!fastRewind) {
-							await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+							await this.ctx.renderInitialMessages({
+								clearTerminalHistory: true,
+							});
 						}
 						await this.ctx.reloadTodos();
 						if (result.editorText && !this.ctx.editor.getText().trim()) {
@@ -1767,7 +1862,9 @@ export class SelectorController {
 				const sessionFile = imported.getSessionFile();
 				if (!sessionFile) throw new Error(`Failed to persist ${sourceName} session`);
 				await imported.close();
-				return await this.handleResumeSession(sessionFile, { settingsFlushed: true });
+				return await this.handleResumeSession(sessionFile, {
+					settingsFlushed: true,
+				});
 			};
 			selectorOptions = {
 				title: `Import ${sourceName} Session`,
@@ -2289,7 +2386,9 @@ export class SelectorController {
 	}
 
 	async #redeemReset(account: ResetUsageAccount): Promise<void> {
-		this.ctx.showStatus(`Spending 1 saved reset for ${account.label}…`, { dim: true });
+		this.ctx.showStatus(`Spending 1 saved reset for ${account.label}…`, {
+			dim: true,
+		});
 		let outcome: ResetCreditRedeemOutcome;
 		try {
 			outcome = await this.ctx.session.redeemResetCredit(account.target);

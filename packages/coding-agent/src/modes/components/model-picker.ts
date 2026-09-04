@@ -96,6 +96,7 @@ export class ModelPickerComponent implements Component {
 	#taskMatchKeys = new Set<string>();
 	#taskModeKeyLabel: string;
 	#taskSelector: string | undefined;
+	#inputLocked = false;
 
 	constructor(
 		tui: TUI,
@@ -136,7 +137,9 @@ export class ModelPickerComponent implements Component {
 				callbacks.onPickTask?.(item.model, item.selector);
 				return;
 			}
-			callbacks.onPick(item.model, item.selector, { overContext: this.#browser.isOverContext(item) });
+			callbacks.onPick(item.model, item.selector, {
+				overContext: this.#browser.isOverContext(item),
+			});
 		};
 		this.#browser.onCancel = () => callbacks.onCancel();
 		this.#browser.onQueryChange = query => this.#syncItemsForQuery(query);
@@ -237,7 +240,13 @@ export class ModelPickerComponent implements Component {
 		}
 	}
 
+	/** Ignore input after selection while the session model is being applied. */
+	lockInput(): void {
+		this.#inputLocked = true;
+	}
+
 	handleInput(data: string): void {
+		if (this.#inputLocked) return;
 		// Mouse tracking is off outside fullscreen overlays; drop any stray SGR
 		// reports instead of feeding them to the search input.
 		if (data.startsWith("\x1b[<")) return;
