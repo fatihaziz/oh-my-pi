@@ -1252,6 +1252,10 @@
 ### Added
 
 - Added a thinking-effort picker to the session-only model switch (alt+p / `/switch`): after choosing a reasoning model, a follow-up selector offers `off`, `auto`, and the model's supported effort levels before the switch applies. Esc keeps the previous behavior (the role-configured or model-default level). Non-reasoning models switch immediately as before.
+### Fixed
+
+- Fixed `/guided-goal` interviewing from assumptions and asking in prose; the TUI command now requires the `ask` tool, allows read-only recon before questions, and abandons missing or timed-out input instead of inventing an objective.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

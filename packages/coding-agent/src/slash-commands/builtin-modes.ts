@@ -276,7 +276,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "guided-goal",
 		icon: "compass",
-		description: "Have the agent interview you in chat, then set up goal mode",
+		description: "Research the project, interview you through prompts, then set up goal mode",
 		inlineHint: "[rough objective]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
