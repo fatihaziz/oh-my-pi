@@ -145,7 +145,7 @@ MARKERS = [
         "name": "P6 guided-goal ask tool",
         "source": "packages/coding-agent/src/prompts/goals/guided-goal-interview.md",
         "resolution": "Upstream PR #8187. Regenerate the unified patch; retire this marker after upstream merges equivalent behavior.",
-        "applied": lambda t: "call per reply, one to three questions in that call" in t,
+        "applied": lambda t: "Research first, then interview the user through" in t,
     },
     {
         "id": "P7",

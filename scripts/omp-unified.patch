@@ -1924,7 +1924,7 @@ index 25d065c2c5..805392fab4 100644
 +});
 diff --git a/scripts/omp-reapply-patches.py b/scripts/omp-reapply-patches.py
 new file mode 100644
-index 0000000000..ac944a4d8f
+index 0000000000..4736b6cdf3
 --- /dev/null
 +++ b/scripts/omp-reapply-patches.py
 @@ -0,0 +1,596 @@
@@ -2075,7 +2075,7 @@ index 0000000000..ac944a4d8f
 +        "name": "P6 guided-goal ask tool",
 +        "source": "packages/coding-agent/src/prompts/goals/guided-goal-interview.md",
 +        "resolution": "Upstream PR #8187. Regenerate the unified patch; retire this marker after upstream merges equivalent behavior.",
-+        "applied": lambda t: "call per reply, one to three questions in that call" in t,
++        "applied": lambda t: "Research first, then interview the user through" in t,
 +    },
 +    {
 +        "id": "P7",
@@ -2526,7 +2526,7 @@ index 0000000000..ac944a4d8f
 +    raise SystemExit(main())
 diff --git a/scripts/test_omp_reapply_patches.py b/scripts/test_omp_reapply_patches.py
 new file mode 100644
-index 0000000000..44d697db7c
+index 0000000000..389b0c5afe
 --- /dev/null
 +++ b/scripts/test_omp_reapply_patches.py
 @@ -0,0 +1,237 @@
@@ -2681,7 +2681,7 @@ index 0000000000..44d697db7c
 +    PATCHED_BUNDLE = (
 +        'x="Esc keep current";'
 +        'if(p.endsWith(".json"))return"json";'
-+        "ask call per reply, one to three questions in that call\\n"
++        "Research first, then interview the user through"
 +        "- Ask only what recon cannot answer."
 +        'omp-editor-x windowsHide:process.platform==="win32";'
 +        'reject("without opening the file");omp-fork:P11-openrouter-usage'

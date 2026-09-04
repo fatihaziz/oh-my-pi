@@ -149,7 +149,7 @@ class MarkerTests(unittest.TestCase):
     PATCHED_BUNDLE = (
         'x="Esc keep current";'
         'if(p.endsWith(".json"))return"json";'
-        "ask call per reply, one to three questions in that call\\n"
+        "Research first, then interview the user through"
         "- Ask only what recon cannot answer."
         'omp-editor-x windowsHide:process.platform==="win32";'
         'reject("without opening the file");omp-fork:P11-openrouter-usage'
