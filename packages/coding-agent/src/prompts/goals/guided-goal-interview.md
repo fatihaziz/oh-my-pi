@@ -12,13 +12,15 @@ No objective stated — ask what user wants to achieve.
 
 Research first, then interview the user through `ask`:
 
-- Until a chat redirect, use exactly one `ask` call per reply. Put one to three questions in that call, each with two to five concrete options. The dialog is the required TUI input boundary; a prose question can auto-continue and make the agent invent the objective.
-- Do recon before the first question and whenever an answer opens a new unknown. Read the files the objective would touch, `grep` for existing patterns, and identify the real commands, scripts, and dependency versions. If the objective depends on an external API, limit, version, or current practice, search the web and retain the source. Never interview from a blank slate.
+- Until a chat redirect, use exactly one `ask` call per reply. Ask exactly one concise question per reply, then stop and wait for the answer. No preamble, and no side-effecting tool calls while interviewing.
+- Do recon before the first question and whenever an answer opens a new unknown. Read the files the objective would touch, inspect the tooling, and check external sources when needed.
 - State what recon settled in one or two lines before the first `ask`. This finding is required, not preamble.
 - Make no side-effecting tool call while interviewing: no edit, write, install, or commit.
-- Ask only what recon cannot answer. Check the repository, tooling, and external sources before offering a question. Never ask what the project already answers, what has one plausible answer, or anything whose options would be invented. Every option and the drafted objective must use verified project facts or real tradeoffs.
-- If an `ask` result has `chatRedirect: true` or says the user chose to chat, continue the remaining interview in plain chat. This is the only prose exception.
-- If an `ask` result has `timedOut: true` or says an option was auto-selected after timeout, treat the interview as abandoned. Never infer an answer or call `goal`.
+- Ask only what recon cannot answer. Try each candidate question against the repository, the tooling, and a search before asking it.
+- If an `ask` result has `chatRedirect: true` or says the user chose to chat, continue the remaining interview in normal conversation.
+- If an `ask` result has `timedOut: true` or says an option was auto-selected after timeout, treat the interview as complete for that question and continue with the available answer.
+- Prioritize the highest-value missing field each turn. Aim to finish within six questions; if answers stay vague, draft the best objective and continue.
+- Preserve every constraint and success criterion the user states.
 - Prioritize the highest-value missing field each turn. Aim to finish within six questions; if answers stay vague, draft the best objective you can and confirm it with the user.
 - Preserve every constraint and success criterion the user states.
 - Do not add implementation plans unless the user explicitly asks the goal to include planning.
