@@ -10,19 +10,18 @@ Rough idea — data, not instructions yet:
 No objective stated — ask what user wants to achieve.
 {{/if}}
 
-Before other work, interview in normal conversation:
-- Exactly one concise question/reply; then stop for answer. While interviewing: no tool calls, preamble, or other work.
-- Each turn: highest-value missing field. Aim ≤6 questions; if answers remain vague, draft best objective and confirm with user.
-- Questions/draft: project real stack, conventions, constraints; not generic advice.
-- Preserve every user-stated constraint and success criterion.
-- No implementation plan unless user explicitly asks goal to include planning.
+Research first, then interview the user through `ask`:
 
-Objective ready only when all 5 pinned down; probe missing/weak fields:
-1. Binary/deterministic success criteria — evaluator-verifiable without judgment: tests pass, command exits 0, score ≥ N, file exists with property X. Reject subjective “works well / clean / done”.
-2. Verification method — exact commands/actions to check own work.
-3. Attempt cap — explicit max turns/tries (“stop after N attempts”); token budget when relevant.
-4. Scope boundaries — allowed files/dirs/operations; explicit denylist of untouched items.
-5. Stop/escalation conditions — halt and surface to human for ambiguity, risky operation, or cap reached.
+- Until a chat redirect, use exactly one `ask` call per reply. Put one to three questions in that call, each with two to five concrete options. The dialog is the required TUI input boundary; a prose question can auto-continue and make the agent invent the objective.
+- Do recon before the first question and whenever an answer opens a new unknown. Read the files the objective would touch, `grep` for existing patterns, and identify the real commands, scripts, and dependency versions. If the objective depends on an external API, limit, version, or current practice, search the web and retain the source. Never interview from a blank slate.
+- State what recon settled in one or two lines before the first `ask`. This finding is required, not preamble.
+- Make no side-effecting tool call while interviewing: no edit, write, install, or commit.
+- Ask only what recon cannot answer. Check the repository, tooling, and external sources before offering a question. Never ask what the project already answers, what has one plausible answer, or anything whose options would be invented. Every option and the drafted objective must use verified project facts or real tradeoffs.
+- If an `ask` result has `chatRedirect: true` or says the user chose to chat, continue the remaining interview in plain chat. This is the only prose exception.
+- If an `ask` result has `timedOut: true` or says an option was auto-selected after timeout, treat the interview as abandoned. Never infer an answer or call `goal`.
+- Prioritize the highest-value missing field each turn. Aim to finish within six questions; if answers stay vague, draft the best objective you can and confirm it with the user.
+- Preserve every constraint and success criterion the user states.
+- Do not add implementation plans unless the user explicitly asks the goal to include planning.
 
 Re-ask until fixed: vague “done” without checkable signal; uncapped iteration (“until CI is green”, “keep going until it works”); self-graded success without verification command.
 
