@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Non-structured Codex HTTP errors include the status, endpoint, and response body context.
+
 ## [18.1.15] - 2026-09-08
 
 ### Fixed

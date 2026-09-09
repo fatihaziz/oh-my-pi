@@ -383,3 +383,53 @@ describe("openai-codex error parsing", () => {
 		expect(error.message).toContain("rate limit exceeded");
 	});
 });
+it("plain-text failure body surfaces status, endpoint, and body instead of a bare phrase", async () => {
+	// The 2026-09-03 Codex outage answered every request with a plain-text
+	// "Not Found"; the banner showed only that phrase with no status or URL.
+	const response = new Response("Not Found", {
+		status: 404,
+		statusText: "Not Found",
+	});
+	Object.defineProperty(response, "url", { value: "https://chatgpt.com/backend-api/codex/responses" });
+
+	const info = await parseCodexError(response);
+	const error = new CodexApiError(info);
+	expect(error.message).toBe("HTTP 404 Not Found at chatgpt.com/backend-api/codex/responses");
+	expect(error.status).toBe(404);
+});
+
+it("structured API error messages pass through untouched", async () => {
+	const response = new Response(JSON.stringify({ error: { code: "server_error", message: "upstream exploded" } }), {
+		status: 500,
+		statusText: "Internal Server Error",
+	});
+
+	const info = await parseCodexError(response);
+	expect(info.message).toBe("upstream exploded");
+	expect(info.status).toBe(500);
+});
+it("plain-text failure body surfaces status, endpoint, and body instead of a bare phrase", async () => {
+	// The 2026-09-03 Codex outage answered every request with a plain-text
+	// "Not Found"; the banner showed only that phrase with no status or URL.
+	const response = new Response("Not Found", {
+		status: 404,
+		statusText: "Not Found",
+	});
+	Object.defineProperty(response, "url", { value: "https://chatgpt.com/backend-api/codex/responses" });
+
+	const info = await parseCodexError(response);
+	const error = new CodexApiError(info);
+	expect(error.message).toBe("HTTP 404 Not Found at chatgpt.com/backend-api/codex/responses");
+	expect(error.status).toBe(404);
+});
+
+it("structured API error messages pass through untouched", async () => {
+	const response = new Response(JSON.stringify({ error: { code: "server_error", message: "upstream exploded" } }), {
+		status: 500,
+		statusText: "Internal Server Error",
+	});
+
+	const info = await parseCodexError(response);
+	expect(info.message).toBe("upstream exploded");
+	expect(info.status).toBe(500);
+});

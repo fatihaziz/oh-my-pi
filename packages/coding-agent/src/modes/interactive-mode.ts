@@ -4345,7 +4345,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 			if (!this.session.hasBuiltInTool("ask")) {
 				this.showWarning("Guided goal requires the ask tool. Enable ask.enabled and include ask in --tools.");
-				return;
+				return false;
 			}
 
 			// Expose the goal tool for the interview so the agent can finish by

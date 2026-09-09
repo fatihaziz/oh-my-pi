@@ -6282,10 +6282,13 @@
 				],
 				"wire": {
 					"supportsConfigurationUpdate": true
+				},
+				"thinking": {
+					"requiresEffort": true
 				}
 			},
 			{
-				"source": "classes/openai.kdl:52",
+				"source": "classes/openai.kdl:54",
 				"class": "openai",
 				"family": "codex",
 				"revision": [

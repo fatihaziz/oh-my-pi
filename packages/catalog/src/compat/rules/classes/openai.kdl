@@ -44,6 +44,8 @@ class "openai" {
 	// `configuration_update` input item so the request-level effort (and the
 	// cached prompt prefix) stays put; every other SKU 400s on the item type.
 	models "gpt-6-astra" {
+		// omp-fork:P13-astra-required-effort: Astra rejects reasoning.effort "none".
+		thinking-requires-effort #true
 		supports-configuration-update #true
 	}
 	// Codex SKUs: the advertised 400K figure includes the output budget; the

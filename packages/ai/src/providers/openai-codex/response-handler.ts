@@ -80,9 +80,16 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
 		}
 
 		const errMessage = (err as { message?: string }).message;
-		message = errMessage || friendlyMessage || message;
+		if (errMessage) {
+			message = errMessage;
+		} else if (friendlyMessage) {
+			message = friendlyMessage;
+		} else {
+			message = describeCodexHttpFailure(response, message);
+		}
 	} catch {
-		// raw body not JSON
+		// raw body not JSON — no structured error to extract
+		message = describeCodexHttpFailure(response, message);
 	}
 
 	return {
@@ -93,6 +100,29 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
 		rateLimits,
 		raw: raw,
 	};
+}
+
+/**
+ * Builds a self-locating message for failures whose body carries no structured
+ * API error (plain-text or HTML bodies from edge/backend outages, empty bodies).
+ * A bare "Not Found" tells the user nothing; the status, endpoint, and body
+ * snippet make provider-side incidents diagnosable from the banner alone.
+ */
+function describeCodexHttpFailure(response: Response, bodyText: string): string {
+	let location = "";
+	try {
+		const url = new URL(response.url);
+		if (url.protocol === "https:" || url.protocol === "http:") location = `${url.host}${url.pathname}`;
+	} catch {
+		// no usable URL on this response
+	}
+	const statusText = response.statusText.trim();
+	let snippet = bodyText.replace(/\s+/g, " ").trim();
+	if (snippet.length > 200) snippet = snippet.slice(0, 200);
+	if (snippet === statusText) snippet = "";
+	const at = location ? ` at ${location}` : "";
+	const body = snippet ? `: ${snippet}` : "";
+	return `HTTP ${response.status}${statusText ? ` ${statusText}` : ""}${at}${body}`;
 }
 
 function toInt(v: string | null): number | undefined {

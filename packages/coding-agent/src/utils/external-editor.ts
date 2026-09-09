@@ -7,6 +7,16 @@ import * as path from "node:path";
 import { $env, $which, Snowflake } from "@oh-my-pi/pi-utils";
 
 /**
+ * Shortest run that can still be a real editing session. A launcher that
+ * returns faster than this AND leaves the file byte-identical never opened an
+ * editor: it is either non-blocking (missing `--wait`) or a broken wrapper that
+ * reports success while starting nothing. Both cases used to look like a dead
+ * keybinding, because exit 0 made the caller keep the unchanged draft in
+ * silence and the temp file was removed on the way out.
+ */
+const INSTANT_EXIT_MS = 1500;
+
+/**
  * Returns the user's preferred editor command, or a platform default.
  *
  * Resolution order:
@@ -54,7 +64,9 @@ export function resolveEditorSpawnCommand(
 
 /**
  * Opens `content` in the user's external editor and returns the edited text.
- * Returns `null` if the editor exits with a non-zero code.
+ * Returns `null` if the editor exits with a non-zero code, and throws when the
+ * launcher reports success without ever opening the file (see INSTANT_EXIT_MS)
+ * so the caller can surface the misconfiguration instead of doing nothing.
  *
  * The caller is responsible for stopping/starting the TUI around this call.
  */
@@ -72,15 +84,23 @@ export async function openInEditor(
 		const spawnCommand = resolveEditorSpawnCommand(editorCmd, tmpFile);
 		// Inherit the real pane pty so terminal editors (including emacsclient,
 		// which resolves the device via ttyname) render into the visible pane.
+		const startedAt = Bun.nanoseconds();
 		const child = Bun.spawn(spawnCommand.cmd, {
 			stdin: "inherit",
 			stdout: "inherit",
 			stderr: "inherit",
 			windowsVerbatimArguments: spawnCommand.windowsVerbatimArguments,
+			windowsHide: process.platform === "win32",
 		});
 		const exitCode = await child.exited;
+		const elapsedMs = (Bun.nanoseconds() - startedAt) / 1e6;
 		if (exitCode === 0) {
 			const text = await Bun.file(tmpFile).text();
+			if (text === content && elapsedMs < INSTANT_EXIT_MS) {
+				throw new Error(
+					`\`${editorCmd}\` returned after ${Math.round(elapsedMs)}ms without opening the file. Configure a blocking editor (for example \`code --wait\`) and check that it resolves to a working install.`,
+				);
+			}
 			if (options?.trimTrailingNewline === false) {
 				return text;
 			}

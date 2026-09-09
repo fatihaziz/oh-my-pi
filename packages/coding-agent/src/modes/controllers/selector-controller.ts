@@ -993,7 +993,6 @@ export class SelectorController {
 		}
 		beforeShow?.();
 		const { promise, resolve, reject } = Promise.withResolvers<ConfiguredThinkingLevel | undefined>();
-		let overlayHandle: OverlayHandle | undefined;
 		let closed = false;
 		const close = () => {
 			overlayHandle?.hide();
@@ -1026,7 +1025,7 @@ export class SelectorController {
 			level => finish(level),
 			() => finish(fallback),
 		);
-		overlayHandle = this.ctx.ui.showOverlay(strip, {
+		const overlayHandle = this.ctx.ui.showOverlay(strip, {
 			anchor: "bottom-center",
 			width: "100%",
 			maxHeight: "100%",

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Astra requires reasoning, so disabled-thinking requests use its lowest supported effort instead of unsupported `none`.
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed
