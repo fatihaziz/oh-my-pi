@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "omp-reapply-patches.py"
@@ -61,13 +62,19 @@ class FilterPatchTests(unittest.TestCase):
         self.assertEqual({"pi-coding-agent": ["src/thinking.ts"]}, ENGINE.patched_source_paths(filtered))
 
     def test_multi_package_paths_split_per_installed_package(self):
-        filtered = ENGINE.filter_patch_for_package(MULTI_PATCH)
+        filtered = ENGINE.filter_patch_for_package(
+            MULTI_PATCH + make_diff("packages/catalog/src/compat/rules.json", '{"rules":[]}', '{"rules":[1]}')
+        )
         self.assertEqual(
-            {"pi-coding-agent": ["src/thinking.ts"], "pi-ai": ["src/providers/failure.ts"]},
+            {
+                "pi-coding-agent": ["src/thinking.ts"],
+                "pi-ai": ["src/providers/failure.ts"],
+                "pi-catalog": ["src/compat/rules.json"],
+            },
             ENGINE.patched_source_paths(filtered),
         )
         grouped = ENGINE.sections_by_package(filtered)
-        self.assertEqual({"pi-coding-agent", "pi-ai"}, set(grouped))
+        self.assertEqual({"pi-coding-agent", "pi-ai", "pi-catalog"}, set(grouped))
         self.assertIn("b/packages/ai/src/providers/failure.ts", grouped["pi-ai"])
 
 
@@ -86,6 +93,47 @@ class ClassifySourceStateTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_failed_multi_package_apply_restores_every_source(self):
+        self.target.write_text("const a = 1;\n", encoding="utf-8")
+        ai_source = self.package.parent / "pi-ai" / "src" / "providers" / "failure.ts"
+        ai_source.parent.mkdir(parents=True)
+        ai_source.write_text("const b = 1;\n", encoding="utf-8")
+        scripts = self.package / "scripts"
+        scripts.mkdir()
+        (scripts / "bundle-dist.ts").write_text(
+            'await runCommand(["bun", "--cwd=../stats", "run", "gen:stats"]);\n'
+            'await runCommand(["bun", "--cwd=../stats", "run", "build"]);\n',
+            encoding="utf-8",
+        )
+        (scripts / "generate-docs-index.ts").write_text(
+            'const docsDir = path.resolve(packageDir, "../../docs");', encoding="utf-8"
+        )
+        stats_payload = self.package.parent / "omp-stats" / "src" / "embedded-client.generated.txt"
+        stats_payload.parent.mkdir(parents=True)
+        stats_payload.write_text("original-stats", encoding="utf-8")
+        filtered = ENGINE.filter_patch_for_package(
+            make_diff(SRC_PATH, "const a = 1;", "const a = 2;")
+            + make_diff(AI_SRC_PATH, "const b = 1;", "const b = 2;")
+        )
+        apply = ENGINE.git_apply
+
+        def fail_after_apply(package, sections):
+            result = apply(package, sections)
+            if package.name == "pi-ai":
+                return subprocess.CompletedProcess([], 1, "", "injected apply failure")
+            return result
+
+        with patch.object(ENGINE, "REPO_ROOT", self.root), patch.object(
+            ENGINE, "git_apply", side_effect=fail_after_apply
+        ):
+            transaction, reason = ENGINE.rebuild_bundle(self.cli, filtered, "pristine")
+        self.assertIsNone(transaction)
+        self.assertIn("injected apply failure", reason)
+        self.assertEqual("const a = 1;\n", self.target.read_text(encoding="utf-8"))
+        self.assertEqual("const b = 1;\n", ai_source.read_text(encoding="utf-8"))
+        self.assertEqual("bundle-bytes", self.cli.read_text(encoding="utf-8"))
+        self.assertEqual([], list((self.root / "tmp").iterdir()))
 
     def test_pristine_when_forward_check_passes(self):
         self.target.write_text("const a = 1;\n", encoding="utf-8")
@@ -154,6 +202,7 @@ class MarkerTests(unittest.TestCase):
         'omp-editor-x windowsHide:process.platform==="win32";'
         'reject("without opening the file");omp-fork:P11-openrouter-usage'
         'let statusText=response.statusText.trim();'
+        'value:"gpt-6-astra"}],wire:{supportsConfigurationUpdate:!0},thinking:{requiresEffort:!0}'
     )
 
     def test_all_markers_present_on_patched_bundle(self):
@@ -164,7 +213,7 @@ class MarkerTests(unittest.TestCase):
         results = ENGINE.evaluate_markers("pristine upstream bundle text")
         self.assertFalse(any(r["present"] for r in results))
         self.assertEqual(
-            ["S1", "P1", "P6", "P7", "P8", "P9", "P11", "P12"],
+            ["S1", "P1", "P6", "P7", "P8", "P9", "P11", "P12", "P13"],
             [r["marker"]["id"] for r in results],
         )
 

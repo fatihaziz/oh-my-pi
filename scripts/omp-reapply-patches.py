@@ -14,9 +14,11 @@ Single source of truth
       P1  getLoader json/toml/text assets  local only; no PR
       P6  guided-goal ask-tool interview   upstream PR #8187
       P7  guided-goal recon-first          fork PR fatihaziz/oh-my-pi#1
+      P8  hidden Windows editor shell     local only
       P9  guard lying editor launcher    local only; upstreamable
       P11 openrouter usage in `omp usage` local only; upstreamable
       P12 codex http failure context (pi-ai) local only; upstreamable
+      P13 Astra mandatory reasoning (pi-catalog) local only; upstreamable
     Retired: P3 (thinking label "max") — upstream-native since 17.3.x.
     Retired: P5 (fresh-session vibe autostart) — removed 2026-08-20 by user
     decision: fresh sessions must start in normal mode; vibe is /vibe only.
@@ -48,7 +50,7 @@ Version gate
 
 Regeneration (new upstream release W.X.Y)
     cd <omp-repo>
-    git fetch origin main "+refs/pull/8029/head:refs/remotes/origin/pr/8029" \
+    git fetch origin main tag vW.X.Y "+refs/pull/8029/head:refs/remotes/origin/pr/8029" \
         "+refs/pull/8187/head:refs/remotes/origin/pr/8187"
     git fetch fork fix/guided-goal-recon-before-asking
     git worktree add tmp/upstream-unified-WXY -b unified-patch-WXY vW.X.Y
@@ -57,7 +59,9 @@ Regeneration (new upstream release W.X.Y)
     git merge --no-ff origin/pr/8187           # resolve conflicts
     git merge --no-ff fork/fix/guided-goal-recon-before-asking
     # re-fold P1 if upstream still lacks it, run
-    # `bun check` + the switch/guided tests, then:
+    # `bun run check:ts` + the focused carried-behavior tests, then:
+    # After KDL policy changes, run `bun --cwd=packages/catalog run gen:compat`
+    # before generating the diff; include the generated src/compat/rules.json.
     git diff vW.X.Y..HEAD > ../../scripts/omp-unified.patch
     # bump UNIFIED_BASE_VERSION here and ompInstall.version in the vault.
     Retire any PR that upstream merged (drop its marker + AGENTS.md row).
@@ -70,6 +74,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -78,12 +83,13 @@ from pathlib import Path
 BACKUP_SUFFIX = ".ompbak"  # -> cli.js.ompbak beside the bundle
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UNIFIED_PATCH = REPO_ROOT / "scripts" / "omp-unified.patch"
-UNIFIED_BASE_VERSION = "18.1.9"
+UNIFIED_BASE_VERSION = "18.1.15"
 PACKAGE_PREFIXES = {
     # Repo package prefix -> installed npm package name under @oh-my-pi.
     # Only source ships in the npm packages; CHANGELOG/test hunks stay repo-side.
     "packages/coding-agent/": "pi-coding-agent",
     "packages/ai/": "pi-ai",
+    "packages/catalog/": "pi-catalog",
 }
 APPLY_PREFIXES = {prefix + "src/": name for prefix, name in PACKAGE_PREFIXES.items()}
 
@@ -183,6 +189,17 @@ MARKERS = [
         "resolution": "Local only; upstreamable. Regenerate the unified patch; drop this marker once upstream "
         "prefixes non-structured Codex errors with status and endpoint.",
         "applied": lambda t: "statusText.trim()" in t,
+    },
+    {
+        "id": "P13",
+        "name": "P13 Astra required reasoning effort",
+        "source": "packages/catalog/src/compat/rules/classes/openai.kdl",
+        "resolution": "Regenerate catalog rules with gen:compat, then regenerate the unified patch. "
+        "Astra must clamp disabled reasoning to low before sending a Codex request.",
+        "applied": lambda t: re.search(
+            r'"gpt-6-astra"[^]]*\]\s*,\s*"?wire"?\s*:\s*\{[^}]*\}\s*,\s*'
+            r'"?thinking"?\s*:\s*\{\s*"?requiresEffort"?\s*:\s*(?:true|!0)', t
+        ) is not None,
     },
 ]
 
@@ -380,17 +397,6 @@ def rebuild_bundle(
         for name, rels in patched_source_paths(filtered_patch).items()
         for rel in rels
     ]
-    source_backups = {
-        path: path.read_text(encoding="utf-8") if path.exists() else None for path in touched
-    }
-    dist = package_root / "dist"
-    shutil.copytree(dist, backup_root / "dist")
-    transaction = {"sources": source_backups, "dist": dist, "backup": backup_root}
-    package_root = cli.parent.parent
-    repo_tmp = REPO_ROOT / "tmp"
-    repo_tmp.mkdir(exist_ok=True)
-    backup_root = Path(tempfile.mkdtemp(prefix="omp-unified-", dir=repo_tmp))
-    touched = [package_root / rel for rel in patched_source_paths(filtered_patch)]
     source_backups = {
         path: path.read_text(encoding="utf-8") if path.exists() else None for path in touched
     }
