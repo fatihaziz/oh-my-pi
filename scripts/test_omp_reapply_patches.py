@@ -64,17 +64,19 @@ class FilterPatchTests(unittest.TestCase):
     def test_multi_package_paths_split_per_installed_package(self):
         filtered = ENGINE.filter_patch_for_package(
             MULTI_PATCH + make_diff("packages/catalog/src/compat/rules.json", '{"rules":[]}', '{"rules":[1]}')
+            + make_diff("packages/agent/src/agent-loop.ts", "const c = 1;", "const c = 2;")
         )
         self.assertEqual(
             {
                 "pi-coding-agent": ["src/thinking.ts"],
                 "pi-ai": ["src/providers/failure.ts"],
                 "pi-catalog": ["src/compat/rules.json"],
+                "pi-agent-core": ["src/agent-loop.ts"],
             },
             ENGINE.patched_source_paths(filtered),
         )
         grouped = ENGINE.sections_by_package(filtered)
-        self.assertEqual({"pi-coding-agent", "pi-ai", "pi-catalog"}, set(grouped))
+        self.assertEqual({"pi-coding-agent", "pi-ai", "pi-catalog", "pi-agent-core"}, set(grouped))
         self.assertIn("b/packages/ai/src/providers/failure.ts", grouped["pi-ai"])
 
 
@@ -94,7 +96,7 @@ class ClassifySourceStateTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_failed_multi_package_apply_restores_every_source(self):
+    def _prepare_rebuild(self):
         self.target.write_text("const a = 1;\n", encoding="utf-8")
         ai_source = self.package.parent / "pi-ai" / "src" / "providers" / "failure.ts"
         ai_source.parent.mkdir(parents=True)
@@ -109,9 +111,17 @@ class ClassifySourceStateTests(unittest.TestCase):
         (scripts / "generate-docs-index.ts").write_text(
             'const docsDir = path.resolve(packageDir, "../../docs");', encoding="utf-8"
         )
+        legacy_script = scripts / "legacy-pi-virtual-module.ts"
+        legacy_script.write_text(
+            'const packageRoot = path.join(repoRoot, "packages", pkg.dir);', encoding="utf-8"
+        )
         stats_payload = self.package.parent / "omp-stats" / "src" / "embedded-client.generated.txt"
         stats_payload.parent.mkdir(parents=True)
         stats_payload.write_text("original-stats", encoding="utf-8")
+        return ai_source
+
+    def test_failed_multi_package_apply_restores_every_source(self):
+        ai_source = self._prepare_rebuild()
         filtered = ENGINE.filter_patch_for_package(
             make_diff(SRC_PATH, "const a = 1;", "const a = 2;")
             + make_diff(AI_SRC_PATH, "const b = 1;", "const b = 2;")
@@ -132,6 +142,33 @@ class ClassifySourceStateTests(unittest.TestCase):
         self.assertIn("injected apply failure", reason)
         self.assertEqual("const a = 1;\n", self.target.read_text(encoding="utf-8"))
         self.assertEqual("const b = 1;\n", ai_source.read_text(encoding="utf-8"))
+        self.assertEqual("bundle-bytes", self.cli.read_text(encoding="utf-8"))
+        self.assertEqual([], list((self.root / "tmp").iterdir()))
+
+    def test_failed_diagnostic_write_still_restores_the_transaction(self):
+        self._prepare_rebuild()
+        original_run = subprocess.run
+        original_write = Path.write_text
+
+        def simulate_build(args, *positional, **kwargs):
+            if args == ["bun", "scripts/bundle-dist.ts"]:
+                self.cli.write_text("rebuilt-without-markers", encoding="utf-8")
+                return subprocess.CompletedProcess(args, 0, "", "")
+            return original_run(args, *positional, **kwargs)
+
+        def fail_diagnostic(target, content, *positional, **kwargs):
+            if target.name == "omp-unified-last-build.js":
+                raise OSError(28, "No space left on device")
+            return original_write(target, content, *positional, **kwargs)
+
+        with patch.object(ENGINE, "REPO_ROOT", self.root), patch.object(
+            ENGINE.subprocess, "run", side_effect=simulate_build
+        ), patch.object(Path, "write_text", new=fail_diagnostic):
+            transaction, reason = ENGINE.rebuild_bundle(self.cli, self.patch, "pristine")
+        self.assertIsNone(transaction)
+        self.assertIn("missing markers", reason)
+        self.assertIn("No space left on device", reason)
+        self.assertEqual("const a = 1;\n", self.target.read_text(encoding="utf-8"))
         self.assertEqual("bundle-bytes", self.cli.read_text(encoding="utf-8"))
         self.assertEqual([], list((self.root / "tmp").iterdir()))
 
@@ -197,12 +234,15 @@ class MarkerTests(unittest.TestCase):
     PATCHED_BUNDLE = (
         'x="Esc keep current";'
         'if(p.endsWith(".json"))return"json";'
-        "Research first, then interview the user through"
-        "- Ask only what recon cannot answer."
         'omp-editor-x windowsHide:process.platform==="win32";'
         'reject("without opening the file");omp-fork:P11-openrouter-usage'
         'let statusText=response.statusText.trim();'
         'value:"gpt-6-astra"}],wire:{supportsConfigurationUpdate:!0},thinking:{requiresEffort:!0}'
+        'eventId:`foyer-companion-v1:${crypto.randomUUID()}`'
+        'checkpointTodoPhases;markBoundedReadResult;'
+        'XDEV_KEEP_TOP_LEVEL={todo:true,ask:true,grep:true,web_search:true,checkpoint:true,rewind:true};'
+        'isDeepStrictEqual;x.push({hash:t,outcome:a});'
+        'tool-call-protocol-stop;Expected arguments:;toolCallError;'
     )
 
     def test_all_markers_present_on_patched_bundle(self):
@@ -213,7 +253,7 @@ class MarkerTests(unittest.TestCase):
         results = ENGINE.evaluate_markers("pristine upstream bundle text")
         self.assertFalse(any(r["present"] for r in results))
         self.assertEqual(
-            ["S1", "P1", "P6", "P7", "P8", "P9", "P11", "P12", "P13"],
+            ["S1", "P1", "P8", "P9", "P11", "P12", "P13", "P14", "P15", "P16", "P17", "P18", "P19"],
             [r["marker"]["id"] for r in results],
         )
 
@@ -277,7 +317,7 @@ class UnifiedPatchFileTests(unittest.TestCase):
         self.assertTrue(filtered, "unified patch has no shippable packages/*/src/ sections")
         paths = ENGINE.patched_source_paths(filtered)
         self.assertIn("src/thinking.ts", paths["pi-coding-agent"])
-        self.assertIn("src/prompts/goals/guided-goal-interview.md", paths["pi-coding-agent"])
+        self.assertNotIn("src/prompts/goals/guided-goal-interview.md", paths["pi-coding-agent"])
         for rels in paths.values():
             self.assertTrue(all(p.startswith("src/") for p in rels))
 

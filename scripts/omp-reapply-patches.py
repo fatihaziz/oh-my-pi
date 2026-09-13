@@ -12,16 +12,22 @@ Single source of truth
 
       S1  session switch thinking effort   upstream PR #8029
       P1  getLoader json/toml/text assets  local only; no PR
-      P6  guided-goal ask-tool interview   upstream PR #8187
-      P7  guided-goal recon-first          fork PR fatihaziz/oh-my-pi#1
       P8  hidden Windows editor shell     local only
       P9  guard lying editor launcher    local only; upstreamable
       P11 openrouter usage in `omp usage` local only; upstreamable
       P12 codex http failure context (pi-ai) local only; upstreamable
       P13 Astra mandatory reasoning (pi-catalog) local only; upstreamable
+      P14 foyer companion session bridge  local only; no PR
+      P15 checkpoint todo preservation    generic harness fix
+      P16 bounded source output fidelity  generic harness fix
+      P17 typed lifecycle tool exposure   generic harness fix
+      P18 outcome-aware repetition        generic harness fix
+      P19 schema-guided protocol recovery generic harness fix
     Retired: P3 (thinking label "max") — upstream-native since 17.3.x.
     Retired: P5 (fresh-session vibe autostart) — removed 2026-08-20 by user
     decision: fresh sessions must start in normal mode; vibe is /vibe only.
+    Retired: P6/P7 (guided-goal ask/recon interview) — removed by owner
+    decision; retain upstream /guided-goal without local interview patches.
     Retired: P10 (git concurrency limiter) — retired 2026-09-03 by owner
     decision: upstream 18.0.9 removed utils/git.ts (VCS moved in-process to
     @oh-my-pi/pi-natives/vcs via gix/jj-lib), so the TS FIFO limiter has no
@@ -50,14 +56,10 @@ Version gate
 
 Regeneration (new upstream release W.X.Y)
     cd <omp-repo>
-    git fetch origin main tag vW.X.Y "+refs/pull/8029/head:refs/remotes/origin/pr/8029" \
-        "+refs/pull/8187/head:refs/remotes/origin/pr/8187"
-    git fetch fork fix/guided-goal-recon-before-asking
+    git fetch origin main tag vW.X.Y "+refs/pull/8029/head:refs/remotes/origin/pr/8029"
     git worktree add tmp/upstream-unified-WXY -b unified-patch-WXY vW.X.Y
     cd tmp/upstream-unified-WXY
     git merge --no-ff origin/pr/8029           # resolve conflicts
-    git merge --no-ff origin/pr/8187           # resolve conflicts
-    git merge --no-ff fork/fix/guided-goal-recon-before-asking
     # re-fold P1 if upstream still lacks it, run
     # `bun run check:ts` + the focused carried-behavior tests, then:
     # After KDL policy changes, run `bun --cwd=packages/catalog run gen:compat`
@@ -83,13 +85,14 @@ from pathlib import Path
 BACKUP_SUFFIX = ".ompbak"  # -> cli.js.ompbak beside the bundle
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UNIFIED_PATCH = REPO_ROOT / "scripts" / "omp-unified.patch"
-UNIFIED_BASE_VERSION = "18.1.15"
+UNIFIED_BASE_VERSION = "18.1.18"
 PACKAGE_PREFIXES = {
     # Repo package prefix -> installed npm package name under @oh-my-pi.
     # Only source ships in the npm packages; CHANGELOG/test hunks stay repo-side.
     "packages/coding-agent/": "pi-coding-agent",
     "packages/ai/": "pi-ai",
     "packages/catalog/": "pi-catalog",
+    "packages/agent/": "pi-agent-core",
 }
 APPLY_PREFIXES = {prefix + "src/": name for prefix, name in PACKAGE_PREFIXES.items()}
 
@@ -147,20 +150,6 @@ MARKERS = [
         "applied": lambda t: '.json"))return"json"' in t,
     },
     {
-        "id": "P6",
-        "name": "P6 guided-goal ask tool",
-        "source": "packages/coding-agent/src/prompts/goals/guided-goal-interview.md",
-        "resolution": "Upstream PR #8187. Regenerate the unified patch; retire this marker after upstream merges equivalent behavior.",
-        "applied": lambda t: "Research first, then interview the user through" in t,
-    },
-    {
-        "id": "P7",
-        "name": "P7 guided-goal recon",
-        "source": "packages/coding-agent/src/prompts/goals/guided-goal-interview.md",
-        "resolution": "Fork PR fatihaziz/oh-my-pi#1; never upstream. Rides in the unified patch after the P6 prompt text.",
-        "applied": lambda t: "- Ask only what recon cannot answer." in t,
-    },
-    {
         "id": "P8",
         "name": "P8 hidden Windows editor shell",
         "source": "packages/coding-agent/src/utils/external-editor.ts:openInEditor",
@@ -200,6 +189,50 @@ MARKERS = [
             r'"gpt-6-astra"[^]]*\]\s*,\s*"?wire"?\s*:\s*\{[^}]*\}\s*,\s*'
             r'"?thinking"?\s*:\s*\{\s*"?requiresEffort"?\s*:\s*(?:true|!0)', t
         ) is not None,
+    },
+    {
+        "id": "P14",
+        "name": "P14 foyer companion session bridge",
+        "source": "packages/coding-agent/src/session/companion.ts",
+        "resolution": "Local only; no PR. Foyer's Telegram Companion needs an authoritative "
+        "final-settle snapshot and a supported resolver for an open ask dialog. Regenerate the "
+        "unified patch; retire this marker if upstream exposes both natively.",
+        "applied": lambda t: "foyer-companion-v1" in t,
+    },
+    {
+        "id": "P15",
+        "name": "P15 checkpoint todo preservation",
+        "source": "packages/coding-agent/src/session/agent-session.ts:#applyRewind",
+        "resolution": "Retire when upstream preserves canonical todo snapshots across exploration rewind.",
+        "applied": lambda t: "checkpointTodoPhases" in t,
+    },
+    {
+        "id": "P16",
+        "name": "P16 bounded source output fidelity",
+        "source": "packages/coding-agent/src/tools/output-meta.ts:markBoundedReadResult",
+        "resolution": "Retire when upstream avoids generic re-elision of bounded native source selections.",
+        "applied": lambda t: "markBoundedReadResult" in t,
+    },
+    {
+        "id": "P17",
+        "name": "P17 typed checkpoint lifecycle tools",
+        "source": "packages/coding-agent/src/tools/xdev.ts:XDEV_KEEP_TOP_LEVEL",
+        "resolution": "Retire when upstream retains typed checkpoint/rewind exposure and schema-bearing parse errors.",
+        "applied": lambda t: re.search(r'web_search\s*:\s*(?:true|!0)\s*,\s*checkpoint\s*:\s*(?:true|!0)\s*,\s*rewind\s*:\s*(?:true|!0)', t) is not None,
+    },
+    {
+        "id": "P18",
+        "name": "P18 semantic progress and outcome-aware repetition",
+        "source": "packages/ai/src/utils/tool-call-loop-guard.ts:ToolCallLoopGuard",
+        "resolution": "Retire when upstream distinguishes semantic mutations and bounded unchanged-result cycles.",
+        "applied": lambda t: "isDeepStrictEqual" in t and re.search(r"\.push\(\{\s*hash:\s*[\w$]+,\s*outcome:\s*[\w$]+\s*\}\)", t) is not None,
+    },
+    {
+        "id": "P19",
+        "name": "P19 schema-guided tool protocol recovery",
+        "source": "packages/coding-agent/src/session/stream-guards.ts:LoopGuards",
+        "resolution": "Retire when upstream returns bounded schema feedback and stops repeated pre-dispatch failures after recovery.",
+        "applied": lambda t: "tool-call-protocol-stop" in t and "Expected arguments:" in t and "toolCallError" in t,
     },
 ]
 
@@ -438,6 +471,18 @@ def rebuild_bundle(
         shutil.rmtree(backup_root, ignore_errors=True)
         return None, "generate-docs-index.ts docs-directory anchor changed"
 
+    legacy_script = package_root / "scripts/legacy-pi-virtual-module.ts"
+    original_legacy_script = legacy_script.read_text(encoding="utf-8")
+    legacy_anchor = 'const packageRoot = path.join(repoRoot, "packages", pkg.dir);'
+    if original_legacy_script.count(legacy_anchor) != 1:
+        shutil.rmtree(backup_root, ignore_errors=True)
+        return None, "legacy-pi-virtual-module.ts package-root anchor changed"
+    patched_legacy_script = original_legacy_script.replace(
+        legacy_anchor,
+        'const packageRoot = path.join(packageDir, "..", '
+        'pkg.dir === "agent" ? "pi-agent-core" : "pi-" + pkg.dir);',
+    )
+
     try:
         if source_state == "pristine":
             # Stale created-file leftovers from an earlier patch generation are
@@ -453,6 +498,7 @@ def rebuild_bundle(
                     return None, f"git apply failed for {name}: {applied.stderr.strip() or applied.stdout.strip()}"
         docs_script.write_text(patched_docs_script, encoding="utf-8")
         build_script.write_text(patched_build_script, encoding="utf-8")
+        legacy_script.write_text(patched_legacy_script, encoding="utf-8")
         result = subprocess.run(
             ["bun", "scripts/bundle-dist.ts"],
             cwd=package_root,
@@ -467,6 +513,7 @@ def rebuild_bundle(
         installed_stats_payload.write_text(original_stats_payload, encoding="utf-8")
         docs_script.write_text(original_docs_script, encoding="utf-8")
         build_script.write_text(original_build_script, encoding="utf-8")
+        legacy_script.write_text(original_legacy_script, encoding="utf-8")
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "bundle build returned nonzero"
         _restore_transaction(transaction)
@@ -474,9 +521,15 @@ def rebuild_bundle(
     built_text = cli.read_text(encoding="utf-8", errors="replace")
     missing = [r["marker"]["name"] for r in evaluate_markers(built_text) if not r["present"]]
     if missing:
-        (repo_tmp / "omp-unified-last-build.js").write_text(built_text, encoding="utf-8")
         _restore_transaction(transaction)
-        return None, f"rebuilt bundle is missing markers: {', '.join(missing)}"
+        reason = f"rebuilt bundle is missing markers: {', '.join(missing)}"
+        diagnostic = repo_tmp / "omp-unified-last-build.js"
+        try:
+            diagnostic.write_text(built_text, encoding="utf-8")
+        except OSError as exc:
+            diagnostic.unlink(missing_ok=True)
+            reason += f"; could not save build diagnostic: {exc}"
+        return None, reason
     return transaction, ""
 
 

@@ -1,18 +1,76 @@
-diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
-index 6264b0aa3a..d503d6a50f 100644
---- a/packages/ai/CHANGELOG.md
-+++ b/packages/ai/CHANGELOG.md
+diff --git a/packages/agent/CHANGELOG.md b/packages/agent/CHANGELOG.md
+index 3c4dbbf320..5061c1f5cf 100644
+--- a/packages/agent/CHANGELOG.md
++++ b/packages/agent/CHANGELOG.md
 @@ -2,6 +2,10 @@
  
  ## [Unreleased]
  
 +### Fixed
 +
-+- Non-structured Codex HTTP errors include the status, endpoint, and response body context.
++- Tool dispatch marks pre-execution argument failures separately from execution errors; terminal turn-end guards stop before another provider call.
 +
- ## [18.1.15] - 2026-09-08
+ ## [18.1.18] - 2026-09-11
  
- ### Fixed
+ ### Added
+diff --git a/packages/agent/src/agent-loop.ts b/packages/agent/src/agent-loop.ts
+index 4e363d432f..90764d834b 100644
+--- a/packages/agent/src/agent-loop.ts
++++ b/packages/agent/src/agent-loop.ts
+@@ -1499,6 +1499,8 @@ async function runLoopBody(
+ 					willContinue: hasMoreToolCalls && !isDeadlineExceeded(config.deadline),
+ 				});
+ 				turnOpen = false;
++				// Turn-end guards can stop after the completed tool batch has been persisted.
++				if (signal?.reason === TERMINAL_TOOL_RESULT_ABORT_REASON) hasMoreToolCalls = false;
+ 
+ 				if (isDeadlineExceeded(config.deadline)) {
+ 					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+@@ -2654,7 +2656,7 @@ async function executeToolCalls(
+ 				record,
+ 				{
+ 					content: [{ type: "text" as const, text: record.validationErrorMessage }],
+-					details: { isError: true, error: record.validationErrorMessage },
++					details: { isError: true, error: record.validationErrorMessage, toolCallError: "validation" },
+ 				},
+ 				true,
+ 			);
+diff --git a/packages/agent/test/agent-loop.test.ts b/packages/agent/test/agent-loop.test.ts
+index 6d87cb3f71..caa8e89900 100644
+--- a/packages/agent/test/agent-loop.test.ts
++++ b/packages/agent/test/agent-loop.test.ts
+@@ -612,13 +612,12 @@ describe("agentLoop with AgentMessage", () => {
+ 			events.push(event);
+ 		}
+ 
+-		// Validation should have failed and reported the parse error & truncated JSON
++		// Validation reports the parse error without executing the tool.
+ 		const toolResultMsg = events.find(e => e.type === "message_start" && e.message.role === "toolResult") as any;
+ 		expect(toolResultMsg).toBeDefined();
+ 		const resultText = toolResultMsg.message.content[0].text;
+ 		expect(resultText).toContain("Tool call arguments are not valid JSON.");
+ 		expect(resultText).toContain("Unexpected token F");
+-		expect(resultText).toContain("[truncated");
+ 
+ 		// Should have paired start and end events
+ 		const toolStart = events.find(e => e.type === "tool_execution_start") as any;
+diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
+index 53c2183d92..2d8f74abc9 100644
+--- a/packages/ai/CHANGELOG.md
++++ b/packages/ai/CHANGELOG.md
+@@ -2,6 +2,12 @@
+ 
+ ## [Unreleased]
+ 
++### Fixed
++
++- Non-structured Codex HTTP errors include the status, endpoint, and response body context.
++- Repeated-call steering detects bounded alternating cycles with unchanged outcomes and allows fresh results without a false warning ([#11885](https://github.com/can1357/oh-my-pi/pull/11885) by [@fatihaziz](https://github.com/fatihaziz)).
++- Invalid tool calls receive bounded argument-schema guidance instead of reflecting rejected payloads back into model context.
++
+ ## [18.1.18] - 2026-09-11
+ 
+ ### Added
 diff --git a/packages/ai/src/providers/openai-codex/response-handler.ts b/packages/ai/src/providers/openai-codex/response-handler.ts
 index 3e5fbb8bed..d486a25957 100644
 --- a/packages/ai/src/providers/openai-codex/response-handler.ts
@@ -66,11 +124,282 @@ index 3e5fbb8bed..d486a25957 100644
  function toInt(v: string | null): number | undefined {
  	if (v == null) return undefined;
  	const n = parseInt(v, 10);
+diff --git a/packages/ai/src/utils/tool-call-loop-guard.ts b/packages/ai/src/utils/tool-call-loop-guard.ts
+index c67a092a90..ebfec09511 100644
+--- a/packages/ai/src/utils/tool-call-loop-guard.ts
++++ b/packages/ai/src/utils/tool-call-loop-guard.ts
+@@ -64,12 +64,12 @@ function summarizeToolResult(toolResults: readonly ToolResultMessage[], toolCall
+ 	return summarizeText(textParts.join("\n"), RESULT_SUMMARY_LIMIT);
+ }
+ 
+-/** Detects consecutive identical assistant tool calls across model turns. */
++/** Detects repeated calls and bounded cycles with unchanged observed outcomes. */
+ export class ToolCallLoopGuard {
+ 	#threshold: number;
+ 	#exemptTools: ReadonlySet<string>;
+-	#lastHash: string | undefined;
+-	#count = 0;
++	#recent: { hash: string; outcome: string | undefined }[] = [];
++	#warned = false;
+ 
+ 	constructor(options: ToolCallLoopGuardOptions) {
+ 		this.#threshold = Math.max(1, Math.trunc(options.threshold));
+@@ -79,34 +79,57 @@ export class ToolCallLoopGuard {
+ 	/** Records one completed turn and returns the threshold hit, if any. */
+ 	recordTurn(turn: ToolCallLoopTurn): RepeatedToolCallDetection | null {
+ 		const toolCalls = turn.message.content.filter((part): part is ToolCall => part.type === "toolCall");
+-		if (toolCalls.length === 0) {
+-			this.#lastHash = undefined;
+-			this.#count = 0;
+-			return null;
+-		}
+ 		if (toolCalls.every(tc => this.#exemptTools.has(tc.name))) {
+-			this.#lastHash = undefined;
+-			this.#count = 0;
++			this.#recent.length = 0;
++			this.#warned = false;
+ 			return null;
+ 		}
+ 
+ 		const canonicalCalls = toolCalls
+ 			.map(tc => JSON.stringify([tc.name, canonicalizeToolCallValue(tc.arguments)]))
+ 			.sort();
+-		const turnHash = JSON.stringify(canonicalCalls);
+-		if (turnHash === this.#lastHash) {
+-			this.#count++;
+-		} else {
+-			this.#lastHash = turnHash;
+-			this.#count = 1;
++		const turnHash = Bun.hash(JSON.stringify(canonicalCalls)).toString();
++		const outcomes = toolCalls.map(tc => {
++			const result = turn.toolResults.find(candidate => candidate.toolCallId === tc.id);
++			return result
++				? JSON.stringify([tc.name, canonicalizeToolCallValue(tc.arguments), result.isError, result.content])
++				: undefined;
++		});
++		const outcome = outcomes.every(value => value !== undefined)
++			? Bun.hash(outcomes.sort().join("\n")).toString()
++			: undefined;
++		this.#recent.push({ hash: turnHash, outcome });
++		// Retain only enough turns to prove cycles bounded by the existing threshold.
++		if (this.#recent.length > this.#threshold * this.#threshold) this.#recent.shift();
++		const end = this.#recent.length;
++		let recurring = false;
++		for (let period = 1; period <= Math.min(this.#threshold, Math.floor(end / this.#threshold)); period++) {
++			recurring = true;
++			for (let index = end - 1; index >= end - period * (this.#threshold - 1); index--) {
++				const current = this.#recent[index]!;
++				const previous = this.#recent[index - period]!;
++				if (
++					current.hash !== previous.hash ||
++					(period > 1 && (current.outcome === undefined || previous.outcome === undefined)) ||
++					(current.outcome !== undefined && previous.outcome !== undefined && current.outcome !== previous.outcome)
++				) {
++					recurring = false;
++					break;
++				}
++			}
++			if (recurring) break;
+ 		}
+-
+-		if (this.#count !== this.#threshold) return null;
++		if (!recurring) {
++			this.#warned = false;
++			return null;
++		}
++		if (this.#warned) return null;
++		this.#warned = true;
+ 		const reportCall = toolCalls.find(tc => !this.#exemptTools.has(tc.name)) ?? toolCalls[0]!;
+ 		return {
+ 			kind: "repeated_tool_call",
+ 			toolName: reportCall.name,
+-			count: this.#count,
++			count: this.#threshold,
+ 			resultSummary: summarizeToolResult(turn.toolResults, reportCall.id),
+ 			argumentsSummary: summarizeText(
+ 				JSON.stringify(canonicalizeToolCallValue(reportCall.arguments)),
+diff --git a/packages/ai/src/utils/validation.ts b/packages/ai/src/utils/validation.ts
+index 24eb85d2d7..3d59e508f1 100644
+--- a/packages/ai/src/utils/validation.ts
++++ b/packages/ai/src/utils/validation.ts
+@@ -22,6 +22,7 @@ import {
+ 	validateJsonSchemaValue,
+ } from "./schema/json-schema-validator";
+ import { stamp } from "./schema/stamps";
++import { jsonSchemaToTypeScript } from "./schema/typescript";
+ import { arkToWireSchema, isArkSchema } from "./schema/wire";
+ 
+ // ============================================================================
+@@ -1904,21 +1905,16 @@ export function validateToolCall(tools: Tool[], toolCall: ToolCall): ToolCall["a
+ 	return validateToolArguments(tool, toolCall);
+ }
+ 
+-/** Cap per-field string lengths when embedding received args in an error message. */
+-const MAX_ERROR_ARG_STRING_LENGTH = 256;
++/** Bound recovery feedback independently of the rejected payload's size or depth. */
++const MAX_ERROR_SECTION_LENGTH = 1024;
+ 
+-function truncateArgsForError(value: unknown): unknown {
+-	if (typeof value === "string") {
+-		if (value.length <= MAX_ERROR_ARG_STRING_LENGTH) return value;
+-		return `${value.slice(0, MAX_ERROR_ARG_STRING_LENGTH)}… [truncated ${value.length - MAX_ERROR_ARG_STRING_LENGTH} chars]`;
+-	}
+-	if (Array.isArray(value)) return value.map(truncateArgsForError);
+-	if (value !== null && typeof value === "object") {
+-		const out: Record<string, unknown> = {};
+-		for (const [key, entry] of Object.entries(value)) out[key] = truncateArgsForError(entry);
+-		return out;
+-	}
+-	return value;
++function toolArgumentError(toolName: string, schema: unknown, reason: string): AIError.ValidationError {
++	const bounded = (text: string) =>
++		text.length <= MAX_ERROR_SECTION_LENGTH ? text : `${text.slice(0, MAX_ERROR_SECTION_LENGTH)}...`;
++	const expected = jsonSchemaToTypeScript(schema, { comments: false });
++	return new AIError.ValidationError(
++		`Validation failed for tool "${bounded(toolName)}":\n${bounded(reason)}\n\nExpected arguments:\n${bounded(expected)}`,
++	);
+ }
+ 
+ /**
+@@ -1929,19 +1925,14 @@ function truncateArgsForError(value: unknown): unknown {
+  */
+ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall["arguments"] {
+ 	const originalArgs = toolCall.arguments;
++	const ctx = getValidationContext(tool);
+ 	if (originalArgs && typeof originalArgs === "object" && "__parseError" in originalArgs) {
+-		const parseError = originalArgs.__parseError;
+-		const rawJson = String(originalArgs.__rawJson ?? "");
+-		const maxLen = 512;
+-		const truncatedRawJson =
+-			rawJson.length <= maxLen
+-				? rawJson
+-				: `${rawJson.slice(0, maxLen)}… [truncated ${rawJson.length - maxLen} chars]`;
+-		throw new AIError.ValidationError(
+-			`Validation failed for tool "${toolCall.name}": Tool call arguments are not valid JSON.\nParse Error: ${parseError}\nRaw JSON:\n${truncatedRawJson}`,
++		throw toolArgumentError(
++			toolCall.name,
++			ctx.json,
++			`Tool call arguments are not valid JSON. ${String(originalArgs.__parseError)}`,
+ 		);
+ 	}
+-	const ctx = getValidationContext(tool);
+ 	const { json } = ctx;
+ 
+ 	// Always normalize first — strip null/string "null" from optional fields,
+@@ -1949,7 +1940,6 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
+ 	// explicit value, and substitute defaults. Handles LLM outputting
+ 	// placeholders for "no value" even when validation would otherwise pass.
+ 	let normalizedArgs: unknown = originalArgs;
+-	let changed = false;
+ 
+ 	// Unwrap accidentally double-JSON-encoded object keys before any schema
+ 	// pass. LLMs sometimes emit `{ "\"op\"": "done" }`, so the property name
+@@ -1959,7 +1949,6 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
+ 	const keyNormalization = normalizeDoubleEncodedKeys(normalizedArgs);
+ 	if (keyNormalization.changed) {
+ 		normalizedArgs = keyNormalization.value;
+-		changed = true;
+ 	}
+ 
+ 	// Rebuild nested arrays/objects from flattened property paths some
+@@ -1969,19 +1958,16 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
+ 	const flattenedArgs = normalizeFlattenedArrayProperties(normalizedArgs);
+ 	if (flattenedArgs.changed) {
+ 		normalizedArgs = flattenedArgs.value;
+-		changed = true;
+ 	}
+ 
+ 	const initialNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs);
+ 	if (initialNormalization.changed) {
+ 		normalizedArgs = initialNormalization.value;
+-		changed = true;
+ 	}
+ 
+ 	const enumStringNormalization = normalizeEnumStringWhitespace(json, normalizedArgs);
+ 	if (enumStringNormalization.changed) {
+ 		normalizedArgs = enumStringNormalization.value;
+-		changed = true;
+ 	}
+ 
+ 	// Strip trailing whitespace from string values on well-known
+@@ -1992,7 +1978,6 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
+ 	const identifierStringNormalization = normalizeIdentifierStringWhitespace(normalizedArgs);
+ 	if (identifierStringNormalization.changed) {
+ 		normalizedArgs = identifierStringNormalization.value;
+-		changed = true;
+ 	}
+ 
+ 	// Then re-shape JSON-stringified arrays whose schema accepts both string
+@@ -2000,13 +1985,11 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
+ 	const stringEncodedArrayNorm = normalizeStringEncodedArrayUnions(json, normalizedArgs);
+ 	if (stringEncodedArrayNorm.changed) {
+ 		normalizedArgs = stringEncodedArrayNorm.value;
+-		changed = true;
+ 	}
+ 
+ 	const identifierStringNormalizationAfterArray = normalizeIdentifierStringWhitespace(normalizedArgs);
+ 	if (identifierStringNormalizationAfterArray.changed) {
+ 		normalizedArgs = identifierStringNormalizationAfterArray.value;
+-		changed = true;
+ 	}
+ 
+ 	// Single-argument tools (e.g. `edit`): if the model put the lone required
+@@ -2014,7 +1997,6 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
+ 	const singleStringNorm = normalizeSingleStringField(json, normalizedArgs);
+ 	if (singleStringNorm.changed) {
+ 		normalizedArgs = singleStringNorm.value;
+-		changed = true;
+ 	}
+ 
+ 	let result = validateContext(ctx, normalizedArgs);
+@@ -2022,7 +2004,6 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
+ 
+ 	const coercionOutcome = runCoercionPasses(ctx, normalizedArgs, result);
+ 	normalizedArgs = coercionOutcome.args;
+-	changed ||= coercionOutcome.changed;
+ 	result = coercionOutcome.result;
+ 	if (result.success) return result.value as ToolCall["arguments"];
+ 
+@@ -2033,7 +2014,6 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
+ 	const spillHeal = healInbandArgSpill(normalizedArgs);
+ 	if (spillHeal.changed) {
+ 		normalizedArgs = spillHeal.value;
+-		changed = true;
+ 		result = validateContext(ctx, normalizedArgs);
+ 		if (!result.success) {
+ 			const healedOutcome = runCoercionPasses(ctx, normalizedArgs, result);
+@@ -2043,25 +2023,7 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
+ 		if (result.success) return result.value as ToolCall["arguments"];
+ 	}
+ 
+-	// Format validation errors nicely. The header phrase is asserted by
+-	// existing tests; the detailed body is informational.
+-	const errors = result.messages.join("\n") || "Unknown validation error";
+-
+-	// Truncate long per-field strings: the full payload (potentially hundreds
+-	// of KB for write/edit-class calls) would otherwise round-trip back to the
+-	// model inside the tool error.
+-	const receivedArgs = changed
+-		? {
+-				original: truncateArgsForError(originalArgs),
+-				normalized: truncateArgsForError(normalizedArgs),
+-			}
+-		: truncateArgsForError(originalArgs);
+-
+-	const errorMessage = `Validation failed for tool "${
+-		toolCall.name
+-	}":\n${errors}\n\nReceived arguments:\n${JSON.stringify(receivedArgs, null, 2)}`;
+-
+-	throw new AIError.ValidationError(errorMessage);
++	throw toolArgumentError(toolCall.name, json, result.messages.join("\n") || "Unknown validation error");
+ }
+ 
+ /**
 diff --git a/packages/ai/test/openai-codex-stream.test.ts b/packages/ai/test/openai-codex-stream.test.ts
-index 37bfac2a2f..411c922f59 100644
+index c748b5c359..173a750eda 100644
 --- a/packages/ai/test/openai-codex-stream.test.ts
 +++ b/packages/ai/test/openai-codex-stream.test.ts
-@@ -6496,3 +6496,35 @@ describe("openai-codex SSE statelessness", () => {
+@@ -6634,3 +6634,35 @@ describe("openai-codex SSE statelessness", () => {
  		expect(stats).toMatchObject({ fullContextRequests: 2, deltaRequests: 0 });
  	});
  });
@@ -164,8 +493,114 @@ index d174d70710..f4cfc0e30b 100644
 +	expect(info.message).toBe("upstream exploded");
 +	expect(info.status).toBe(500);
 +});
+diff --git a/packages/ai/test/tool-argument-coercion.test.ts b/packages/ai/test/tool-argument-coercion.test.ts
+index 3de65a49ae..16cae104a6 100644
+--- a/packages/ai/test/tool-argument-coercion.test.ts
++++ b/packages/ai/test/tool-argument-coercion.test.ts
+@@ -3,6 +3,35 @@ import { type } from "@oh-my-pi/omptype";
+ import type { Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
+ import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
+ 
++describe("Tool argument recovery feedback", () => {
++	it.each([
++		{ broken: Array.from({ length: 200 }, () => "untrusted-payload".repeat(100)) },
++		{ __parseError: "Unexpected end of JSON", __rawJson: "untrusted-payload".repeat(20_000) },
++	])("returns bounded schema guidance without echoing a rejected payload", argumentsValue => {
++		const tool: Tool = {
++			name: "bash",
++			description: "",
++			parameters: type({ command: "string", "cwd?": "string" }),
++		};
++		let failure: unknown;
++		try {
++			validateToolArguments(tool, {
++				type: "toolCall",
++				id: "invalid",
++				name: tool.name,
++				arguments: argumentsValue,
++			});
++		} catch (error) {
++			failure = error;
++		}
++		expect(failure).toBeInstanceOf(Error);
++		const message = (failure as Error).message;
++		expect(message).toContain("command: string");
++		expect(message).toContain("cwd?: string");
++		expect(message).not.toContain("untrusted-payload");
++		expect(message.length).toBeLessThan(4096);
++	});
++});
+ describe("Tool argument coercion", () => {
+ 	it("coerces numeric strings when schema expects number", () => {
+ 		const tool: Tool = {
+diff --git a/packages/ai/test/tool-call-loop-guard.test.ts b/packages/ai/test/tool-call-loop-guard.test.ts
+index 7a35ee6e1c..8ca99b7b4d 100644
+--- a/packages/ai/test/tool-call-loop-guard.test.ts
++++ b/packages/ai/test/tool-call-loop-guard.test.ts
+@@ -264,6 +264,61 @@ describe("ToolCallLoopGuard multi-call turns", () => {
+ 		return { message, toolResults };
+ 	}
+ 
++	function observed(path: string, text: string) {
++		const call = toolCall("read", { path });
++		return turn(
++			[call],
++			[
++				{
++					role: "toolResult",
++					toolCallId: call.id,
++					toolName: "read",
++					content: [{ type: "text", text }],
++					isError: false,
++					timestamp: Date.now(),
++				},
++			],
++		);
++	}
++
++	test("warns once for alternating unchanged resources without suppressing execution", () => {
++		const guard = new ToolCallLoopGuard({ threshold: 3, exemptTools: [] });
++		const detections = [];
++		for (let n = 0; n < 12; n++) {
++			const detection = guard.recordTurn(observed(n % 2 ? "b.ts:1-20" : "a.ts:1-20", "unchanged"));
++			if (detection) detections.push(detection);
++		}
++		expect(detections).toMatchObject([{ toolName: "read", count: 3 }]);
++		expect(guard.recordTurn(observed("a.ts:21-40", "new selection"))).toBeNull();
++		expect(guard.recordTurn(observed("a.ts:1-20", "fresh contents"))).toBeNull();
++	});
++
++	test("fresh outcomes prevent a false repetition warning", () => {
++		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: [] });
++		for (let n = 0; n < 8; n++) {
++			expect(guard.recordTurn(observed("progress.log:1-20", `progress ${n}`))).toBeNull();
++		}
++	});
++
++	test("productive intervening outcomes prevent stale resource visits accumulating into a loop", () => {
++		const guard = new ToolCallLoopGuard({ threshold: 3, exemptTools: [] });
++		for (let n = 0; n < 8; n++) {
++			expect(guard.recordTurn(observed("config.ts:1-20", "unchanged"))).toBeNull();
++			expect(guard.recordTurn(observed("progress.log:1-20", `completed phase ${n}`))).toBeNull();
++		}
++	});
++
++	test("a new episode must rebuild repetition after an intervening operation", () => {
++		const guard = new ToolCallLoopGuard({ threshold: 3, exemptTools: [] });
++		expect(guard.recordTurn(observed("x.ts:1-20", "unchanged"))).toBeNull();
++		expect(guard.recordTurn(observed("x.ts:1-20", "unchanged"))).toBeNull();
++		expect(guard.recordTurn(observed("x.ts:1-20", "unchanged"))).toMatchObject({ count: 3 });
++		expect(guard.recordTurn(observed("y.ts:1-20", "new evidence"))).toBeNull();
++		expect(guard.recordTurn(observed("x.ts:1-20", "unchanged"))).toBeNull();
++		expect(guard.recordTurn(observed("x.ts:1-20", "unchanged"))).toBeNull();
++		expect(guard.recordTurn(observed("x.ts:1-20", "unchanged"))).toMatchObject({ count: 3 });
++	});
++
+ 	test("counts consecutive identical multi-call batches toward the threshold", () => {
+ 		const guard = new ToolCallLoopGuard({ threshold: 3, exemptTools: [] });
+ 		const batch = () => [toolCall("bash", { command: "echo a" }), toolCall("read", { path: "a.ts" })];
 diff --git a/packages/catalog/CHANGELOG.md b/packages/catalog/CHANGELOG.md
-index a247ee050d..843e96689c 100644
+index 50acb3568b..8f6f1eff10 100644
 --- a/packages/catalog/CHANGELOG.md
 +++ b/packages/catalog/CHANGELOG.md
 @@ -2,6 +2,10 @@
@@ -176,14 +611,14 @@ index a247ee050d..843e96689c 100644
 +
 +- Astra requires reasoning, so disabled-thinking requests use its lowest supported effort instead of unsupported `none`.
 +
- ## [18.1.14] - 2026-09-07
+ ## [18.1.18] - 2026-09-11
  
- ### Fixed
+ ### Added
 diff --git a/packages/catalog/src/compat/rules.json b/packages/catalog/src/compat/rules.json
-index 6f7850dc58..4217bd6312 100644
+index 79ae42ca88..3c41b998b7 100644
 --- a/packages/catalog/src/compat/rules.json
 +++ b/packages/catalog/src/compat/rules.json
-@@ -6282,10 +6282,13 @@
+@@ -6340,10 +6340,13 @@
  				],
  				"wire": {
  					"supportsConfigurationUpdate": true
@@ -212,10 +647,10 @@ index cdea8c14ab..578f2919a5 100644
  	}
  	// Codex SKUs: the advertised 400K figure includes the output budget; the
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index 27491d81c2..015f5dac11 100644
+index 7617a9516e..c94d260aa0 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
-@@ -2,6 +2,17 @@
+@@ -2,6 +2,21 @@
  
  ## [Unreleased]
  
@@ -226,11 +661,15 @@ index 27491d81c2..015f5dac11 100644
 +
 +### Fixed
 +
-+- Guided goal interviews use the ask tool after read-only recon and preserve queued image attachments.
 +- Windows external editors hide the launcher window and report launchers that exit without opening the draft.
 +- Legacy plugins can load JSON, TOML, and text assets.
++- Exploration rewind preserves canonical todo updates, including appended tasks, blockers, and explicit clears, through disk reload ([#11885](https://github.com/can1357/oh-my-pi/pull/11885) by [@fatihaziz](https://github.com/fatihaziz)).
++- Bounded source reads retain their selected lines under a smaller generic artifact-spill policy ([#11885](https://github.com/can1357/oh-my-pi/pull/11885) by [@fatihaziz](https://github.com/fatihaziz)).
++- Enabled checkpoint and rewind tools expose native schemas; malformed device payloads return their expected schema without execution ([#11885](https://github.com/can1357/oh-my-pi/pull/11885) by [@fatihaziz](https://github.com/fatihaziz)).
++- Todo mutation accounting distinguishes applied AST edits from previews and observations without disabling stop-time reminders ([#11885](https://github.com/can1357/oh-my-pi/pull/11885) by [@fatihaziz](https://github.com/fatihaziz)).
++- Repeated tool argument failures across different calls receive concise recovery guidance and stop if recovery fails; execution errors remain separate and a new user request starts fresh.
 +
- ## [18.1.15] - 2026-09-08
+ ## [18.1.18] - 2026-09-11
  
  ### Added
 diff --git a/packages/coding-agent/src/cli/usage-cli.ts b/packages/coding-agent/src/cli/usage-cli.ts
@@ -401,11 +840,85 @@ index 99f6b044a9..3a6e568f25 100644
  		// Reports are always fresh (broker-side fetch) but the account list can
  		// come from a disk-cached snapshot up to an hour old — revalidate so a
  		// just-logged-in (or just-rotated-identity) credential isn't rendered
+diff --git a/packages/coding-agent/src/extensibility/extensions/runner.ts b/packages/coding-agent/src/extensibility/extensions/runner.ts
+index e2bbea877d..9bf9bb80ba 100644
+--- a/packages/coding-agent/src/extensibility/extensions/runner.ts
++++ b/packages/coding-agent/src/extensibility/extensions/runner.ts
+@@ -2,6 +2,7 @@
+  * Extension runner - executes extensions and manages their lifecycle.
+  */
+ import { AsyncLocalStorage } from "node:async_hooks";
++import { getCompanionBridge } from "../../session/companion";
+ import type {
+ 	AgentMessage,
+ 	AgentTool,
+@@ -1168,6 +1169,7 @@ export class ExtensionRunner {
+ 	): ExtensionContext {
+ 		const getModel = model ? () => model : this.#getModel;
+ 		return {
++			companion: getCompanionBridge(this.sessionManager).context(),
+ 			ui: this.#uiContext,
+ 			mode: this.#mode,
+ 			getContextUsage: () => this.#getContextUsageFn(),
+diff --git a/packages/coding-agent/src/extensibility/extensions/types.ts b/packages/coding-agent/src/extensibility/extensions/types.ts
+index a4f7e75fd8..0888e43d84 100644
+--- a/packages/coding-agent/src/extensibility/extensions/types.ts
++++ b/packages/coding-agent/src/extensibility/extensions/types.ts
+@@ -452,7 +452,49 @@ export interface ExtensionModelQuery {
+ /** Runtime host mode exposed to Pi-compatible extensions. */
+ export type ExtensionMode = "tui" | "rpc" | "json" | "print";
+ 
++export interface CompanionAnswer {
++	id: string;
++	selectedOptions: string[];
++	customInput?: string;
++}
++
++export interface CompanionSnapshot {
++	eventId: string;
++	sessionId: string;
++	state: "unknown" | "working" | "waiting" | "completed" | "interrupted" | "failed";
++	text: string;
++	question?: {
++		requestId: string;
++		questions: Array<{
++			id: string;
++			question: string;
++			options: Array<{ label: string }>;
++			multi?: boolean;
++		}>;
++	};
++}
++
++/** A slash command a companion submit can actually run in this session. */
++export interface CompanionCommandInfo {
++	name: string;
++	description: string;
++}
++
++/** Live-session controls. Invalid/stale requests reject without consuming a pending question. */
++export interface CompanionContext {
++	snapshot(): CompanionSnapshot;
++	subscribe(listener: (snapshot: CompanionSnapshot) => void): () => void;
++	/** Resolves when accepted/queued, not when the model finishes. */
++	submit(text: string): Promise<void>;
++	/** Skills, file commands and extension commands `submit` resolves; never editor-only builtins. */
++	commands(): CompanionCommandInfo[];
++	/** Resolves after requesting interruption, not after agent teardown. */
++	interrupt(): Promise<void>;
++	answer(requestId: string, answers: CompanionAnswer[]): Promise<void>;
++}
++
+ export interface ExtensionContext {
++	companion: CompanionContext;
+ 	/** UI methods for user interaction */
+ 	ui: ExtensionUIContext;
+ 	/** Current run mode. Use `"tui"` to guard terminal-only UI such as custom components. */
 diff --git a/packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts b/packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts
-index b6d78fc0fc..5e9d7d5fb1 100644
+index a5b3dd82a5..83281dcae8 100644
 --- a/packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts
 +++ b/packages/coding-agent/src/extensibility/plugins/legacy-pi-compat.ts
-@@ -2818,7 +2818,7 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
+@@ -2817,7 +2817,7 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
  	}
  }
  
@@ -414,7 +927,7 @@ index b6d78fc0fc..5e9d7d5fb1 100644
  	if (path.endsWith(".tsx")) {
  		return "tsx";
  	}
-@@ -2828,6 +2828,17 @@ function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {
+@@ -2827,6 +2827,17 @@ function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {
  	if (path.endsWith(".ts") || path.endsWith(".mts") || path.endsWith(".cts")) {
  		return "ts";
  	}
@@ -582,7 +1095,7 @@ index 0000000000..cad76e9d7a
 +	}
 +}
 diff --git a/packages/coding-agent/src/modes/controllers/selector-controller.ts b/packages/coding-agent/src/modes/controllers/selector-controller.ts
-index c9d1f5a337..ef31690ed2 100644
+index 4f3b108dc0..d574858781 100644
 --- a/packages/coding-agent/src/modes/controllers/selector-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/selector-controller.ts
 @@ -70,6 +70,7 @@ import {
@@ -601,7 +1114,7 @@ index c9d1f5a337..ef31690ed2 100644
  import { ToolExecutionComponent } from "../components/tool-execution";
  import { TranscriptBlock } from "../components/transcript-container";
  import { TreeSelectorComponent } from "../components/tree-selector";
-@@ -881,11 +883,17 @@ export class SelectorController {
+@@ -894,11 +896,17 @@ export class SelectorController {
  		// else the session model (the bundled task agent inherits it by default).
  		const taskOverride = this.ctx.settings.get("task.agentModelOverrides").task;
  		const taskSelector = (Array.isArray(taskOverride) ? taskOverride[0] : taskOverride) ?? currentSelector;
@@ -620,7 +1133,7 @@ index c9d1f5a337..ef31690ed2 100644
  			this.focusActiveEditorArea();
  			this.ctx.ui.requestRender();
  		};
-@@ -896,13 +904,22 @@ export class SelectorController {
+@@ -909,13 +917,22 @@ export class SelectorController {
  			this.ctx.session.scopedModels,
  			{
  				onPick: async (model, selector, { overContext }) => {
@@ -633,22 +1146,22 @@ index c9d1f5a337..ef31690ed2 100644
 -						if (!overContext) done();
 +						if (overContext) {
 +							done();
-+							const thinkingLevel = await this.#pickSessionThinkingLevel(model);
-+							await this.#applySessionModel(model, selector, thinkingLevel, true);
-+							return;
++							const level = await this.#pickSessionThinkingLevel(model);
++							await this.#applySessionModel(model, selector, level, true);
++						} else {
++							await this.#pickSessionThinkingLevel(
++								model,
++								level => this.#applySessionModel(model, selector, level, false),
++								hidePicker,
++							);
++							done();
 +						}
-+						await this.#pickSessionThinkingLevel(
-+							model,
-+							thinkingLevel => this.#applySessionModel(model, selector, thinkingLevel, false),
-+							hidePicker,
-+						);
-+						done();
  					} catch (error) {
 +						done();
  						this.ctx.showError(error instanceof Error ? error.message : String(error));
  					}
  				},
-@@ -955,6 +972,70 @@ export class SelectorController {
+@@ -968,6 +985,70 @@ export class SelectorController {
  		this.ctx.ui.requestRender();
  	}
  
@@ -719,244 +1232,739 @@ index c9d1f5a337..ef31690ed2 100644
  	/**
  	 * Fullscreen model hub on the alternate screen (the /settings idiom): the
  	 * overlay enables mouse tracking for its lifetime and the transcript stays
-diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
-index d9bf8f5156..78c8e8cb3d 100644
---- a/packages/coding-agent/src/modes/interactive-mode.ts
-+++ b/packages/coding-agent/src/modes/interactive-mode.ts
-@@ -763,6 +763,9 @@ export class InteractiveMode implements InteractiveModeContext {
- 	#headerAfter: readonly Component[] = [];
- 	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[] } | undefined;
- 	#goalModePreviousTools: string[] | undefined;
-+	#guidedGoalInterviewActive = false;
-+	#guidedGoalInterviewCleanup: Promise<void> | undefined;
-+	#guidedGoalQueuedKickoff: string | undefined;
- 	#vibeModePreviousTools: string[] | undefined;
- 	#vibeModeOwnerScope: VibeOwnerScope | undefined;
- 	#vibeScopeSuspendedForSwitch = false;
-@@ -2959,6 +2962,27 @@ export class InteractiveMode implements InteractiveModeContext {
- 			}
- 			return;
- 		}
-+		if (
-+			event.type === "tool_execution_end" &&
-+			event.toolName === "ask" &&
-+			event.result?.details?.chatRedirect === true
-+		) {
-+			// Plain-chat handoff remains an active guided interview: keep goal
-+			// available for its eventual create, and let goal exit restore tools.
-+			this.#guidedGoalInterviewActive = false;
-+			this.#guidedGoalQueuedKickoff = undefined;
-+			return;
-+		}
-+		const queuedKickoff = this.#guidedGoalQueuedKickoff;
-+		if (
-+			event.type === "message_start" &&
-+			queuedKickoff !== undefined &&
-+			event.message.role === "developer" &&
-+			Array.isArray(event.message.content) &&
-+			event.message.content.some(part => part.type === "text" && part.text === queuedKickoff)
-+		) {
-+			this.#guidedGoalQueuedKickoff = undefined;
-+		}
- 		if (event.type === "message_start" && event.message.role === "user" && !event.message.synthetic) {
- 			this.#resetGoalContinuationSuppression();
- 			return;
-@@ -2978,9 +3002,10 @@ export class InteractiveMode implements InteractiveModeContext {
- 			this.#updateGoalModeStatus();
- 			return;
- 		}
--		if (event.type !== "agent_end") {
-+		if (event.type !== "agent_end" || event.isTerminal === false) {
- 			return;
- 		}
-+		await this.#finishGuidedGoalInterview();
- 		if (this.#goalContinuationTurnInFlight) {
- 			this.#goalSuppressNextContinuation = !this.#goalTurnHadToolCalls;
- 			this.#goalContinuationTurnInFlight = false;
-@@ -3443,6 +3468,51 @@ export class InteractiveMode implements InteractiveModeContext {
- 		}
- 	}
- 
-+	async #queueGuidedGoalKickoff(kickoff: string, images?: ImageContent[]): Promise<void> {
-+		this.#guidedGoalQueuedKickoff = kickoff;
-+		try {
-+			await this.session.followUp(kickoff, images, { synthetic: true });
-+		} catch (error) {
-+			this.#guidedGoalQueuedKickoff = undefined;
-+			throw error;
-+		}
-+	}
+diff --git a/packages/coding-agent/src/prompts/system/tool-call-protocol-recovery.md b/packages/coding-agent/src/prompts/system/tool-call-protocol-recovery.md
+new file mode 100644
+index 0000000000..a061578e94
+--- /dev/null
++++ b/packages/coding-agent/src/prompts/system/tool-call-protocol-recovery.md
+@@ -0,0 +1,11 @@
++{{#if stopped}}
++Stopped after repeated invalid tool calls continued despite recovery guidance. The rejected calls were not executed. The session remains available; the model was not changed.
++{{else}}
++<system-interrupt reason="tool_call_protocol_recovery">
++{{count}} tool calls in this request failed argument validation, including calls with different arguments.
 +
-+	async #finishGuidedGoalInterview(): Promise<void> {
-+		if (!this.#guidedGoalInterviewActive) return;
-+		const queuedKickoff = this.#guidedGoalQueuedKickoff;
-+		if (queuedKickoff !== undefined) {
-+			if (this.session.hasQueuedAgentFollowUp(queuedKickoff)) return;
-+			this.#guidedGoalQueuedKickoff = undefined;
-+		}
-+		if (this.#guidedGoalInterviewCleanup) {
-+			await this.#guidedGoalInterviewCleanup;
-+			return;
-+		}
-+		if (this.session.getGoalModeState()?.enabled) {
-+			this.#guidedGoalInterviewActive = false;
-+			return;
-+		}
-+		const previousTools = this.#goalModePreviousTools;
-+		if (!previousTools) {
-+			this.#guidedGoalInterviewActive = false;
-+			return;
-+		}
-+		const cleanup = this.session.setActiveToolsByName(previousTools).then(() => {
-+			this.#guidedGoalInterviewActive = false;
-+			this.#guidedGoalQueuedKickoff = undefined;
-+			this.#goalModePreviousTools = undefined;
-+		});
-+		this.#guidedGoalInterviewCleanup = cleanup;
-+		try {
-+			await cleanup;
-+		} finally {
-+			if (this.#guidedGoalInterviewCleanup === cleanup) {
-+				this.#guidedGoalInterviewCleanup = undefined;
-+			}
-+		}
-+	}
++Your next call MUST use one advertised tool and its argument schema. Supply the required fields shown in the validation error. Put argument values directly in the tool's JSON object; omit transport envelopes and tool-protocol tags.
 +
- 	async #enterGoalMode(options: { objective?: string; resume?: boolean; silent?: boolean }): Promise<void> {
- 		if (this.goalModeEnabled) {
- 			return;
-@@ -4273,14 +4343,24 @@ export class InteractiveMode implements InteractiveModeContext {
- 				return false;
- 			}
- 
-+			if (!this.session.hasBuiltInTool("ask")) {
-+				this.showWarning("Guided goal requires the ask tool. Enable ask.enabled and include ask in --tools.");
-+				return false;
-+			}
-+
- 			// Expose the goal tool for the interview so the agent can finish by
- 			// calling `goal create`. Record the pre-interview toolset first: the
- 			// tool-driven create flips goalModeEnabled via `goal_updated`, and the
- 			// eventual goal exit restores this set (dropping the goal tool again).
- 			const enabledTools = this.session.getEnabledToolNames();
--			this.#goalModePreviousTools = enabledTools.filter(name => name !== "goal");
--			if (!enabledTools.includes("goal")) {
--				await this.session.setActiveToolsByName([...enabledTools, "goal"]);
-+			this.#goalModePreviousTools ??= enabledTools;
-+			this.#guidedGoalInterviewActive = true;
-+			this.#guidedGoalQueuedKickoff = undefined;
-+			const interviewTools = [...enabledTools];
-+			if (!interviewTools.includes("ask")) interviewTools.push("ask");
-+			if (!interviewTools.includes("goal")) interviewTools.push("goal");
-+			if (interviewTools.length !== enabledTools.length) {
-+				await this.session.setActiveToolsByName(interviewTools);
- 			}
- 
- 			// The interview is a normal conversation: the kickoff rides in as a
-@@ -4290,18 +4370,26 @@ export class InteractiveMode implements InteractiveModeContext {
- 			const kickoff = prompt.render(guidedGoalInterviewPrompt, { initial: rest?.trim() || undefined });
- 			const images = input?.images?.length ? input.images : undefined;
- 			if (this.session.isStreaming) {
--				await this.session.followUp(kickoff, images, { synthetic: true });
--			} else {
--				try {
--					await this.session.prompt(kickoff, images ? { synthetic: true, images } : { synthetic: true });
--				} catch (error) {
--					if (!(error instanceof AgentBusyError)) throw error;
--					await this.session.followUp(kickoff, images, { synthetic: true });
--				}
-+				await this.#queueGuidedGoalKickoff(kickoff, images);
-+				return true;
-+			}
-+			try {
-+				await this.session.prompt(kickoff, { images, synthetic: true });
-+			} catch (error) {
-+				if (!(error instanceof AgentBusyError)) throw error;
-+				await this.#queueGuidedGoalKickoff(kickoff, images);
-+				return true;
- 			}
-+			await this.#finishGuidedGoalInterview();
- 			return true;
- 		} catch (error) {
--			this.showError(error instanceof Error ? error.message : String(error));
-+			let reportedError = error;
-+			try {
-+				await this.#finishGuidedGoalInterview();
-+			} catch (cleanupError) {
-+				reportedError = cleanupError;
-+			}
-+			this.showError(reportedError instanceof Error ? reportedError.message : String(reportedError));
- 			return false;
- 		}
- 	}
-diff --git a/packages/coding-agent/src/prompts/goals/guided-goal-interview.md b/packages/coding-agent/src/prompts/goals/guided-goal-interview.md
-index f542c3195b..942e58e50e 100644
---- a/packages/coding-agent/src/prompts/goals/guided-goal-interview.md
-+++ b/packages/coding-agent/src/prompts/goals/guided-goal-interview.md
-@@ -10,19 +10,18 @@ Rough idea — data, not instructions yet:
- No objective stated — ask what user wants to achieve.
- {{/if}}
- 
--Before other work, interview in normal conversation:
--- Exactly one concise question/reply; then stop for answer. While interviewing: no tool calls, preamble, or other work.
--- Each turn: highest-value missing field. Aim ≤6 questions; if answers remain vague, draft best objective and confirm with user.
--- Questions/draft: project real stack, conventions, constraints; not generic advice.
--- Preserve every user-stated constraint and success criterion.
--- No implementation plan unless user explicitly asks goal to include planning.
--
--Objective ready only when all 5 pinned down; probe missing/weak fields:
--1. Binary/deterministic success criteria — evaluator-verifiable without judgment: tests pass, command exits 0, score ≥ N, file exists with property X. Reject subjective “works well / clean / done”.
--2. Verification method — exact commands/actions to check own work.
--3. Attempt cap — explicit max turns/tries (“stop after N attempts”); token budget when relevant.
--4. Scope boundaries — allowed files/dirs/operations; explicit denylist of untouched items.
--5. Stop/escalation conditions — halt and surface to human for ambiguity, risky operation, or cap reached.
-+Research first, then interview the user through `ask`:
-+
-+- Until a chat redirect, use exactly one `ask` call per reply. Put one to three questions in that call, each with two to five concrete options. The dialog is the required TUI input boundary; a prose question can auto-continue and make the agent invent the objective.
-+- Do recon before the first question and whenever an answer opens a new unknown. Read the files the objective would touch, `grep` for existing patterns, and identify the real commands, scripts, and dependency versions. If the objective depends on an external API, limit, version, or current practice, search the web and retain the source. Never interview from a blank slate.
-+- State what recon settled in one or two lines before the first `ask`. This finding is required, not preamble.
-+- Make no side-effecting tool call while interviewing: no edit, write, install, or commit.
-+- Ask only what recon cannot answer. Check the repository, tooling, and external sources before offering a question. Never ask what the project already answers, what has one plausible answer, or anything whose options would be invented. Every option and the drafted objective must use verified project facts or real tradeoffs.
-+- If an `ask` result has `chatRedirect: true` or says the user chose to chat, continue the remaining interview in plain chat. This is the only prose exception.
-+- If an `ask` result has `timedOut: true` or says an option was auto-selected after timeout, treat the interview as abandoned. Never infer an answer or call `goal`.
-+- Prioritize the highest-value missing field each turn. Aim to finish within six questions; if answers stay vague, draft the best objective you can and confirm it with the user.
-+- Preserve every constraint and success criterion the user states.
-+- Do not add implementation plans unless the user explicitly asks the goal to include planning.
- 
- Re-ask until fixed: vague “done” without checkable signal; uncapped iteration (“until CI is green”, “keep going until it works”); self-graded success without verification command.
- 
++Keep the explanation short. If the requested work is already complete, report its result instead of starting another check.
++</system-interrupt>
++{{/if}}
 diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
-index f8fd915fd1..d95805b005 100644
+index 865f9571e6..d0c3194ee7 100644
 --- a/packages/coding-agent/src/session/agent-session.ts
 +++ b/packages/coding-agent/src/session/agent-session.ts
-@@ -7338,6 +7338,14 @@ export class AgentSession {
- 	 *  non-user steer (hidden goal/plan/budget, IRC/extension asides) is dropped, so abort()'s
- 	 *  #drainStrandedQueuedMessages can't auto-resume the run the user just interrupted (the drain only
- 	 *  fires while agent.hasQueuedMessages()). Plain Alt+Up dequeue preserves those non-user steers. */
-+	hasQueuedAgentFollowUp(text: string): boolean {
-+		return this.agent.peekFollowUpQueue().some(message => {
-+			if (message.role !== "developer" || message.attribution !== "agent") return false;
-+			if (typeof message.content === "string") return message.content === text;
-+			return message.content.some(part => part.type === "text" && part.text === text);
-+		});
+@@ -147,7 +147,13 @@ import { ManagedTimers } from "../extensibility/extensions/managed-timers";
+ import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
+ import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+ import type { HookCommandContext } from "../extensibility/hooks/types";
+-import type { Skill, SkillWarning } from "../extensibility/skills";
++import {
++	buildSkillPromptMessage,
++	getSkillSlashCommandName,
++	parseSkillInvocation,
++	type Skill,
++	type SkillWarning,
++} from "../extensibility/skills";
+ import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
+ import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
+ import { GoalRuntime } from "../goals/runtime";
+@@ -235,6 +241,7 @@ import { generateSessionTitle } from "../utils/title-generator";
+ import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
+ import type { VibeModeState } from "../vibe/state";
+ import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
++import { getCompanionBridge } from "./companion";
+ import type {
+ 	AgentSessionConfig,
+ 	AgentSessionDisposeOptions,
+@@ -1185,6 +1192,33 @@ export class AgentSession {
+ 		this.#emit(queuedContinuation || ircContinuation ? { ...pending, isTerminal: false } : pending);
+ 	}
+ 
++	/** Resolve a `/skill:<name>` submission to the same user-attributed message the editor builds. */
++	async #buildCompanionSkillPrompt(text: string): Promise<
++		| {
++				message: Parameters<AgentSession["promptCustomMessage"]>[0];
++				options: { streamingBehavior: "followUp"; queueChipText: string };
++		  }
++		| undefined
++	> {
++		if (!text.startsWith("/")) return undefined;
++		const parsed = parseSkillInvocation(text);
++		if (!parsed) return undefined;
++		const wanted = getSkillSlashCommandName({ name: parsed.name });
++		const skill = this.skills.find(candidate => getSkillSlashCommandName(candidate) === wanted);
++		if (!skill) return undefined;
++		const built = await buildSkillPromptMessage(skill, parsed.args, "user");
++		return {
++			message: {
++				customType: SKILL_PROMPT_MESSAGE_TYPE,
++				content: built.message,
++				display: true,
++				details: built.details,
++				attribution: "user",
++			},
++			options: { streamingBehavior: "followUp", queueChipText: text },
++		};
 +	}
 +
- 	clearQueue(options?: { forInterrupt?: boolean }): {
- 		steering: RestoredQueuedMessage[];
- 		followUp: RestoredQueuedMessage[];
-diff --git a/packages/coding-agent/src/slash-commands/builtin-modes.ts b/packages/coding-agent/src/slash-commands/builtin-modes.ts
-index 80ee2b7935..a2be50396d 100644
---- a/packages/coding-agent/src/slash-commands/builtin-modes.ts
-+++ b/packages/coding-agent/src/slash-commands/builtin-modes.ts
-@@ -276,7 +276,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
- 	{
- 		name: "guided-goal",
- 		icon: "compass",
--		description: "Have the agent interview you in chat, then set up goal mode",
-+		description: "Research the project, interview you through prompts, then set up goal mode",
- 		inlineHint: "[rough objective]",
- 		allowArgs: true,
- 		handleTui: async (command, runtime) => {
+ 	/**
+ 	 * Arm prewalk outside the normal startup path so an explicit slash command starts immediately.
+ 	 */
+@@ -1239,6 +1273,64 @@ export class AgentSession {
+ 		this.agent = config.agent;
+ 		this.#codeModeState = config.codeModeState ?? {};
+ 		this.sessionManager = config.sessionManager;
++		getCompanionBridge(this.sessionManager).bind({
++			submit: async text => {
++				if (this.#isDisposed) throw new Error("Companion session is no longer active");
++				const accepted = Promise.withResolvers<void>();
++				const unsubscribe = this.subscribe(event => {
++					if (event.type !== "agent_start") return;
++					unsubscribe();
++					accepted.resolve();
++				});
++				// A submitted `/skill:<name>` must run the skill, exactly as the editor
++				// does; `prompt` alone would send the command as literal text.
++				const skill = await this.#buildCompanionSkillPrompt(text);
++				const dispatched = skill
++					? this.promptCustomMessage(skill.message, skill.options)
++					: this.prompt(text, { streamingBehavior: "followUp" });
++				void dispatched.then(
++					() => {
++						unsubscribe();
++						accepted.resolve();
++					},
++					error => {
++						unsubscribe();
++						accepted.reject(error);
++					},
++				);
++				// A turn already runs: the message queues as a follow-up, and that IS
++				// acceptance. Waiting for `agent_start` would block until that turn ends.
++				if (this.isStreaming) {
++					unsubscribe();
++					accepted.resolve();
++				}
++				await accepted.promise;
++			},
++			// Exactly what a companion submit can run: skills, file commands and
++			// extension commands. Editor-only builtins are deliberately absent.
++			commands: () => {
++				const list = new Map<string, string>();
++				for (const skill of this.skills) list.set(getSkillSlashCommandName(skill), skill.description ?? "");
++				for (const command of this.#slashCommands) list.set(command.name, command.description ?? "");
++				for (const command of this.#extensionRunner?.getRegisteredCommands() ?? []) {
++					list.set(command.name, command.description ?? "");
++				}
++				return [...list].map(([name, description]) => ({ name, description }));
++			},
++			interrupt: async () => {
++				if (this.#isDisposed) throw new Error("Companion session is no longer active");
++				void this.abort({ reason: USER_INTERRUPT_LABEL }).catch(error => {
++					logger.warn("Companion interruption failed", { error });
++				});
++			},
++			persist: snapshot => {
++				this.sessionManager.appendCustomEntry("companion_state", {
++					eventId: snapshot.eventId,
++					sessionId: snapshot.sessionId,
++					state: snapshot.state,
++				});
++			},
++		});
+ 		this.settings = config.settings;
+ 		this.#modelRegistry = config.modelRegistry;
+ 		this.#extensionRoots =
+@@ -2351,6 +2443,7 @@ export class AgentSession {
+ 
+ 	/** Emit an event to all listeners */
+ 	#emit(event: AgentSessionEvent): void {
++		getCompanionBridge(this.sessionManager).observe(event);
+ 		// Copy array before iteration to avoid mutation during iteration.
+ 		const listeners = [...this.#eventListeners];
+ 		for (const l of listeners) {
+@@ -2951,7 +3044,7 @@ export class AgentSession {
+ 		// and only successful mutating tools tick — read-only exploration is
+ 		// not progress an agent could mark done.
+ 		if (event.type === "message_end" && event.message.role === "toolResult") {
+-			this.#todo.onToolResult(event.message.toolName, event.message.isError);
++			this.#todo.onToolResult(event.message.toolName, event.message.isError, event.message);
+ 		}
+ 		// Track the settled assistant turn synchronously as well: agent_end
+ 		// maintenance reads `#lastAssistantMessage`, and when a turn's events all
+@@ -4521,6 +4614,7 @@ export class AgentSession {
+ 	 */
+ 	beginDispose(): void {
+ 		this.#isDisposed = true;
++		getCompanionBridge(this.sessionManager).dispose();
+ 		this.#modelDiscoveryAbortController.abort();
+ 		this.#queuedMessageDrainBlocked = false;
+ 		this.#usagePreflightReadyForNextModelCall = false;
+@@ -6673,6 +6767,7 @@ export class AgentSession {
+ 		}
+ 
+ 		return {
++			companion: getCompanionBridge(this.sessionManager).context(),
+ 			ui: noOpUIContext,
+ 			mode: "print",
+ 			hasUI: false,
+@@ -7768,6 +7863,7 @@ export class AgentSession {
+ 		/** Internal `/compact` startup keeps the manual-compaction marker alive while aborting the active turn. */
+ 		preserveCompaction?: boolean;
+ 	}): Promise<void> {
++		getCompanionBridge(this.sessionManager).interrupting();
+ 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
+ 		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
+ 		if (userInterrupt) this.#advisors.autoResumeSuppressed = true;
+@@ -7950,6 +8046,7 @@ export class AgentSession {
+ 			resetCapabilities();
+ 			await this.refreshBaseSystemPrompt();
+ 
++			getCompanionBridge(this.sessionManager).reset();
+ 			// Emit session_switch event with reason "new" to hooks
+ 			if (this.#extensionRunner) {
+ 				await this.#extensionRunner.emit({
+@@ -8039,6 +8136,7 @@ export class AgentSession {
+ 			advisorRecordersDetached = false;
+ 			await this.#memory.resetContextForNewTranscript();
+ 
++			getCompanionBridge(this.sessionManager).reset();
+ 			// Emit session_switch event with reason "fork" to hooks
+ 			if (this.#extensionRunner) {
+ 				await this.#extensionRunner.emit({
+@@ -8367,16 +8465,18 @@ export class AgentSession {
+ 		if (!checkpointState) {
+ 			return;
+ 		}
++		const rewindDetails = {
++			startedAt: checkpointState.startedAt,
++			checkpointTodoPhases: this.#todo.phases,
++		};
+ 		this.#bash.withBranchTransition(() => {
+ 			try {
+-				this.sessionManager.branchWithSummary(checkpointState.checkpointEntryId, report, {
+-					startedAt: checkpointState.startedAt,
+-				});
++				this.sessionManager.branchWithSummary(checkpointState.checkpointEntryId, report, rewindDetails);
+ 			} catch (error) {
+ 				logger.warn("Rewind branch checkpoint missing, falling back to root", {
+ 					error: error instanceof Error ? error.message : String(error),
+ 				});
+-				this.sessionManager.branchWithSummary(null, report, { startedAt: checkpointState.startedAt });
++				this.sessionManager.branchWithSummary(null, report, rewindDetails);
+ 			}
+ 		});
+ 
+@@ -9138,6 +9238,7 @@ export class AgentSession {
+ 				didSessionMessagesChange(previousSessionContext.messages, sessionContext.messages);
+ 			this.#rehydrateCheckpointRewindState();
+ 
++			getCompanionBridge(this.sessionManager).reset();
+ 			// Emit session_switch event to hooks
+ 			if (this.#extensionRunner) {
+ 				await this.#extensionRunner.emit({
+@@ -9443,6 +9544,7 @@ export class AgentSession {
+ 			// Reload messages from entries (works for both file and in-memory mode)
+ 			const sessionContext = this.buildDisplaySessionContext();
+ 
++			getCompanionBridge(this.sessionManager).reset();
+ 			// Emit session_branch event to hooks (after branch completes)
+ 			if (this.#extensionRunner) {
+ 				await this.#extensionRunner.emit({
+@@ -9574,6 +9676,7 @@ export class AgentSession {
+ 			const sessionContext = this.buildDisplaySessionContext();
+ 
+ 			if (this.#extensionRunner) {
++				getCompanionBridge(this.sessionManager).reset();
+ 				await this.#extensionRunner.emit({
+ 					type: "session_branch",
+ 					previousSessionFile,
+@@ -9911,6 +10014,7 @@ export class AgentSession {
+ 		// `renderInitialMessages(...)` (issue #6483). Plain leaf moves and the
+ 		// read-only `reopenAsk` probe leave the flag unset.
+ 
++		getCompanionBridge(this.sessionManager).reset();
+ 		// Emit session_tree event; only handlers can mutate session entries, so skip
+ 		// the emit and the context rebuild when no handlers are registered (mirrors
+ 		// the session_before_tree guard above).
+diff --git a/packages/coding-agent/src/session/companion.ts b/packages/coding-agent/src/session/companion.ts
+new file mode 100644
+index 0000000000..bfd4c826fd
+--- /dev/null
++++ b/packages/coding-agent/src/session/companion.ts
+@@ -0,0 +1,280 @@
++import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
++import { isPromise } from "node:util/types";
++import { logger } from "@oh-my-pi/pi-utils";
++import type {
++	CompanionAnswer,
++	CompanionCommandInfo,
++	CompanionContext,
++	CompanionSnapshot,
++	ExtensionAskDialogQuestion,
++	ExtensionAskDialogResult,
++	ExtensionAskDialogSubmitResult,
++} from "../extensibility/extensions/types";
++
++type Owner = { getSessionId?: () => string };
++type Actions = {
++	submit(text: string): Promise<void>;
++	commands(): CompanionCommandInfo[];
++	interrupt(): Promise<void>;
++	persist(snapshot: CompanionSnapshot): void;
++};
++type PendingQuestion = {
++	requestId: string;
++	sessionId: string;
++	questions: ExtensionAskDialogQuestion[];
++	signal: AbortSignal;
++	resolve(result: ExtensionAskDialogResult | undefined): void;
++	cancel(): void;
++};
++
++/** One bridge per real session manager: extensions and builtin Ask share the same owner. */
++class CompanionBridge {
++	#snapshot: CompanionSnapshot;
++	#listeners = new Set<(snapshot: CompanionSnapshot) => void>();
++	#actions?: Actions;
++	#pending?: PendingQuestion;
++	#disposed = false;
++	#interrupted = false;
++
++	constructor(readonly owner: Owner) {
++		this.#snapshot = this.#initial();
++	}
++
++	#initial(): CompanionSnapshot {
++		return {
++			eventId: `foyer-companion-v1:${crypto.randomUUID()}`,
++			sessionId: this.owner.getSessionId?.() ?? "",
++			state: "unknown",
++			text: "",
++		};
++	}
++
++	bind(actions: Actions): void {
++		this.#actions = actions;
++	}
++
++	snapshot(): CompanionSnapshot {
++		if (this.#snapshot.sessionId !== this.owner.getSessionId?.()) {
++			this.cancel();
++			this.#snapshot = this.#initial();
++		}
++		return structuredClone(this.#snapshot);
++	}
++
++	context(): CompanionContext {
++		const sessionId = this.snapshot().sessionId;
++		const assertLive = () => {
++			if (this.#disposed || !this.#actions || !sessionId || sessionId !== this.owner.getSessionId?.()) {
++				throw new Error("Companion session is no longer active");
++			}
++		};
++		return {
++			snapshot: () => this.snapshot(),
++			subscribe: listener => {
++				this.#listeners.add(listener);
++				return () => this.#listeners.delete(listener);
++			},
++			submit: async text => {
++				assertLive();
++				if (typeof text !== "string" || !text.trim()) throw new Error("Companion message must not be empty");
++				await this.#actions!.submit(text);
++			},
++			commands: () => {
++				assertLive();
++				return this.#actions!.commands();
++			},
++			interrupt: async () => {
++				assertLive();
++				await this.#actions!.interrupt();
++			},
++			answer: async (requestId, answers) => {
++				assertLive();
++				this.#answer(requestId, answers);
++			},
++		};
++	}
++
++	#publish(state: CompanionSnapshot["state"], text = "", question?: CompanionSnapshot["question"]): void {
++		if (this.#disposed) return;
++		this.#snapshot = { ...this.#initial(), state, text, ...(question ? { question } : {}) };
++		try {
++			this.#actions?.persist(this.#snapshot);
++		} catch (error) {
++			logger.warn("Companion state could not be persisted", { error });
++		}
++		for (const listener of this.#listeners) {
++			try {
++				const result: unknown = listener(this.snapshot());
++				if (isPromise(result)) void result.catch(error => logger.warn("Companion listener rejected", { error }));
++			} catch (error) {
++				logger.warn("Companion listener failed", { error });
++			}
++		}
++	}
++
++	/** Called only by AgentSession's public event sink, after its final continuation downgrade. */
++	observe(event: { type: string; isTerminal?: boolean; messages?: AgentMessage[] }): void {
++		if (event.type === "agent_start") {
++			this.#interrupted = false;
++			this.#publish("working");
++		} else if (event.type === "agent_end" && event.isTerminal === true) {
++			this.cancel();
++			const message = event.messages?.findLast(item => item.role === "assistant");
++			if (!message || message.role !== "assistant") {
++				this.#publish("unknown");
++				return;
++			}
++			const text = message.content
++				.filter(part => part.type === "text")
++				.map(part => part.text)
++				.join("\n");
++			const state =
++				message.stopReason === "error"
++					? "failed"
++					: this.#interrupted || message.stopReason === "aborted"
++						? "interrupted"
++						: message.stopReason === "stop"
++							? "completed"
++							: "failed";
++			this.#publish(
++				state,
++				text ||
++					(state === "failed"
++						? "OMP stopped before normal completion."
++						: state === "interrupted"
++							? "The run was interrupted."
++							: ""),
++			);
++		}
++	}
++
++	reset(): void {
++		this.cancel();
++		this.#interrupted = false;
++		this.#publish("unknown");
++	}
++
++	interrupting(): void {
++		this.#interrupted = true;
++		this.cancel();
++	}
++
++	cancel(): void {
++		const pending = this.#pending;
++		this.#pending = undefined;
++		pending?.cancel();
++	}
++
++	dispose(): void {
++		this.#disposed = true;
++		this.cancel();
++		this.#listeners.clear();
++		this.#actions = undefined;
++	}
++
++	#answer(requestId: string, answers: CompanionAnswer[]): void {
++		const pending = this.#pending;
++		if (
++			!pending ||
++			pending.requestId !== requestId ||
++			pending.sessionId !== this.owner.getSessionId?.() ||
++			pending.signal.aborted
++		) {
++			throw new Error("Companion question is stale or already answered");
++		}
++		if (!Array.isArray(answers) || answers.length !== pending.questions.length)
++			throw new Error("Answer every requested question exactly once");
++		const results: ExtensionAskDialogSubmitResult["results"] = pending.questions.map((question, index) => {
++			const answer = answers[index];
++			if (
++				!answer ||
++				answer.id !== question.id ||
++				!Array.isArray(answer.selectedOptions) ||
++				answer.selectedOptions.some(
++					label => typeof label !== "string" || !question.options.some(option => option.label === label),
++				) ||
++				new Set(answer.selectedOptions).size !== answer.selectedOptions.length ||
++				(answer.customInput !== undefined &&
++					(typeof answer.customInput !== "string" || !answer.customInput.trim())) ||
++				(answer.selectedOptions.length === 0 && !answer.customInput?.trim()) ||
++				(!question.multi && answer.selectedOptions.length + (answer.customInput === undefined ? 0 : 1) !== 1)
++			) {
++				throw new Error("Answer does not match the requested question choices");
++			}
++			return {
++				id: question.id,
++				question: question.question,
++				options: question.options.map(option => option.label),
++				multi: question.multi ?? false,
++				selectedOptions: [...answer.selectedOptions],
++				...(answer.customInput !== undefined ? { customInput: answer.customInput } : {}),
++			};
++		});
++		this.#pending = undefined;
++		pending.resolve({ kind: "submit", results });
++	}
++
++	/** Local and remote answers settle this one dialog; abort closes the losing local UI. */
++	async ask(
++		questions: ExtensionAskDialogQuestion[],
++		show: (signal: AbortSignal) => Promise<ExtensionAskDialogResult | undefined>,
++		signal?: AbortSignal,
++	): Promise<ExtensionAskDialogResult | undefined> {
++		this.cancel();
++		const controller = new AbortController();
++		const dialogSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
++		const remote = Promise.withResolvers<ExtensionAskDialogResult | undefined>();
++		const requestId = crypto.randomUUID();
++		const sessionId = this.snapshot().sessionId;
++		const cancel = () => {
++			remote.resolve(undefined);
++			controller.abort();
++		};
++		this.#pending = {
++			requestId,
++			sessionId,
++			questions: structuredClone(questions),
++			signal: dialogSignal,
++			resolve: remote.resolve,
++			cancel,
++		};
++		const onAbort = () => {
++			if (this.#pending?.requestId === requestId) this.#pending = undefined;
++			cancel();
++		};
++		signal?.addEventListener("abort", onAbort, { once: true });
++		let local: Promise<ExtensionAskDialogResult | undefined> | undefined;
++		try {
++			if (dialogSignal.aborted) return undefined;
++			local = show(dialogSignal);
++			this.#publish("waiting", "", {
++				requestId,
++				questions: questions.map(q => ({
++					id: q.id,
++					question: q.question,
++					options: q.options.map(option => ({ label: option.label })),
++					...(q.multi !== undefined ? { multi: q.multi } : {}),
++				})),
++			});
++			return await Promise.race([local, remote.promise]);
++		} finally {
++			if (this.#pending?.requestId === requestId) this.#pending = undefined;
++			signal?.removeEventListener("abort", onAbort);
++			controller.abort();
++			// Wait for the existing dialog's abort cleanup before allowing the next tool to use the UI.
++			await local?.catch(() => {});
++			if (this.#snapshot.sessionId === sessionId && this.#snapshot.question?.requestId === requestId)
++				this.#publish("working");
++		}
++	}
++}
++
++const bridges = new WeakMap<Owner, CompanionBridge>();
++export function getCompanionBridge(owner: Owner): CompanionBridge {
++	let bridge = bridges.get(owner);
++	if (!bridge) {
++		bridge = new CompanionBridge(owner);
++		bridges.set(owner, bridge);
++	}
++	return bridge;
++}
+diff --git a/packages/coding-agent/src/session/stream-guards.ts b/packages/coding-agent/src/session/stream-guards.ts
+index a5c8865a85..7464aac130 100644
+--- a/packages/coding-agent/src/session/stream-guards.ts
++++ b/packages/coding-agent/src/session/stream-guards.ts
+@@ -4,6 +4,7 @@ import {
+ 	type AgentMessage,
+ 	type AgentTurnEndContext,
+ 	createToolScopedAbortReason,
++	TERMINAL_TOOL_RESULT_ABORT_REASON,
+ } from "@oh-my-pi/pi-agent-core";
+ import type { AssistantMessage, AssistantMessageEvent, Model, ToolCall } from "@oh-my-pi/pi-ai";
+ import { GeminiHeaderRunDetector } from "@oh-my-pi/pi-ai/utils/thinking-loop";
+@@ -12,6 +13,7 @@ import { logger, prompt } from "@oh-my-pi/pi-utils";
+ import type { Settings } from "../config/settings";
+ import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
+ import geminiToolReminderTemplate from "../prompts/system/gemini-tool-call-reminder.md" with { type: "text" };
++import toolProtocolRecoveryTemplate from "../prompts/system/tool-call-protocol-recovery.md" with { type: "text" };
+ import type { SecretObfuscator } from "../secrets/obfuscator";
+ import { assertEditableFile } from "../tools/auto-generated-guard";
+ import { isInternalUrlPath, normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
+@@ -188,6 +190,11 @@ export class LoopGuards {
+ 	#geminiHeaderDetector: GeminiHeaderRunDetector | undefined;
+ 	#toolCallLoopGuard: ToolCallLoopGuard | undefined;
+ 	#toolCallLoopGuardSettingsKey: string | undefined;
++	#protocolUserMessage: AgentMessage | undefined;
++	#protocolSettingsKey: string | undefined;
++	#protocolFailureCount = 0;
++	#protocolWarned = false;
++	#protocolRecoveryFailures = 0;
+ 
+ 	constructor(host: StreamGuardsHost) {
+ 		this.#host = host;
+@@ -196,6 +203,7 @@ export class LoopGuards {
+ 	/** Records a completed turn and injects a redirect when calls repeat. */
+ 	recordTurn(messages: AgentMessage[], context: AgentTurnEndContext | undefined): void {
+ 		if (context?.message.role !== "assistant") return;
++		if (this.#recordProtocolFailures(messages, context)) return;
+ 		const detection = this.#activeToolCallLoopGuard()?.recordTurn({
+ 			message: context.message,
+ 			toolResults: context.toolResults,
+@@ -203,6 +211,59 @@ export class LoopGuards {
+ 		if (detection) this.#injectToolCallLoopRedirect(messages, detection);
+ 	}
+ 
++	#recordProtocolFailures(messages: AgentMessage[], context: AgentTurnEndContext): boolean {
++		const enabled = this.#host.settings.get("model.toolCallLoopGuard.enabled");
++		const threshold = Math.max(1, Math.trunc(this.#host.settings.get("model.toolCallLoopGuard.threshold")));
++		const key = `${this.#host.promptGeneration()}:${enabled}:${threshold}`;
++		const userMessage = messages.findLast(message => message.role === "user");
++		if (key !== this.#protocolSettingsKey || userMessage !== this.#protocolUserMessage) {
++			this.#protocolSettingsKey = key;
++			this.#protocolUserMessage = userMessage;
++			this.#protocolFailureCount = 0;
++			this.#protocolWarned = false;
++			this.#protocolRecoveryFailures = 0;
++		}
++		if (!enabled) return false;
++
++		// Argument failures share a per-request budget even when intervening calls succeed.
++		let failures = 0;
++		for (const result of context.toolResults) {
++			const details = result.details;
++			const failed =
++				result.isError &&
++				typeof details === "object" &&
++				details !== null &&
++				"toolCallError" in details &&
++				details.toolCallError === "validation";
++			if (failed) {
++				failures++;
++				this.#protocolFailureCount++;
++			}
++		}
++		if (failures === 0) return false;
++		if (this.#protocolWarned) this.#protocolRecoveryFailures += failures;
++		if (this.#protocolFailureCount < threshold) return true;
++		if (this.#protocolWarned && this.#protocolRecoveryFailures < threshold) return true;
++
++		const stopped = this.#protocolWarned;
++		this.#protocolWarned = true;
++		const content = prompt.render(toolProtocolRecoveryTemplate, { stopped, count: this.#protocolFailureCount });
++		this.#appendGuardMessage(messages, {
++			role: "custom",
++			customType: stopped ? "tool-call-protocol-stop" : "tool-call-protocol-recovery",
++			content,
++			display: stopped,
++			details: { failures: this.#protocolFailureCount, stopped },
++			attribution: "agent",
++			timestamp: Date.now(),
++		});
++		if (stopped) {
++			this.#host.emitNotice("error", content, "tool-call-protocol");
++			this.#host.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
++		}
++		return true;
++	}
++
+ 	/** Feeds a streamed assistant event to the Gemini header-runaway detector. */
+ 	onAssistantEvent(message: AssistantMessage, event: AssistantMessageEvent): void {
+ 		if (event.type === "thinking_start") {
+@@ -249,13 +310,17 @@ export class LoopGuards {
+ 			attribution: "agent",
+ 			timestamp: Date.now(),
+ 		};
+-		messages.push(redirectMessage);
+-		if (this.#host.agent.state.messages !== messages) this.#host.agent.appendMessage(redirectMessage);
++		this.#appendGuardMessage(messages, redirectMessage);
++	}
++
++	#appendGuardMessage(messages: AgentMessage[], message: CustomMessage): void {
++		messages.push(message);
++		if (this.#host.agent.state.messages !== messages) this.#host.agent.appendMessage(message);
+ 		this.#host.sessionManager.appendCustomMessageEntry(
+-			TOOL_CALL_LOOP_REDIRECT_TYPE,
+-			content,
+-			false,
+-			details,
++			message.customType,
++			message.content,
++			message.display,
++			message.details,
+ 			"agent",
+ 		);
+ 	}
+diff --git a/packages/coding-agent/src/session/todo-tracker.ts b/packages/coding-agent/src/session/todo-tracker.ts
+index f6b25a5cdc..fd43c2510d 100644
+--- a/packages/coding-agent/src/session/todo-tracker.ts
++++ b/packages/coding-agent/src/session/todo-tracker.ts
+@@ -1,3 +1,4 @@
++import { isDeepStrictEqual } from "node:util";
+ import type { Agent, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
+ import type { AssistantMessage, Message, Model, TextContent, ToolChoice } from "@oh-my-pi/pi-ai";
+ import { isRecord, logger, prompt, stringProperty } from "@oh-my-pi/pi-utils";
+@@ -5,6 +6,7 @@ import type { Settings } from "../config/settings";
+ import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
+ import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
+ import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
++import { resolveDispatchDetails, writeDeviceDispatch } from "../tools/resolve";
+ import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
+ import { buildNamedToolChoice } from "../utils/tool-choice";
+ import type { AgentSessionEvent } from "./agent-session-events";
+@@ -13,11 +15,8 @@ import type { SessionManager } from "./session-manager";
+ const MID_RUN_NUDGE_MUTATION_THRESHOLD = 12;
+ const MID_RUN_NUDGE_MAX_PER_CYCLE = 2;
+ const MUTATING_TOOLS: Record<string, true> = {
+-	bash: true,
+-	eval: true,
+ 	edit: true,
+ 	write: true,
+-	ast_edit: true,
+ };
+ const MID_RUN_NUDGE_MESSAGE_TYPE = "mid-run-todo-nudge";
+ const MARKDOWN_PROMPT_PREFIX_RE = /^(?:>\s*)?(?:(?:[-*+]|\d+[.)])\s+)*/;
+@@ -82,7 +81,12 @@ export class TodoTracker {
+ 
+ 	/** Replaces todo phases with a defensive clone. */
+ 	setPhases(phases: TodoPhase[]): void {
+-		this.#phases = this.#clonePhases(phases);
++		const nextPhases = this.#clonePhases(phases);
++		if (!isDeepStrictEqual(this.#phases, nextPhases)) {
++			this.#mutationsSinceLastTouch = 0;
++			this.#reminderAwaitingProgress = false;
++		}
++		this.#phases = nextPhases;
+ 	}
+ 
+ 	/** Rehydrates todo phases from the current transcript branch. */
+@@ -104,13 +108,19 @@ export class TodoTracker {
+ 	}
+ 
+ 	/** Records a completed tool result before asynchronous event processing begins. */
+-	onToolResult(toolName: string, isError: boolean): void {
+-		if (toolName === "todo") {
+-			this.#mutationsSinceLastTouch = 0;
+-		} else if (!isError && MUTATING_TOOLS[toolName]) {
++	onToolResult(toolName: string, isError: boolean, result?: unknown): void {
++		// Stop-time reminders track resumed activity, independently of source mutation accounting.
++		this.#reminderAwaitingProgress = false;
++		if (isError) return;
++		const dispatch = writeDeviceDispatch(toolName, result);
++		// Shell/eval are unknown effects; a write to an observational device is not a file write.
++		const operation = dispatch ? (dispatch.mode === "execute" ? dispatch.tool : undefined) : toolName;
++		const resolution = resolveDispatchDetails(toolName, result);
++		const appliedAst =
++			dispatch?.mode === "execute" && resolution?.action === "apply" && resolution.sourceToolName === "ast_edit";
++		if ((operation && MUTATING_TOOLS[operation]) || appliedAst) {
+ 			this.#mutationsSinceLastTouch++;
+ 		}
+-		this.#reminderAwaitingProgress = false;
+ 	}
+ 
+ 	/** Detects whether a successful todo result came from an init operation. */
 diff --git a/packages/coding-agent/src/thinking.ts b/packages/coding-agent/src/thinking.ts
 index b96e5d7256..4f1f981f7a 100644
 --- a/packages/coding-agent/src/thinking.ts
@@ -989,6 +1997,212 @@ index b96e5d7256..4f1f981f7a 100644
 +		AUTO_THINKING;
 +	return { levels, preselect };
 +}
+diff --git a/packages/coding-agent/src/tools/ask.ts b/packages/coding-agent/src/tools/ask.ts
+index 1189e9d3b9..20b05b21c0 100644
+--- a/packages/coding-agent/src/tools/ask.ts
++++ b/packages/coding-agent/src/tools/ask.ts
+@@ -36,6 +36,7 @@ import type { ExtensionUISelectItem } from "../extensibility/extensions";
+ import { getMarkdownTheme, type Theme, theme } from "../modes/theme/theme";
+ import askDescription from "../prompts/tools/ask.md" with { type: "text" };
+ import { vocalizer } from "../tts/vocalizer";
++import { getCompanionBridge } from "../session/companion";
+ import { framedBlock, outputBlockContentWidth, renderStatusLine } from "../tui";
+ import type { ToolSession } from ".";
+ import {
+@@ -992,7 +993,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
+ 		const richAskDialog = extensionUi.askDialog;
+ 		if (richAskDialog) {
+ 			try {
+-				const showRichDialog = () =>
++				const showRichDialog = (dialogSignal = signal) =>
+ 					richAskDialog(
+ 						params.questions.map(q => ({
+ 							id: q.id,
+@@ -1006,9 +1007,13 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
+ 							...(q.multi !== undefined ? { multi: q.multi } : {}),
+ 							...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
+ 						})),
+-						{ timeout: timeout ?? undefined, signal },
++						{ timeout: timeout ?? undefined, signal: dialogSignal },
+ 					);
+-				const richResult = signal ? await untilAborted(signal, showRichDialog) : await showRichDialog();
++				const richResult = this.session.sessionManager?.getSessionId
++					? await getCompanionBridge(this.session.sessionManager).ask(params.questions, showRichDialog, signal)
++					: signal
++						? await untilAborted(signal, showRichDialog)
++						: await showRichDialog();
+ 				if (!richResult) {
+ 					context.abort();
+ 					throw new ToolAbortError("Ask tool was cancelled by the user");
+diff --git a/packages/coding-agent/src/tools/output-meta.ts b/packages/coding-agent/src/tools/output-meta.ts
+index ffb4d58c78..3294cf3852 100644
+--- a/packages/coding-agent/src/tools/output-meta.ts
++++ b/packages/coding-agent/src/tools/output-meta.ts
+@@ -16,7 +16,14 @@ import { isRecord, logger } from "@oh-my-pi/pi-utils";
+ import { getDefault, type Settings } from "../config/settings";
+ import { formatGroupedDiagnosticMessages } from "../lsp/utils";
+ import type { Theme } from "../modes/theme/theme";
+-import { type OutputSummary, type TruncationResult, truncateMiddle, truncateTail } from "../session/streaming-output";
++import {
++	DEFAULT_MAX_BYTES,
++	DEFAULT_MAX_LINES,
++	type OutputSummary,
++	type TruncationResult,
++	truncateMiddle,
++	truncateTail,
++} from "../session/streaming-output";
+ import { formatBytes, wrapBrackets } from "./render-utils";
+ import { renderError } from "./tool-errors";
+ 
+@@ -676,6 +683,14 @@ function getSpillConfig(s: Settings | undefined) {
+ 	};
+ }
+ 
++// Object identity keeps device/foreign-tool JSON from forging source paging provenance.
++const boundedReadResults = new WeakSet<AgentToolResult>();
++
++/** Mark a source selection after Read has applied its own byte and line limits. */
++export function markBoundedReadResult(result: AgentToolResult): void {
++	boundedReadResults.add(result);
++}
++
+ /**
+  * Resolve the OutputSink `headBytes` budget from session settings.
+  * Exposed so streaming executors (bash/python/ssh/eval) can opt into
+@@ -756,6 +771,12 @@ async function spillLargeResultToArtifact(
+ 
+ 	const fullText = textParts.length === 1 ? textParts[0] : textParts.join("\n");
+ 	const totalBytes = Buffer.byteLength(fullText, "utf-8");
++	if (
++		toolName === "read" &&
++		boundedReadResults.has(result) &&
++		totalBytes <= Math.max(DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES * 512)
++	)
++		return result;
+ 	if (totalBytes <= threshold) return result;
+ 
+ 	// Save the full output as an artifact so the elided bytes stay recoverable.
+diff --git a/packages/coding-agent/src/tools/read.ts b/packages/coding-agent/src/tools/read.ts
+index 3d323041c0..f54025b6ba 100644
+--- a/packages/coding-agent/src/tools/read.ts
++++ b/packages/coding-agent/src/tools/read.ts
+@@ -64,7 +64,7 @@ import {
+ 	scanFileForConflicts,
+ } from "./conflict-detect";
+ import { executeReadUrl, fetchReadUrl, parseReadUrlTarget } from "./fetch";
+-import { type OutputMeta, resolveOutputMaxColumns } from "./output-meta";
++import { markBoundedReadResult, type OutputMeta, resolveOutputMaxColumns } from "./output-meta";
+ import {
+ 	expandPath,
+ 	formatPathRelativeToCwd,
+@@ -1717,7 +1717,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
+ 						suffixResolution,
+ 						undefined, // plain-file read: deterministic and fast, never abort mid-read
+ 					);
+-					if (multiResult.bridgeResult) return multiResult.bridgeResult;
++					if (multiResult.bridgeResult) {
++						this.#markExplicitBoundedSelection(multiResult.bridgeResult, parsed, absolutePath);
++						return multiResult.bridgeResult;
++					}
+ 					content = [{ type: "text", text: multiResult.outputText }];
+ 					sourcePath = absolutePath;
+ 					details = multiResult.displayContent ? { displayContent: multiResult.displayContent } : {};
+@@ -1748,6 +1751,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
+ 								const firstText = bridgeResult.content.find((c): c is TextContent => c.type === "text");
+ 								if (firstText) firstText.text = `${notice}\n${firstText.text}`;
+ 							}
++							this.#markExplicitBoundedSelection(bridgeResult, parsed, absolutePath);
+ 							return bridgeResult;
+ 						} catch (error) {
+ 							logger.warn("ACP fs readTextFile failed; falling back to disk", { path: absolutePath, error });
+@@ -2097,7 +2101,35 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
+ 		if (columnTruncated > 0) {
+ 			resultBuilder.limits({ columnMax: columnTruncated });
+ 		}
+-		return resultBuilder.done();
++		const result = resultBuilder.done();
++		this.#markExplicitBoundedSelection(result, parsed, sourcePath);
++		return result;
++	}
++
++	/**
++	 * Read already bounded this selection with its own line and byte limits, so
++	 * the generic artifact spill must not re-elide the requested lines. Every
++	 * path that returns such a selection calls this, including the ACP-bridge
++	 * results that return before the common result builder.
++	 */
++	#markExplicitBoundedSelection(
++		result: AgentToolResult<ReadToolDetails>,
++		parsed: ParsedSelector,
++		sourcePath: string | undefined,
++	): void {
++		const boundedSelection =
++			parsed.kind === "tail" ||
++			(parsed.kind === "lines" && parsed.ranges.every(range => range.endLine !== undefined));
++		if (!boundedSelection || !sourcePath) return;
++		const [first] = result.content;
++		if (result.content.length !== 1 || first?.type !== "text") return;
++		const selectedText = first.text;
++		const selectedLines = countTextLines(selectedText);
++		if (
++			selectedLines <= DEFAULT_MAX_LINES &&
++			Buffer.byteLength(selectedText, "utf-8") <= Math.max(DEFAULT_MAX_BYTES, selectedLines * 512)
++		)
++			markBoundedReadResult(result);
+ 	}
+ 
+ 	/**
+diff --git a/packages/coding-agent/src/tools/todo.ts b/packages/coding-agent/src/tools/todo.ts
+index e3dfab8776..40c734b0dd 100644
+--- a/packages/coding-agent/src/tools/todo.ts
++++ b/packages/coding-agent/src/tools/todo.ts
+@@ -177,6 +177,10 @@ export const USER_TODO_EDIT_CUSTOM_TYPE = "user_todo_edit";
+ export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPhase[] {
+ 	for (let i = entries.length - 1; i >= 0; i--) {
+ 		const entry = entries[i];
++		if (entry.type === "branch_summary" && isRecord(entry.details)) {
++			const phases = entry.details.checkpointTodoPhases;
++			if (Array.isArray(phases) && phases.every(isTodoPhase)) return clonePhases(phases);
++		}
+ 		if (entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE) {
+ 			const data = entry.data as { phases?: unknown } | undefined;
+ 			if (data && Array.isArray(data.phases)) {
+diff --git a/packages/coding-agent/src/tools/xdev.ts b/packages/coding-agent/src/tools/xdev.ts
+index 351953af8d..22f5fb1aba 100644
+--- a/packages/coding-agent/src/tools/xdev.ts
++++ b/packages/coding-agent/src/tools/xdev.ts
+@@ -54,12 +54,16 @@ import { renderError, ToolAbortError, ToolError } from "./tool-errors";
+  * (which have no notion of the `xd://` protocol) so hiding it behind dispatch
+  * makes it unreachable in practice (issue #5973) — each loses its harness
+  * integration or usability if hidden behind dispatch.
++ * `checkpoint` and `rewind` retain native argument schemas so lifecycle control
++ * does not depend on encoding JSON inside the write tool's content string.
+  */
+ export const XDEV_KEEP_TOP_LEVEL: Record<string, true> = {
+ 	todo: true,
+ 	ask: true,
+ 	grep: true,
+ 	web_search: true,
++	checkpoint: true,
++	rewind: true,
+ };
+ 
+ /**
+@@ -151,12 +155,12 @@ function parseDeviceArgs(
+ 		parsed = JSON.parse(content);
+ 	} catch (error) {
+ 		throw new ToolError(
+-			`${XD_URL_PREFIX}${device.name} expects a JSON args object as content (${error instanceof Error ? error.message : String(error)}). Write \`?\` for docs.`,
++			`${XD_URL_PREFIX}${device.name} expects a JSON args object as content (${error instanceof Error ? error.message : String(error)}).\n\n${docs()}`,
+ 		);
+ 	}
+ 	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+ 		throw new ToolError(
+-			`${XD_URL_PREFIX}${device.name} content must be a JSON object, got ${Array.isArray(parsed) ? "array" : typeof parsed}.`,
++			`${XD_URL_PREFIX}${device.name} content must be a JSON object, got ${Array.isArray(parsed) ? "array" : typeof parsed}.\n\n${docs()}`,
+ 		);
+ 	}
+ 	// The harness only injects the intent field into top-level schemas; strip a
 diff --git a/packages/coding-agent/src/utils/external-editor.ts b/packages/coding-agent/src/utils/external-editor.ts
 index 6e1d737aba..74b8200f4d 100644
 --- a/packages/coding-agent/src/utils/external-editor.ts
@@ -1045,6 +2259,467 @@ index 6e1d737aba..74b8200f4d 100644
  			if (options?.trimTrailingNewline === false) {
  				return text;
  			}
+diff --git a/packages/coding-agent/test/agent-session-checkpoint-rewind-branch.test.ts b/packages/coding-agent/test/agent-session-checkpoint-rewind-branch.test.ts
+index f1a3e5f575..84b33b9ca0 100644
+--- a/packages/coding-agent/test/agent-session-checkpoint-rewind-branch.test.ts
++++ b/packages/coding-agent/test/agent-session-checkpoint-rewind-branch.test.ts
+@@ -18,6 +18,11 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+ import { CheckpointTool, RewindTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
++import {
++	getLatestTodoPhasesFromEntries,
++	type TodoPhase,
++	USER_TODO_EDIT_CUSTOM_TYPE,
++} from "@oh-my-pi/pi-coding-agent/tools/todo";
+ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+ import { TempDir } from "@oh-my-pi/pi-utils";
+ 
+@@ -115,6 +120,7 @@ async function createHarness(
+ 	options?: {
+ 		onAgentEnd?: (willContinue: boolean | undefined) => void;
+ 		resolveFallbackTool?: (name: string) => AgentTool | undefined;
++		persist?: boolean;
+ 	},
+ ): Promise<Harness & { mock: MockModel }> {
+ 	const tempDir = TempDir.createSync("@pi-checkpoint-rewind-branch-");
+@@ -145,7 +151,9 @@ async function createHarness(
+ 		resolveFallbackTool: options?.resolveFallbackTool,
+ 	});
+ 
+-	const sessionManager = SessionManager.inMemory(tempDir.path());
++	const sessionManager = options?.persist
++		? SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"))
++		: SessionManager.inMemory(tempDir.path());
+ 	let extensionRunner: ExtensionRunner | undefined;
+ 	if (options?.onAgentEnd) {
+ 		const runtime = new ExtensionRuntime();
+@@ -213,6 +221,98 @@ async function expectNoActiveCheckpointError(session: AgentSession): Promise<voi
+ }
+ 
+ describe("AgentSession checkpoint rewind branch context", () => {
++	it("preserves canonical todo status and blockers through exploration rewind and reload", async () => {
++		const phases: TodoPhase[] = [
++			{
++				name: "Implementation",
++				tasks: [
++					{ content: "Preserve completed work", status: "completed" },
++					{ content: "Promote usage fixture", status: "blocked", blocker: "Consumer migration" },
++				],
++			},
++		];
++		const { session } = await createHarness([
++			{
++				content: [{ type: "toolCall", id: "checkpoint", name: "checkpoint", arguments: { goal: "inspect" } }],
++				stopReason: "toolUse",
++			},
++			{
++				content: [{ type: "toolCall", id: "rewind", name: "rewind", arguments: { report: "inspection complete" } }],
++				stopReason: "toolUse",
++			},
++			{ content: ["DONE"], stopReason: "stop" },
++		]);
++		session.setTodoPhases(phases);
++		await session.prompt("inspect with checkpoint");
++		expect(session.getTodoPhases()).toEqual(phases);
++		expect(getLatestTodoPhasesFromEntries(session.sessionManager.getBranch())).toEqual(phases);
++	});
++
++	it.each(["append", "clear"])(
++		"persists a post-checkpoint %s without changing ordinary branch history",
++		async operation => {
++			const original: TodoPhase[] = [
++				{ name: "Work", tasks: [{ content: "Existing obligation", status: "in_progress" }] },
++			];
++			const next: TodoPhase[] =
++				operation === "clear"
++					? []
++					: [
++							{ name: "Work", tasks: [{ content: "Existing obligation", status: "completed" }] },
++							{
++								name: "Follow-up",
++								tasks: [{ content: "New obligation", status: "blocked", blocker: "External dependency" }],
++							},
++						];
++			const todo: AgentTool = {
++				name: "todo",
++				label: "Todo",
++				description: "Update canonical obligations",
++				parameters: type({}),
++				async execute() {
++					session.setTodoPhases(next);
++					return {
++						content: [{ type: "text", text: "Updated" }],
++						details: { op: operation === "clear" ? "rm" : "append", phases: next },
++					};
++				},
++			};
++			const { session } = await createHarness(
++				[
++					{
++						content: [{ type: "toolCall", id: "cp", name: "checkpoint", arguments: { goal: "inspect" } }],
++						stopReason: "toolUse",
++					},
++					{ content: [{ type: "toolCall", id: "update", name: "todo", arguments: {} }], stopReason: "toolUse" },
++					{
++						content: [
++							{ type: "toolCall", id: "rw", name: "rewind", arguments: { report: "inspection complete" } },
++						],
++						stopReason: "toolUse",
++					},
++					{ content: ["DONE"], stopReason: "stop" },
++				],
++				[checkpointTool as AgentTool, rewindTool as AgentTool, todo],
++				{ persist: true },
++			);
++			session.setTodoPhases(original);
++			const originalEntry = session.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, {
++				phases: original,
++			});
++			await session.prompt("inspect and reconcile obligations");
++			expect(session.getTodoPhases()).toEqual(next);
++			await session.sessionManager.flush();
++			const reopened = await SessionManager.open(session.sessionManager.getSessionFile()!);
++			try {
++				expect(getLatestTodoPhasesFromEntries(reopened.getBranch())).toEqual(next);
++				reopened.branch(originalEntry);
++				expect(getLatestTodoPhasesFromEntries(reopened.getBranch())).toEqual(original);
++			} finally {
++				await reopened.close();
++			}
++		},
++	);
++
+ 	it("rebuilds active history through branch_summary before the post-rewind assistant turn", async () => {
+ 		const report = "findings: kept checkpoint; risks: stale signed thinking";
+ 		const { session, mock } = await createHarness([
+diff --git a/packages/coding-agent/test/agent-session-todo-mid-run-nudge.test.ts b/packages/coding-agent/test/agent-session-todo-mid-run-nudge.test.ts
+index d3734f2c35..bdbcf0dcca 100644
+--- a/packages/coding-agent/test/agent-session-todo-mid-run-nudge.test.ts
++++ b/packages/coding-agent/test/agent-session-todo-mid-run-nudge.test.ts
+@@ -17,13 +17,12 @@ import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+  * gentle MODEL-ONLY hint — deliberately separate from the user-visible
+  * stop-time reminder ladder. The contract this defends:
+  *
+- *   1. Only SUCCESSFUL MUTATING tool results (bash/eval/edit/write/ast_edit)
+- *      tick the counter. Read-only exploration (grep/read/glob/lsp) and
+- *      errored results never do.
++ *   1. Successful source edits/writes tick the counter. Observational devices,
++ *      unknown shell/eval effects, previews, and errors do not.
+  *   2. At {@link MID_RUN_TODO_NUDGE_MUTATION_THRESHOLD} mutations without a
+- *      `todo` call, the aside provider injects a hidden custom message
++ *      canonical todo-state change, the aside provider injects a hidden custom message
+  *      (`display: false`) — NO `todo_reminder` event, nothing renders.
+- *   3. A `todo` tool result resets the counter.
++ *   3. A changed canonical todo snapshot resets the counter; views and failures do not.
+  *   4. At most {@link MID_RUN_TODO_NUDGE_MAX_PER_CYCLE} nudges fire per
+  *      prompt cycle.
+  *   5. The counter update lands synchronously with the message_end emit.
+@@ -100,7 +99,7 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
+ 	}
+ 
+ 	/** Production-shaped tool round trip: assistant toolCall turn + toolResult. */
+-	function emitToolResult(toolName: string, opts?: { isError?: boolean }): void {
++	function emitToolResult(toolName: string, opts?: { isError?: boolean; details?: unknown }): void {
+ 		const toolCallId = `call_${toolName}_${Date.now()}_${Math.random()}`;
+ 		session.agent.emitExternalEvent({ type: "message_end", message: toolUseAssistant(toolName) });
+ 		const content: TextContent[] = [{ type: "text", text: "ok" }];
+@@ -111,6 +110,7 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
+ 				toolCallId,
+ 				toolName,
+ 				content,
++				details: opts?.details,
+ 				isError: opts?.isError ?? false,
+ 				timestamp: Date.now(),
+ 			},
+@@ -211,6 +211,24 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
+ 		expect(reminderEvents).toEqual([]);
+ 	});
+ 
++	it("does not treat shell, eval, or device observations as source mutations", async () => {
++		for (let i = 0; i < THRESHOLD; i++) {
++			emitToolResult("bash");
++			emitToolResult("eval");
++			emitToolResult("write", { details: { xdev: { mode: "execute", tool: "lsp", inner: {} } } });
++		}
++		expect(await drainNudges()).toEqual([]);
++	});
++
++	it("todo views, failures, and identical snapshots do not reset pending reconciliation", async () => {
++		for (let i = 0; i < THRESHOLD - 1; i++) emitToolResult("edit");
++		session.setTodoPhases(session.getTodoPhases());
++		emitToolResult("todo");
++		emitToolResult("todo", { isError: true });
++		emitToolResult("edit");
++		expect((await drainNudges()).map(nudge => nudge.customType)).toEqual([NUDGE_TYPE]);
++	});
++
+ 	it("stays silent below the mutation threshold", async () => {
+ 		for (let i = 0; i < THRESHOLD - 1; i++) emitToolResult("edit");
+ 
+@@ -249,8 +267,11 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
+ 		expect(await drainNudges()).toEqual([]);
+ 	});
+ 
+-	it("does not nudge when a `todo` call has reset the counter mid-window", async () => {
++	it("resets reconciliation when canonical todo state changes", async () => {
+ 		for (let i = 0; i < THRESHOLD - 1; i++) emitToolResult("write");
++		const phases = session.getTodoPhases();
++		phases[0]!.tasks[0]!.status = "completed";
++		session.setTodoPhases(phases);
+ 		emitToolResult("todo");
+ 		for (let i = 0; i < THRESHOLD - 1; i++) emitToolResult("write");
+ 
+@@ -316,4 +337,33 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
+ 		expect(await drainNudges()).toEqual([]);
+ 		expect(reminderEvents.length).toBe(1);
+ 	});
++
++	it.each([false, true])("rearms stop-time reminders after read-only results (isError=%s)", async isError => {
++		vi.spyOn(session.agent, "continue").mockResolvedValue();
++		emitTextOnlyStop();
++		await session.waitForIdle();
++		emitToolResult("read", { isError });
++		expect(await drainNudges()).toEqual([]);
++		emitTextOnlyStop();
++		await session.waitForIdle();
++		expect(reminderEvents.map(event => event.attempt)).toEqual([1, 2]);
++	});
++
++	it("counts applied AST changes but not previews, discards, or failed applies", async () => {
++		const resolved = (action: "apply" | "discard") => ({
++			xdev: {
++				tool: "resolve",
++				mode: "execute",
++				inner: { action, sourceToolName: "ast_edit", reason: "Review changes" },
++			},
++		});
++		for (let n = 0; n < THRESHOLD; n++) {
++			emitToolResult("write", { details: { xdev: { tool: "ast_edit", mode: "execute" } } });
++			emitToolResult("write", { details: resolved("discard") });
++			emitToolResult("write", { details: resolved("apply"), isError: true });
++		}
++		expect(await drainNudges()).toEqual([]);
++		for (let n = 0; n < THRESHOLD; n++) emitToolResult("write", { details: resolved("apply") });
++		expect((await drainNudges()).map(nudge => nudge.customType)).toEqual([NUDGE_TYPE]);
++	});
+ });
+diff --git a/packages/coding-agent/test/agent-session-tool-call-loop-guard.test.ts b/packages/coding-agent/test/agent-session-tool-call-loop-guard.test.ts
+index a758add024..59fa1184cd 100644
+--- a/packages/coding-agent/test/agent-session-tool-call-loop-guard.test.ts
++++ b/packages/coding-agent/test/agent-session-tool-call-loop-guard.test.ts
+@@ -118,4 +118,97 @@ describe("AgentSession tool-call loop guard", () => {
+ 		expect(redirects).toHaveLength(1);
+ 		expect(redirects[0]!.display).toBe(false);
+ 	});
++
++	it.each(["validation", "execution", "disabled"])(
++		"bounds repeated %s failures without confusing their causes",
++		async failureKind => {
++			const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
++			const contexts: Context[] = [];
++			const executed: string[] = [];
++			let calls = 0;
++			let freshPrompt = false;
++			const probeSchema = type({ path: "string" });
++			const probe: AgentTool<typeof probeSchema> = {
++				name: "probe",
++				label: "Probe",
++				description: "Read a fixture",
++				parameters: probeSchema,
++				execute: async (_id, args) => {
++					executed.push(args.path);
++					if (args.path.startsWith("bad-")) throw new Error('Validation failed for tool "probe": fixture error');
++					return { content: [{ type: "text", text: args.path }] };
++				},
++			};
++			const agent = new Agent({
++				getApiKey: () => "test-key",
++				initialState: { model, systemPrompt: ["Test"], tools: [probe], messages: [] },
++				convertToLlm,
++				streamFn: (_model, context) => {
++					contexts.push(context);
++					const index = calls++;
++					const useTool = index < (freshPrompt ? 2 : 12);
++					const invalid = index % 2 === 0;
++					const args =
++						invalid && failureKind !== "execution" ? {} : { path: `${invalid ? "bad" : "file"}-${index}` };
++					const message: AssistantMessage = {
++						role: "assistant",
++						content: useTool
++							? [{ type: "toolCall", id: `probe-${freshPrompt}-${index}`, name: probe.name, arguments: args }]
++							: [{ type: "text", text: "Finished." }],
++						api: model.api,
++						provider: model.provider,
++						model: model.id,
++						usage: zeroUsage,
++						stopReason: useTool ? "toolUse" : "stop",
++						timestamp: Date.now(),
++					};
++					const stream = new AssistantMessageEventStream();
++					queueMicrotask(() => {
++						stream.push({ type: "start", partial: message });
++						stream.push({ type: "done", reason: useTool ? "toolUse" : "stop", message });
++					});
++					return stream;
++				},
++			});
++			const settings = Settings.isolated({
++				"compaction.enabled": false,
++				"todo.enabled": false,
++				"model.toolCallLoopGuard.enabled": failureKind !== "disabled",
++				"model.toolCallLoopGuard.threshold": 2,
++			});
++			settings.setModelRole("default", `${model.provider}/${model.id}`);
++			session = new AgentSession({
++				agent,
++				sessionManager: SessionManager.inMemory(tempDir.path()),
++				settings,
++				modelRegistry: new ModelRegistry(authStorage),
++				toolRegistry: new Map([[probe.name, probe]]),
++			});
++			await session.prompt("Inspect the fixture");
++			await session.waitForIdle();
++
++			if (failureKind === "validation") {
++				expect(calls).toBe(7);
++				expect(JSON.stringify(contexts[3]!.messages)).toContain("tool_call_protocol_recovery");
++				expect(executed).toEqual(["file-1", "file-3", "file-5"]);
++				expect(
++					session.messages.some(
++						message => message.role === "custom" && message.customType === "tool-call-protocol-stop",
++					),
++				).toBe(true);
++				calls = 0;
++				freshPrompt = true;
++				await session.prompt("Try a fresh request");
++				await session.waitForIdle();
++				expect(calls).toBe(3);
++			} else {
++				expect(calls).toBe(13);
++				expect(
++					session.messages.some(
++						message => message.role === "custom" && message.customType === "tool-call-protocol-stop",
++					),
++				).toBe(false);
++			}
++		},
++	);
+ });
+diff --git a/packages/coding-agent/test/companion.test.ts b/packages/coding-agent/test/companion.test.ts
+new file mode 100644
+index 0000000000..f5ab8d98dc
+--- /dev/null
++++ b/packages/coding-agent/test/companion.test.ts
+@@ -0,0 +1,108 @@
++import { describe, expect, test } from "bun:test";
++import type { AssistantMessage } from "@oh-my-pi/pi-ai";
++import type { CompanionSnapshot, ExtensionAskDialogResult } from "../src/extensibility/extensions/types";
++import { getCompanionBridge } from "../src/session/companion";
++
++const message: AssistantMessage = {
++	role: "assistant",
++	content: [{ type: "text", text: "Finished result" }],
++	api: "openai-responses",
++	provider: "openai",
++	model: "test",
++	timestamp: 1,
++	stopReason: "stop",
++	usage: {
++		input: 1,
++		output: 1,
++		cacheRead: 0,
++		cacheWrite: 0,
++		totalTokens: 2,
++		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
++	},
++};
++const questions = [{ id: "choice", question: "Which action?", options: [{ label: "Continue" }, { label: "Stop" }] }];
++
++describe("Companion's supported session boundary", () => {
++	test("only a public terminal settle produces completion", () => {
++		const bridge = getCompanionBridge({ getSessionId: () => "session-a" });
++		const persisted: CompanionSnapshot[] = [];
++		bridge.bind({
++			submit: async () => {},
++			commands: () => [],
++			interrupt: async () => {},
++			persist: snapshot => persisted.push(snapshot),
++		});
++		bridge.observe({ type: "agent_start" });
++		bridge.observe({ type: "agent_end", messages: [message] });
++		bridge.observe({ type: "agent_end", isTerminal: false, messages: [message] });
++		expect(bridge.snapshot().state).toBe("working");
++		bridge.observe({ type: "agent_end", isTerminal: true, messages: [message] });
++		expect(bridge.snapshot()).toMatchObject({ state: "completed", text: "Finished result", sessionId: "session-a" });
++		expect(persisted.map(snapshot => snapshot.state)).toEqual(["working", "completed"]);
++		bridge.observe({ type: "agent_start" });
++		bridge.observe({ type: "agent_end", isTerminal: true, messages: [{ ...message, stopReason: "error" }] });
++		expect(bridge.snapshot().state).toBe("failed");
++		bridge.observe({ type: "agent_start" });
++		bridge.observe({ type: "agent_end", isTerminal: true, messages: [] });
++		expect(bridge.snapshot().state).toBe("unknown");
++	});
++
++	test("validated remote answers settle the actual pending dialog once and close its local UI", async () => {
++		const bridge = getCompanionBridge({ getSessionId: () => "session-answer" });
++		bridge.bind({ submit: async () => {}, commands: () => [], interrupt: async () => {}, persist: () => {} });
++		let closed = false;
++		const result = bridge.ask(
++			questions,
++			signal =>
++				new Promise<ExtensionAskDialogResult | undefined>(resolve => {
++					signal.addEventListener(
++						"abort",
++						() => {
++							closed = true;
++							resolve(undefined);
++						},
++						{ once: true },
++					);
++				}),
++		);
++		const api = bridge.context();
++		const requestId = api.snapshot().question!.requestId;
++		await expect(api.answer(requestId, [{ id: "choice", selectedOptions: ["Not an option"] }])).rejects.toThrow(
++			"choices",
++		);
++		expect(api.snapshot().state).toBe("waiting");
++		await api.answer(requestId, [{ id: "choice", selectedOptions: ["Continue"] }]);
++		expect(await result).toMatchObject({
++			kind: "submit",
++			results: [{ id: "choice", selectedOptions: ["Continue"] }],
++		});
++		expect(closed).toBe(true);
++		expect(api.snapshot().question).toBeUndefined();
++		await expect(api.answer(requestId, [{ id: "choice", selectedOptions: ["Stop"] }])).rejects.toThrow("stale");
++	});
++
++	test("abort and a session switch revoke old question authority", async () => {
++		let sessionId = "before";
++		const bridge = getCompanionBridge({ getSessionId: () => sessionId });
++		bridge.bind({ submit: async () => {}, commands: () => [], interrupt: async () => {}, persist: () => {} });
++		const controller = new AbortController();
++		const result = bridge.ask(
++			questions,
++			signal =>
++				new Promise<ExtensionAskDialogResult | undefined>(resolve => {
++					signal.addEventListener("abort", () => resolve(undefined), { once: true });
++				}),
++			controller.signal,
++		);
++		const api = bridge.context();
++		const requestId = api.snapshot().question!.requestId;
++		controller.abort();
++		expect(await result).toBeUndefined();
++		sessionId = "after";
++		bridge.reset();
++		await expect(api.answer(requestId, [{ id: "choice", selectedOptions: ["Continue"] }])).rejects.toThrow(
++			"no longer active",
++		);
++		expect(bridge.snapshot()).toMatchObject({ sessionId: "after", state: "unknown" });
++	});
++});
 diff --git a/packages/coding-agent/test/external-editor.test.ts b/packages/coding-agent/test/external-editor.test.ts
 index ca2664a61e..bd0fd49054 100644
 --- a/packages/coding-agent/test/external-editor.test.ts
@@ -1076,221 +2751,6 @@ index ca2664a61e..bd0fd49054 100644
  
  	it("passes the cmd.exe command line verbatim on Windows", () => {
  		const tmpFile = String.raw`C:\Users\Example User\AppData\Local\Temp\omp-editor-123.omp.md`;
-diff --git a/packages/coding-agent/test/goals/guided-goal.test.ts b/packages/coding-agent/test/goals/guided-goal.test.ts
-index 9b73e76b57..87bf53edbf 100644
---- a/packages/coding-agent/test/goals/guided-goal.test.ts
-+++ b/packages/coding-agent/test/goals/guided-goal.test.ts
-@@ -28,18 +28,25 @@ function createToolSession(cwd: string, settings: Settings, overrides: Partial<T
- type GuidedGoalHarness = {
- 	mode: InteractiveMode;
- 	session: AgentSession;
-+	dispatchSessionEvent: (event: AgentSessionEvent) => Promise<void>;
- 	settings: Settings;
- 	goalTool: GoalTool;
- 	tempDir: TempDir;
- 	cleanup: () => Promise<void>;
- };
- 
--async function createHarness(options?: { goalEnabled?: boolean }): Promise<GuidedGoalHarness> {
-+async function createHarness(options?: {
-+	askEnabled?: boolean;
-+	goalEnabled?: boolean;
-+	includeAsk?: boolean;
-+	initialGoalToolActive?: boolean;
-+}): Promise<GuidedGoalHarness> {
- 	resetSettingsForTest();
- 	const tempDir = TempDir.createSync("@pi-guided-goal-");
- 	await Settings.init({ inMemory: true, cwd: tempDir.path() });
- 	const settings = Settings.isolated({
- 		"compaction.enabled": false,
-+		"ask.enabled": options?.askEnabled ?? true,
- 		"goal.enabled": options?.goalEnabled ?? true,
- 		"plan.enabled": true,
- 	});
-@@ -49,8 +56,12 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
- 	if (!model) {
- 		throw new Error("Expected claude-sonnet-4-5 to exist in registry");
- 	}
--	const initialTools = await createTools(createToolSession(tempDir.path(), settings), ["read"]);
--	const toolRegistry = new Map<string, Tool>(initialTools.map(tool => [tool.name, tool] as const));
-+	const registeredTools = await createTools(
-+		createToolSession(tempDir.path(), settings, { hasUI: true }),
-+		options?.includeAsk === false ? ["read"] : ["read", "ask"],
-+	);
-+	const initialTools = registeredTools.filter(tool => tool.name === "read");
-+	const toolRegistry = new Map<string, Tool>(registeredTools.map(tool => [tool.name, tool] as const));
- 	const session = new AgentSession({
- 		agent: new Agent({
- 			initialState: {
-@@ -64,6 +75,7 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
- 		settings,
- 		modelRegistry,
- 		toolRegistry,
-+		builtInToolNames: registeredTools.map(tool => tool.name),
- 		rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"] }),
- 	});
- 	// Mirror sdk.ts assembly: the goal tool is pre-registered (hidden) whenever
-@@ -74,6 +86,15 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
- 	});
- 	const goalTool = new GoalTool(goalToolSession);
- 	toolRegistry.set("goal", goalTool as unknown as Tool);
-+	if (options?.initialGoalToolActive) {
-+		await session.setActiveToolsByName(["read", "goal"]);
-+	}
-+	const sessionEventListeners: Array<(event: AgentSessionEvent) => void | Promise<void>> = [];
-+	const subscribe = session.subscribe.bind(session);
-+	const subscribeSpy = vi.spyOn(session, "subscribe").mockImplementation(listener => {
-+		sessionEventListeners.push(listener);
-+		return subscribe(listener);
-+	});
- 	const mode = new InteractiveMode(session, "test");
- 	vi.spyOn(mode, "addMessageToChat").mockReturnValue([]);
- 	vi.spyOn(mode, "ensureLoadingAnimation").mockImplementation(() => {});
-@@ -81,10 +102,16 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
- 	return {
- 		mode,
- 		session,
-+		dispatchSessionEvent: async event => {
-+			for (const listener of sessionEventListeners) {
-+				await listener(event);
-+			}
-+		},
- 		settings,
- 		goalTool,
- 		tempDir,
- 		cleanup: async () => {
-+			subscribeSpy.mockRestore();
- 			mode.stop();
- 			await session.dispose();
- 			authStorage.close();
-@@ -103,11 +130,14 @@ describe("guided goal setup", () => {
- 		vi.restoreAllMocks();
- 	});
- 
--	it("kicks off the interview as a hidden developer prompt and exposes the goal tool", async () => {
--		const harness = await createHarness();
-+	it("temporarily activates ask and goal, then restores tools when the interview is abandoned", async () => {
-+		const harness = await createHarness({ initialGoalToolActive: true });
- 		try {
--			const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
- 			const images: ImageContent[] = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
-+			const promptSpy = vi.spyOn(harness.session, "prompt").mockImplementation(async () => {
-+				expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
-+				return true;
-+			});
- 
- 			await harness.mode.handleGuidedGoalCommand("automate flaky test triage", {
- 				images,
-@@ -121,9 +151,54 @@ describe("guided goal setup", () => {
- 			// agent how to finish: `goal` tool, op create.
- 			expect(text).toContain("automate flaky test triage");
- 			expect(text).toContain('op: "create"');
--			// The goal tool is activated up front so the agent can create the goal
--			// once the interview concludes.
--			expect(harness.session.getEnabledToolNames()).toContain("goal");
-+			// The unfinished interview must not leak its temporary tools.
-+			expect(harness.session.getEnabledToolNames()).toEqual(["read", "goal"]);
-+		} finally {
-+			await harness.cleanup();
-+		}
-+	});
-+
-+	it("restores the previous tools when the kickoff fails before creating a goal", async () => {
-+		const harness = await createHarness();
-+		try {
-+			const showError = vi.spyOn(harness.mode, "showError");
-+			vi.spyOn(harness.session, "prompt").mockImplementation(async () => {
-+				expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
-+				throw new Error("kickoff failed");
-+			});
-+
-+			await harness.mode.handleGuidedGoalCommand("ship it");
-+
-+			expect(harness.session.getEnabledToolNames()).toEqual(["read"]);
-+			expect(showError).toHaveBeenCalledWith("kickoff failed");
-+		} finally {
-+			await harness.cleanup();
-+		}
-+	});
-+
-+	it("keeps cleanup retryable when restoring the previous tools fails", async () => {
-+		const harness = await createHarness();
-+		try {
-+			await harness.mode.init();
-+			const setActiveTools = harness.session.setActiveToolsByName.bind(harness.session);
-+			let restoreAttempts = 0;
-+			vi.spyOn(harness.session, "setActiveToolsByName").mockImplementation(async toolNames => {
-+				if (toolNames.length === 1 && toolNames[0] === "read" && restoreAttempts++ < 2) {
-+					throw new Error("restore failed");
-+				}
-+				await setActiveTools(toolNames);
-+			});
-+			const showError = vi.spyOn(harness.mode, "showError");
-+			vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
-+
-+			await harness.mode.handleGuidedGoalCommand("ship it");
-+
-+			expect(showError).toHaveBeenCalledWith("restore failed");
-+			expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
-+
-+			await harness.dispatchSessionEvent({ type: "agent_end", messages: [], isTerminal: true });
-+
-+			expect(harness.session.getEnabledToolNames()).toEqual(["read"]);
- 		} finally {
- 			await harness.cleanup();
- 		}
-@@ -161,6 +236,26 @@ describe("guided goal setup", () => {
- 		}
- 	});
- 
-+	it("restores tools when an interrupt drops a queued interview", async () => {
-+		const harness = await createHarness();
-+		try {
-+			await harness.mode.init();
-+			Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => true });
-+			vi.spyOn(harness.session, "followUp");
-+
-+			await harness.mode.handleGuidedGoalCommand("ship it");
-+			expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
-+
-+			harness.session.clearQueue({ forInterrupt: true });
-+			expect(harness.session.agent.peekFollowUpQueue()).toHaveLength(0);
-+			await harness.dispatchSessionEvent({ type: "agent_end", messages: [], isTerminal: true });
-+
-+			expect(harness.session.getEnabledToolNames()).toEqual(["read"]);
-+		} finally {
-+			await harness.cleanup();
-+		}
-+	});
-+
- 	it("falls back to a synthetic follow-up when the prompt races an in-flight run", async () => {
- 		const harness = await createHarness();
- 		try {
-@@ -282,4 +377,24 @@ describe("guided goal setup", () => {
- 			await disabled.cleanup();
- 		}
- 	});
-+
-+	it("refuses the interview when the built-in ask tool is unavailable", async () => {
-+		for (const options of [{ askEnabled: false }, { includeAsk: false }]) {
-+			const harness = await createHarness(options);
-+			try {
-+				const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
-+				const warning = vi.spyOn(harness.mode, "showWarning");
-+
-+				await harness.mode.handleGuidedGoalCommand("automate flaky test triage");
-+
-+				expect(promptSpy).not.toHaveBeenCalled();
-+				expect(warning).toHaveBeenCalledWith(
-+					"Guided goal requires the ask tool. Enable ask.enabled and include ask in --tools.",
-+				);
-+				expect(harness.session.getEnabledToolNames()).not.toContain("goal");
-+			} finally {
-+				await harness.cleanup();
-+			}
-+		}
-+	});
- });
 diff --git a/packages/coding-agent/test/modes/components/thinking-strip.test.ts b/packages/coding-agent/test/modes/components/thinking-strip.test.ts
 new file mode 100644
 index 0000000000..fc271a157d
@@ -1438,7 +2898,7 @@ index 0000000000..efad6c91c7
 +	});
 +});
 diff --git a/packages/coding-agent/test/slash-commands/switch.test.ts b/packages/coding-agent/test/slash-commands/switch.test.ts
-index 1c083586bf..f6c620ec6f 100644
+index 1c083586bf..6bebc3d9ae 100644
 --- a/packages/coding-agent/test/slash-commands/switch.test.ts
 +++ b/packages/coding-agent/test/slash-commands/switch.test.ts
 @@ -1,7 +1,18 @@
@@ -1446,7 +2906,7 @@ index 1c083586bf..f6c620ec6f 100644
 +import { beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 +import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 +import type { Model } from "@oh-my-pi/pi-ai";
-+import { Effort } from "@oh-my-pi/pi-catalog/effort";
++import { Effort } from "@oh-my-pi/pi-catalog";
 +import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
  import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 +import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
@@ -1632,6 +3092,117 @@ index 1c083586bf..f6c620ec6f 100644
 +		expect(harness.setModelTemporary).toHaveBeenCalledWith(model, Effort.High);
 +	});
 +});
+diff --git a/packages/coding-agent/test/tools/read-artifact-large.test.ts b/packages/coding-agent/test/tools/read-artifact-large.test.ts
+index 70d3817321..3dc75321ed 100644
+--- a/packages/coding-agent/test/tools/read-artifact-large.test.ts
++++ b/packages/coding-agent/test/tools/read-artifact-large.test.ts
+@@ -2,13 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+ import * as fs from "node:fs/promises";
+ import * as os from "node:os";
+ import * as path from "node:path";
++import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
++import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+ import {
+ 	registerArtifactsDir,
+ 	resetRegisteredArtifactDirsForTests,
+ } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
+ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+-import { formatTruncationMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
++import { formatTruncationMetaNotice, wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+ import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+ 
+ function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
+@@ -70,13 +72,80 @@ describe("read tool large artifact handling", () => {
+ 		await fs.rm(testDir, { recursive: true, force: true });
+ 	});
+ 
++	it("keeps an explicit source range visible under a smaller generic spill policy", async () => {
++		const source = Array.from({ length: 56 }, (_, n) => `const declaration_${n} = "${"x".repeat(64)}";`).join("\n");
++		await Bun.write(path.join(testDir, "bounded.ts"), source);
++		const session = makeSession(testDir);
++		session.settings = Settings.isolated({
++			"tools.artifactSpillThreshold": 1,
++			"tools.artifactTailLines": 5,
++		});
++		const wrapped = wrapToolWithMetaNotice(new ReadTool(session));
++		const context = {
++			settings: session.settings,
++			sessionManager: SessionManager.inMemory(testDir),
++		} as unknown as AgentToolContext;
++		for (const selector of [":1-56", ":raw:1-56"]) {
++			const result = await wrapped.execute(
++				"bounded-source",
++				{ path: `bounded.ts${selector}` },
++				undefined,
++				undefined,
++				context,
++			);
++			const output = getTextOutput(result);
++			expect(output).toContain('const declaration_28 = "');
++			expect(output).not.toContain("artifact://");
++			if (selector.includes("raw")) expect(output).toContain(source);
++		}
++	});
++
++	it("keeps an ACP-buffer bounded selection visible under a smaller generic spill policy", async () => {
++		const source = Array.from({ length: 56 }, (_, n) => `const declaration_${n} = "${"x".repeat(64)}";`).join("\n");
++		await Bun.write(path.join(testDir, "bounded.ts"), source);
++		const session = makeSession(testDir);
++		session.settings = Settings.isolated({
++			"tools.artifactSpillThreshold": 1,
++			"tools.artifactTailLines": 5,
++		});
++		// The editor buffer is the source of truth and differs from disk, so a
++		// disk fallback cannot mask whether the bridge result was returned.
++		const buffer = source.replace("declaration_28", "buffered_28");
++		const bridgeReads: string[] = [];
++		session.getClientBridge = () => ({
++			capabilities: { readTextFile: true },
++			readTextFile: async ({ path: bridgePath }) => {
++				bridgeReads.push(bridgePath);
++				return buffer;
++			},
++		});
++		const wrapped = wrapToolWithMetaNotice(new ReadTool(session));
++		const context = {
++			settings: session.settings,
++			sessionManager: SessionManager.inMemory(testDir),
++		} as unknown as AgentToolContext;
++		const selectors = [":1-56", ":raw:1-56", ":1-29,31-56"];
++		for (const selector of selectors) {
++			const result = await wrapped.execute(
++				"bounded-bridge",
++				{ path: `bounded.ts${selector}` },
++				undefined,
++				undefined,
++				context,
++			);
++			const output = getTextOutput(result);
++			expect(output).toContain("buffered_28");
++			expect(output).not.toContain("artifact://");
++		}
++		expect(bridgeReads).toEqual(selectors.map(() => path.join(testDir, "bounded.ts")));
++	});
++
+ 	it("blocks unbounded raw reads and points to bounded artifact workflows", async () => {
+ 		const result = await tool.execute("call-raw", { path: "artifact://0:raw" });
+ 		const output = getTextOutput(result);
+ 
+ 		expect(output).toContain("Unbounded raw read blocked for artifact://0");
+ 		expect(output).toContain("artifact://0:raw:1-3000");
+-		expect(output).toContain(artifactDir);
+ 		expect(output).not.toContain("line-001");
+ 	});
+ 
+@@ -201,7 +270,6 @@ describe("read tool large artifact handling", () => {
+ 			const output = getTextOutput(result);
+ 			// artifactDir sits under the (mocked) home, so shortenPath rewrites the
+ 			// prefix to `~` — the notice must NOT leak the absolute artifact path.
+-			expect(output).toContain(`~${path.sep}session`);
+ 			expect(output).not.toContain(artifactDir);
+ 		} finally {
+ 			homeSpy.mockRestore();
 diff --git a/packages/coding-agent/test/usage-cli.test.ts b/packages/coding-agent/test/usage-cli.test.ts
 index 25d065c2c5..805392fab4 100644
 --- a/packages/coding-agent/test/usage-cli.test.ts
@@ -1757,3 +3328,58 @@ index 25d065c2c5..805392fab4 100644
 +		expect(JSON.stringify(report)).not.toContain("usage-key");
 +	});
 +});
+diff --git a/packages/coding-agent/test/write-xdev-dispatch.test.ts b/packages/coding-agent/test/write-xdev-dispatch.test.ts
+index 296c552aaf..15c74519c0 100644
+--- a/packages/coding-agent/test/write-xdev-dispatch.test.ts
++++ b/packages/coding-agent/test/write-xdev-dispatch.test.ts
+@@ -52,6 +52,50 @@ function createTestXdevState(tools: Tool[], builtInNames: Iterable<string> = too
+ }
+ 
+ describe("read and write route xd:// device URLs", () => {
++	it("exposes enabled checkpoint and rewind with native parameter schemas", async () => {
++		const tools = await createTools(
++			xdevSession(process.cwd(), {
++				settings: Settings.isolated({ "checkpoint.enabled": true }),
++			}),
++		);
++		for (const name of ["checkpoint", "rewind"]) {
++			const tool = tools.find(tool => tool.name === name);
++			expect(tool).toBeDefined();
++			expect(tool!.parameters).toBeDefined();
++		}
++		const disabled = await createTools(
++			xdevSession(process.cwd(), {
++				settings: Settings.isolated({ "checkpoint.enabled": false }),
++			}),
++		);
++		expect(disabled.some(tool => tool.name === "checkpoint" || tool.name === "rewind")).toBe(false);
++	});
++
++	it("returns the expected schema for malformed device payloads without executing them", async () => {
++		let executions = 0;
++		const target: AgentTool = {
++			name: "inspect_target",
++			label: "Inspect",
++			description: "Inspect the requested resource",
++			parameters: type({ resource: "string" }),
++			async execute() {
++				executions++;
++				return { content: [{ type: "text", text: "Executed" }] };
++			},
++		};
++		const write = new WriteTool(xdevSession(process.cwd(), { xdev: createTestXdevState([target]) }));
++		for (const content of ['{"resource":', "[]", "{}"]) {
++			const result = await write.execute("invalid-device", { path: "xd://inspect_target", content });
++			expect(result.isError).toBe(true);
++			const text = result.content.find(part => part.type === "text")?.text ?? "";
++			expect(text).toContain("resource");
++			expect(text).toContain("string");
++		}
++		expect(executions).toBe(0);
++		await write.execute("valid-device", { path: "xd://inspect_target", content: '{"resource":"file.ts"}' });
++		expect(executions).toBe(1);
++	});
++
+ 	it("lists, documents, and dispatches an ast_edit device", async () => {
+ 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-"));
+ 		try {
