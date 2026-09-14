@@ -35,6 +35,7 @@ import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { ExtensionUISelectItem } from "../extensibility/extensions";
 import { getMarkdownTheme, type Theme, theme } from "../modes/theme/theme";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
+import { getCompanionBridge } from "../session/companion";
 import { vocalizer } from "../tts/vocalizer";
 import { framedBlock, outputBlockContentWidth, renderStatusLine } from "../tui";
 import type { ToolSession } from ".";
@@ -351,7 +352,10 @@ function buildCustomInputRows(
 					: isSelected
 						? `${theme.nav.cursor} `
 						: "  ";
-		rows.push({ text: clampLineToWidth(prefix + label, contentWidth), priority: -1 });
+		rows.push({
+			text: clampLineToWidth(prefix + label, contentWidth),
+			priority: -1,
+		});
 		const description = getSelectOptionDescription(option);
 		if (description) {
 			const flat = flattenDescription(description);
@@ -474,8 +478,16 @@ async function askSingleQuestion(
 		prompt: string,
 		optionsToShow: ExtensionUISelectItem[],
 		initialIndex?: number,
-		marker?: { selectionMarker: "radio" | "checkbox"; checkedIndices?: readonly number[]; markableCount: number },
-	): Promise<{ choice: string | undefined; timedOut: boolean; navigation?: "back" | "forward" }> => {
+		marker?: {
+			selectionMarker: "radio" | "checkbox";
+			checkedIndices?: readonly number[];
+			markableCount: number;
+		},
+	): Promise<{
+		choice: string | undefined;
+		timedOut: boolean;
+		navigation?: "back" | "forward";
+	}> => {
 		let timeoutTriggered = false;
 		const onTimeout = () => {
 			timeoutTriggered = true;
@@ -540,10 +552,18 @@ async function askSingleQuestion(
 				const elapsed = Date.now() - timeoutStartedMs;
 				timeoutTriggered = elapsed >= timeout && elapsed <= timeout + TIMEOUT_DETECTION_TOLERANCE_MS;
 			}
-			return { choice, timedOut: timeoutTriggered, navigation: navigationAction };
+			return {
+				choice,
+				timedOut: timeoutTriggered,
+				navigation: navigationAction,
+			};
 		} catch (error) {
 			if (timeoutTriggered && error instanceof Error && error.name === "AbortError") {
-				return { choice: undefined, timedOut: true, navigation: navigationAction };
+				return {
+					choice: undefined,
+					timedOut: true,
+					navigation: navigationAction,
+				};
 			}
 			throw error;
 		} finally {
@@ -596,14 +616,26 @@ async function askSingleQuestion(
 			});
 
 			if (arrowNavigation) {
-				return { selectedOptions: Array.from(selected), customInput, note, timedOut, navigation: arrowNavigation };
+				return {
+					selectedOptions: Array.from(selected),
+					customInput,
+					note,
+					timedOut,
+					navigation: arrowNavigation,
+				};
 			}
 			if (choice === undefined) {
 				if (selectTimedOut) {
 					timedOut = true;
 					break;
 				}
-				return { selectedOptions: Array.from(selected), customInput, note, timedOut, cancelled: true };
+				return {
+					selectedOptions: Array.from(selected),
+					customInput,
+					note,
+					timedOut,
+					cancelled: true,
+				};
 			}
 			if (choice === doneLabel) break;
 
@@ -677,11 +709,23 @@ async function askSingleQuestion(
 			timedOut = selectTimedOut;
 
 			if (arrowNavigation) {
-				return { selectedOptions, customInput, note, timedOut, navigation: arrowNavigation };
+				return {
+					selectedOptions,
+					customInput,
+					note,
+					timedOut,
+					navigation: arrowNavigation,
+				};
 			}
 			if (choice === undefined) {
 				if (!timedOut) {
-					return { selectedOptions, customInput, note, timedOut, cancelled: true };
+					return {
+						selectedOptions,
+						customInput,
+						note,
+						timedOut,
+						cancelled: true,
+					};
 				}
 				break;
 			}
@@ -713,7 +757,13 @@ async function askSingleQuestion(
 			selectedOptions = getAutoSelectionOnTimeout(questionOptions, recommended);
 		}
 		if (navigation?.allowForward) {
-			return { selectedOptions, customInput, note, timedOut, navigation: "forward" };
+			return {
+				selectedOptions,
+				customInput,
+				note,
+				timedOut,
+				navigation: "forward",
+			};
 		}
 	}
 
@@ -806,8 +856,14 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						id: "auth_method",
 						question: "Which authentication method should this API use?",
 						options: [
-							{ label: "JWT", description: "Bearer tokens for stateless API clients." },
-							{ label: "OAuth2", description: "Delegated authorization with external identity providers." },
+							{
+								label: "JWT",
+								description: "Bearer tokens for stateless API clients.",
+							},
+							{
+								label: "OAuth2",
+								description: "Delegated authorization with external identity providers.",
+							},
 							{
 								label: "Session cookies",
 								description: "Browser-first authentication backed by server-side sessions.",
@@ -992,7 +1048,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const richAskDialog = extensionUi.askDialog;
 		if (richAskDialog) {
 			try {
-				const showRichDialog = () =>
+				const showRichDialog = (dialogSignal = signal) =>
 					richAskDialog(
 						params.questions.map(q => ({
 							id: q.id,
@@ -1006,9 +1062,13 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 							...(q.multi !== undefined ? { multi: q.multi } : {}),
 							...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
 						})),
-						{ timeout: timeout ?? undefined, signal },
+						{ timeout: timeout ?? undefined, signal: dialogSignal },
 					);
-				const richResult = signal ? await untilAborted(signal, showRichDialog) : await showRichDialog();
+				const richResult = this.session.sessionManager?.getSessionId
+					? await getCompanionBridge(this.session.sessionManager).ask(params.questions, showRichDialog, signal)
+					: signal
+						? await untilAborted(signal, showRichDialog)
+						: await showRichDialog();
 				if (!richResult) {
 					context.abort();
 					throw new ToolAbortError("Ask tool was cancelled by the user");
@@ -1022,7 +1082,10 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 								text: `User chose to chat about this instead of answering.\n\nQuestions asked:\n${questionText}`,
 							},
 						],
-						details: { chatRedirect: true, questions: params.questions.map(q => q.question) },
+						details: {
+							chatRedirect: true,
+							questions: params.questions.map(q => q.question),
+						},
 					};
 				}
 				if (richResult.results.length !== params.questions.length) {
@@ -1071,11 +1134,17 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						timedOut: result.timedOut,
 					};
 					const responseText = formatSingleQuestionResponse(result);
-					return { content: [{ type: "text" as const, text: responseText }], details };
+					return {
+						content: [{ type: "text" as const, text: responseText }],
+						details,
+					};
 				}
 				const details: AskToolDetails = { results };
 				const responseText = `User answers:\n${results.map(formatQuestionResult).join("\n")}`;
-				return { content: [{ type: "text" as const, text: responseText }], details };
+				return {
+					content: [{ type: "text" as const, text: responseText }],
+					details,
+				};
 			} catch (error) {
 				if (error instanceof Error && error.name === "AbortError") {
 					throw new ToolAbortError("Ask input was cancelled");
@@ -1107,7 +1176,15 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						navigation: options?.navigation,
 					},
 				);
-				return { optionLabels, selectedOptions, customInput, note, navigation, cancelled, timedOut };
+				return {
+					optionLabels,
+					selectedOptions,
+					customInput,
+					note,
+					navigation,
+					cancelled,
+					timedOut,
+				};
 			} catch (error) {
 				if (error instanceof Error && error.name === "AbortError") {
 					throw new ToolAbortError("Ask input was cancelled");
@@ -1142,10 +1219,15 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				multi: q.multi ?? false,
 			});
 
-			return { content: [{ type: "text" as const, text: responseText }], details };
+			return {
+				content: [{ type: "text" as const, text: responseText }],
+				details,
+			};
 		}
 
-		const resultsByIndex: Array<QuestionResult | undefined> = Array.from({ length: params.questions.length });
+		const resultsByIndex: Array<QuestionResult | undefined> = Array.from({
+			length: params.questions.length,
+		});
 		let questionIndex = 0;
 		while (questionIndex < params.questions.length) {
 			const q = params.questions[questionIndex];
@@ -1206,7 +1288,10 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const responseLines = results.map(formatQuestionResult);
 		const responseText = `User answers:\n${responseLines.join("\n")}`;
 
-		return { content: [{ type: "text" as const, text: responseText }], details };
+		return {
+			content: [{ type: "text" as const, text: responseText }],
+			details,
+		};
 	}
 }
 
@@ -1249,7 +1334,10 @@ function normalizeRenderOptions(raw: unknown): AskRenderOption[] | undefined {
 		if (typeof label !== "string") continue;
 		out.push(
 			typeof description === "string"
-				? { label: sanitizeCarriageReturns(label), description: sanitizeCarriageReturns(description) }
+				? {
+						label: sanitizeCarriageReturns(label),
+						description: sanitizeCarriageReturns(description),
+					}
 				: { label: sanitizeCarriageReturns(label) },
 		);
 	}
@@ -1296,7 +1384,9 @@ function sanitizeAskResultDetails(details: AskToolDetails): AskToolDetails {
 		...(details.question !== undefined ? { question: sanitizeCarriageReturns(details.question) } : {}),
 		...(details.options !== undefined ? { options: details.options.map(sanitizeCarriageReturns) } : {}),
 		...(details.selectedOptions !== undefined
-			? { selectedOptions: details.selectedOptions.map(sanitizeCarriageReturns) }
+			? {
+					selectedOptions: details.selectedOptions.map(sanitizeCarriageReturns),
+				}
 			: {}),
 		...(details.customInput !== undefined ? { customInput: sanitizeCarriageReturns(details.customInput) } : {}),
 		...(details.note !== undefined ? { note: sanitizeCarriageReturns(details.note) } : {}),
@@ -1491,9 +1581,18 @@ export const askToolRenderer = {
 					const lines = q.options?.length
 						? [...mdLines, ...renderQuestionOptionLines(uiTheme, mdTheme, q.options, q.multi)]
 						: mdLines;
-					return { label: `${uiTheme.fg("dim", `[${q.id}]`)}${metaStr}`, lines };
+					return {
+						label: `${uiTheme.fg("dim", `[${q.id}]`)}${metaStr}`,
+						lines,
+					};
 				});
-				return { header, sections, state: "pending", borderColor: "borderMuted", width };
+				return {
+					header,
+					sections,
+					state: "pending",
+					borderColor: "borderMuted",
+					width,
+				};
 			});
 		}
 
@@ -1533,7 +1632,10 @@ export const askToolRenderer = {
 	},
 
 	renderResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: AskToolDetails },
+		result: {
+			content: Array<{ type: string; text?: string }>;
+			details?: AskToolDetails;
+		},
 		_options: RenderResultOptions,
 		uiTheme: Theme,
 	): Component {
@@ -1628,7 +1730,10 @@ export const askToolRenderer = {
 			(details.selectedOptions && details.selectedOptions.length > 0);
 		const header = renderStatusLine(
 			hasSelection
-				? { iconOverride: uiTheme.styledSymbol("tool.ask", "accent"), title: "Ask" }
+				? {
+						iconOverride: uiTheme.styledSymbol("tool.ask", "accent"),
+						title: "Ask",
+					}
 				: { icon: "warning", title: "Ask" },
 			uiTheme,
 		);

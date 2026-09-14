@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ctx.companion` to the extension context: an authoritative final-settle snapshot with subscription, one semantic `submit`, a bounded `interrupt`, the resolvable command list, and a validated resolver for an open `ask` dialog, so an external client can observe turn completion and answer a question through supported APIs instead of scraping the TUI.
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).

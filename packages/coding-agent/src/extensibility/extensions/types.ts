@@ -452,7 +452,49 @@ export interface ExtensionModelQuery {
 /** Runtime host mode exposed to Pi-compatible extensions. */
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
+export interface CompanionAnswer {
+	id: string;
+	selectedOptions: string[];
+	customInput?: string;
+}
+
+export interface CompanionSnapshot {
+	eventId: string;
+	sessionId: string;
+	state: "unknown" | "working" | "waiting" | "completed" | "interrupted" | "failed";
+	text: string;
+	question?: {
+		requestId: string;
+		questions: Array<{
+			id: string;
+			question: string;
+			options: Array<{ label: string }>;
+			multi?: boolean;
+		}>;
+	};
+}
+
+/** A slash command a companion submit can actually run in this session. */
+export interface CompanionCommandInfo {
+	name: string;
+	description: string;
+}
+
+/** Live-session controls. Invalid/stale requests reject without consuming a pending question. */
+export interface CompanionContext {
+	snapshot(): CompanionSnapshot;
+	subscribe(listener: (snapshot: CompanionSnapshot) => void): () => void;
+	/** Resolves when accepted/queued, not when the model finishes. */
+	submit(text: string): Promise<void>;
+	/** Skills, file commands and extension commands `submit` resolves; never editor-only builtins. */
+	commands(): CompanionCommandInfo[];
+	/** Resolves after requesting interruption, not after agent teardown. */
+	interrupt(): Promise<void>;
+	answer(requestId: string, answers: CompanionAnswer[]): Promise<void>;
+}
+
 export interface ExtensionContext {
+	companion: CompanionContext;
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
 	/** Current run mode. Use `"tui"` to guard terminal-only UI such as custom components. */
@@ -528,7 +570,10 @@ export interface ExtensionContext {
 	 */
 	invokeTool?<TDetails = unknown>(
 		params: Record<string, unknown>,
-		options?: { signal?: AbortSignal; onUpdate?: AgentToolUpdateCallback<TDetails> },
+		options?: {
+			signal?: AbortSignal;
+			onUpdate?: AgentToolUpdateCallback<TDetails>;
+		},
 	): Promise<AgentToolResult<TDetails>>;
 
 	/**
@@ -1437,7 +1482,10 @@ export interface ExtensionAPI {
 	 */
 	sendMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
+		options?: {
+			triggerTurn?: boolean;
+			deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
+		},
 	): void;
 
 	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set.
@@ -1604,7 +1652,12 @@ export interface ProviderModelConfig {
 	/** Supported input types. */
 	input: ("text" | "image")[];
 	/** Cost per million tokens. */
-	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	cost: {
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+	};
 	/** Premium Copilot requests charged per user-initiated request. */
 	premiumMultiplier?: number;
 	/** Maximum context window size in tokens. */
@@ -1660,7 +1713,10 @@ export type SendMessageHandler = <T = unknown>(
 	 * `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight
 	 * tool batch; idle starts a turn regardless of `triggerTurn` (plan mode folds into context).
 	 */
-	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
+	options?: {
+		triggerTurn?: boolean;
+		deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
+	},
 ) => void;
 
 /** `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
@@ -1694,7 +1750,11 @@ export type SetServiceTierHandler = (family: ServiceTierFamily, tier: ServiceTie
 export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
 	/** Provider registrations queued during extension loading, processed during session initialization */
-	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }>;
+	pendingProviderRegistrations: Array<{
+		name: string;
+		config: ProviderConfig;
+		sourceId: string;
+	}>;
 	/** Queue a provider registration until initialization, then apply it immediately. */
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void;
 	/** Remove a queued or initialized provider registration. */

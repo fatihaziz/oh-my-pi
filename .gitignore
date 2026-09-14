@@ -93,3 +93,6 @@ packages/coding-agent/bench/boot-baseline.json
 /.bazelrc.user
 
 .parity/
+
+# Local scratch: release worktrees, PR checkouts, throwaway scripts
+/tmp/

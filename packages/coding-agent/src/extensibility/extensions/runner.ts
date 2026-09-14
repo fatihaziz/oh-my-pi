@@ -18,6 +18,7 @@ import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
+import { getCompanionBridge } from "../../session/companion";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
@@ -135,7 +136,10 @@ function attachHandlerSignal(
 	if (!dialogOptions) return { signal: handlerSignal };
 	if (!dialogOptions.signal) return { ...dialogOptions, signal: handlerSignal };
 	if (dialogOptions.signal === handlerSignal) return dialogOptions;
-	return { ...dialogOptions, signal: AbortSignal.any([dialogOptions.signal, handlerSignal]) };
+	return {
+		...dialogOptions,
+		signal: AbortSignal.any([dialogOptions.signal, handlerSignal]),
+	};
 }
 
 function createHandlerUIContext(
@@ -345,7 +349,9 @@ type RunnerEmitEvent = Exclude<
 
 type SessionBeforeEvent = Extract<
 	RunnerEmitEvent,
-	{ type: "session_before_switch" | "session_before_branch" | "session_before_compact" | "session_before_tree" }
+	{
+		type: "session_before_switch" | "session_before_branch" | "session_before_compact" | "session_before_tree";
+	}
 >;
 
 type SessionBeforeEventResult =
@@ -354,7 +360,9 @@ type SessionBeforeEventResult =
 	| SessionBeforeCompactResult
 	| SessionBeforeTreeResult;
 
-type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "session_before_switch" }
+type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends {
+	type: "session_before_switch";
+}
 	? SessionBeforeSwitchResult | undefined
 	: TEvent extends { type: "session_before_branch" }
 		? SessionBeforeBranchResult | undefined
@@ -449,8 +457,12 @@ export class ExtensionRunner {
 	#getAsyncJobSnapshotFn: () => AsyncJobSnapshot | null = () => null;
 	#newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	#branchHandler: BranchHandler = async () => ({ cancelled: false });
-	#navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
-	#switchSessionHandler: SwitchSessionHandler = async () => ({ cancelled: false });
+	#navigateTreeHandler: NavigateTreeHandler = async () => ({
+		cancelled: false,
+	});
+	#switchSessionHandler: SwitchSessionHandler = async () => ({
+		cancelled: false,
+	});
 	#reloadHandler: () => Promise<void> = async () => {};
 	#shutdownHandler: ShutdownHandler = () => {};
 	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
@@ -912,7 +924,10 @@ export class ExtensionRunner {
 	 * completes, keeping the model tool snapshot and system prompt coherent.
 	 */
 	onToolRegistered(listener: (tool: RegisteredTool, signal?: AbortSignal) => void | Promise<void>): () => void {
-		const subscriptions: Array<{ extension: Extension; listener: ToolRegistrationListener }> = [];
+		const subscriptions: Array<{
+			extension: Extension;
+			listener: ToolRegistrationListener;
+		}> = [];
 		for (const extension of this.extensions) {
 			const trackRegistration = (pending: Promise<void>): void => {
 				const registrationBarrier = pending.then(
@@ -1107,7 +1122,11 @@ export class ExtensionRunner {
 			for (const command of ext.commands.values()) {
 				if (reserved?.has(command.name)) {
 					const message = `Extension command '${command.name}' from ${ext.path} conflicts with built-in commands. Skipping.`;
-					this.#commandDiagnostics.push({ type: "warning", message, path: ext.path });
+					this.#commandDiagnostics.push({
+						type: "warning",
+						message,
+						path: ext.path,
+					});
 					if (!this.hasUI()) {
 						logger.warn(message);
 					}
@@ -1120,7 +1139,11 @@ export class ExtensionRunner {
 		return [...commands.values()];
 	}
 
-	getCommandDiagnostics(): Array<{ type: string; message: string; path: string }> {
+	getCommandDiagnostics(): Array<{
+		type: string;
+		message: string;
+		path: string;
+	}> {
 		return this.#commandDiagnostics;
 	}
 
@@ -1168,6 +1191,7 @@ export class ExtensionRunner {
 	): ExtensionContext {
 		const getModel = model ? () => model : this.#getModel;
 		return {
+			companion: getCompanionBridge(this.sessionManager).context(),
 			ui: this.#uiContext,
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),
@@ -1279,7 +1303,10 @@ export class ExtensionRunner {
 		const signals = [outerSignal, sessionStopSignal].filter((s): s is AbortSignal => s !== undefined);
 		const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 		if (signal?.aborted) return undefined;
-		const registrationScope: ToolRegistrationScope = { pending: new Set(), closed: false };
+		const registrationScope: ToolRegistrationScope = {
+			pending: new Set(),
+			closed: false,
+		};
 		let handlerResult: R | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED | undefined;
 		let handlerFailure: { error: unknown } | undefined;
 		try {
@@ -1505,7 +1532,10 @@ export class ExtensionRunner {
 		}
 
 		if (signal?.aborted) {
-			return { block: true, reason: `Tool execution was cancelled while an extension handler was pending` };
+			return {
+				block: true,
+				reason: `Tool execution was cancelled while an extension handler was pending`,
+			};
 		}
 		return result;
 	}
@@ -1563,7 +1593,11 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				const event: ResourcesDiscoverEvent = { type: "resources_discover", cwd, reason };
+				const event: ResourcesDiscoverEvent = {
+					type: "resources_discover",
+					cwd,
+					reason,
+				};
 				const handlerResult = await this.#runHandlerWithTimeout(
 					handler,
 					event,
@@ -1574,13 +1608,28 @@ export class ExtensionRunner {
 				const result = handlerResult as ResourcesDiscoverResult | undefined;
 
 				if (result?.skillPaths?.length) {
-					skillPaths.push(...result.skillPaths.map(path => ({ path, extensionPath: ext.path })));
+					skillPaths.push(
+						...result.skillPaths.map(path => ({
+							path,
+							extensionPath: ext.path,
+						})),
+					);
 				}
 				if (result?.promptPaths?.length) {
-					promptPaths.push(...result.promptPaths.map(path => ({ path, extensionPath: ext.path })));
+					promptPaths.push(
+						...result.promptPaths.map(path => ({
+							path,
+							extensionPath: ext.path,
+						})),
+					);
 				}
 				if (result?.themePaths?.length) {
-					themePaths.push(...result.themePaths.map(path => ({ path, extensionPath: ext.path })));
+					themePaths.push(
+						...result.themePaths.map(path => ({
+							path,
+							extensionPath: ext.path,
+						})),
+					);
 				}
 			}
 		}
@@ -1600,7 +1649,12 @@ export class ExtensionRunner {
 
 		for (const ext of this.extensions) {
 			for (const handler of ext.handlers.get("input") ?? []) {
-				const event: InputEvent = { type: "input", text: currentText, images: currentImages, source };
+				const event: InputEvent = {
+					type: "input",
+					text: currentText,
+					images: currentImages,
+					source,
+				};
 				const result = (await this.#runHandlerWithTimeout(handler, event, ctx, ext, extensionHandlerTimeoutMs)) as
 					| InputEventResult
 					| undefined;
@@ -1643,7 +1697,10 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				const event: ContextEvent = { type: "context", messages: currentMessages };
+				const event: ContextEvent = {
+					type: "context",
+					messages: currentMessages,
+				};
 				const handlerResult = await this.#runHandlerWithTimeout(
 					handler,
 					event,
