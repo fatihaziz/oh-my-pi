@@ -18,6 +18,22 @@ describe("task schema (single-spawn)", () => {
 		expect(parsed instanceof type.errors).toBe(false);
 	});
 
+	it("preserves an explicit model and effort selector across flat and batch schemas", () => {
+		const model = "openai-codex/gpt-5.6-sol:high";
+		for (const batchEnabled of [false, true]) {
+			for (const isolationEnabled of [false, true]) {
+				for (const defaultAgent of ["task", "scout"]) {
+					const schema = getTaskSchema({ batchEnabled, isolationEnabled, defaultAgent });
+					const item = { agent: "scout", task: "Check routing.", model };
+					const parsed = schema(batchEnabled ? { context: "Routing check", tasks: [item] } : item);
+					expect(parsed instanceof type.errors).toBe(false);
+					if (parsed instanceof type.errors) throw new Error(parsed.summary);
+					expect(parsed).toMatchObject(batchEnabled ? { tasks: [{ model }] } : { model });
+				}
+			}
+		}
+	});
+
 	it("defaults agent to `task` when omitted", () => {
 		const parsed = taskSchema({ task: "Map the auth module." });
 		expect(parsed instanceof type.errors).toBe(false);

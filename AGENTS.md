@@ -48,6 +48,7 @@ Local behavior carried on top of upstream:
 | ID | Behavior | Files | Upstream plan |
 |---|---|---|---|
 | P14 | `ctx.companion` exposes an authoritative final-settle snapshot, one semantic submit, a bounded interrupt, the resolvable command list, and a validated resolver for an open `ask` dialog, so an external client (Foyer's Telegram Companion) observes completion and answers questions through supported APIs | `src/session/companion.ts`, `src/session/agent-session.ts` (`#createCommandContext`), `src/tools/ask.ts`, `src/extensibility/extensions/{runner,types}.ts`, `test/companion.test.ts` | retire when upstream exposes a public final-settle subscription and an ask-resolution API |
+| Routing | Native task, Eval agent, and workpool calls accept a per-call `model` selector with an effort suffix; explicit choices do not fall back to the parent's model or mutate saved roles | `src/task/{types,index,structured-subagent,workpool}.ts`, `src/eval/{agent-bridge,workpool-bridge}.ts`, JS/Python preludes and tool prompts | retire when upstream preserves per-call model selection across these native entry points |
 
 Retired, do not reintroduce: S1, P1, P3, P5, P6, P7, P8, P9, P10, P11, P12, P13, P15, P16, P17, P18, P19 (upstream-native, owner decision, or not worth the rebase cost), and P20 (omitting the Antigravity `requestType`) — Google targets OMP's prompt fingerprint and the upstream maintainer refuses an in-tree bypass ([#11809](https://github.com/can1357/oh-my-pi/issues/11809)); bypassing it risks the account.
 

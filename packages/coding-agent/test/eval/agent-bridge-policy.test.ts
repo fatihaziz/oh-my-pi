@@ -340,19 +340,18 @@ describe("runEvalAgent", () => {
 		expect(secondOptions.outputSchemaOverridesAgent).toBeUndefined();
 	});
 
-	it("drops a per-call model argument on agent() (removed, issue #6438)", async () => {
+	it("uses the caller's model and effort without changing the configured worker model", async () => {
 		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const session = makeSession();
+		session.settings.override("task.agentModelOverrides", { task: "p/configured:low" });
 
-		// The schema strips unknown keys; a legacy `model` argument is silently
-		// discarded so resolution is identical to omitting it — the agent's own
-		// frontmatter model applies (issue #6438).
-		await runEvalAgentAndWait({ prompt: "work", model: "default" }, { session: makeSession() });
-		await runEvalAgentAndWait({ prompt: "work" }, { session: makeSession() });
+		const selected = await runEvalAgentAndWait({ prompt: "work", model: "p/selected:high" }, { session });
+		const inherited = await runEvalAgentAndWait({ prompt: "work" }, { session });
 
-		const withModel = runSpy.mock.calls[0]?.[0];
-		const withoutModel = runSpy.mock.calls[1]?.[0];
-		expect(withModel?.modelOverride).toEqual(withoutModel?.modelOverride);
+		expect(selected.details.model).toEqual(["p/selected:high"]);
+		expect(inherited.details.model).toEqual(["p/configured:low"]);
+		expect(session.settings.get("task.agentModelOverrides")).toEqual({ task: "p/configured:low" });
 	});
 	it("returns host-parsed data for caller, agent, and inherited schemas", async () => {
 		const agentSchema = { type: "object" };

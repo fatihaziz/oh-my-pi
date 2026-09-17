@@ -8,6 +8,7 @@ import {
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -20,6 +21,7 @@ import {
 	type StructuredSubagentRequest,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 const AGENT: AgentDefinition = {
@@ -223,7 +225,9 @@ describe("structured subagent primitive", () => {
 			expect(liveSettings.get("retry.modelFallback")).toBe(false);
 		} finally {
 			liveSettings.cancelPendingSaves();
-			await fs.rm(root, { recursive: true, force: true });
+			await liveSettings.flush();
+			AgentStorage.close();
+			await removeWithRetries(root);
 		}
 	});
 
@@ -262,7 +266,9 @@ describe("structured subagent primitive", () => {
 			expect(second.serviceTierOverride).toBe("none");
 		} finally {
 			liveSettings.cancelPendingSaves();
-			await fs.rm(root, { recursive: true, force: true });
+			await liveSettings.flush();
+			AgentStorage.close();
+			await removeWithRetries(root);
 		}
 	});
 

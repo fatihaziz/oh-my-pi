@@ -437,7 +437,8 @@ function buildExecutorOptions(
 		modelOverride: policy.modelOverride,
 		modelRole: policy.modelRole,
 		serviceTierOverride: policy.serviceTierOverride,
-		parentActiveModelPattern: policy.parentActiveModelPattern,
+		// An explicit choice must fail on missing auth, not switch to the parent's model.
+		parentActiveModelPattern: request.model !== undefined ? undefined : policy.parentActiveModelPattern,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		effort: request.effort,
 		...(policy.schema.source === "none"

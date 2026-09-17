@@ -846,6 +846,7 @@ if "__omp_prelude_loaded__" not in globals():
         prompt,
         *,
         agent=None,
+        model=None,
         label=None,
         schema=None,
         schema_mode=None,
@@ -858,6 +859,8 @@ if "__omp_prelude_loaded__" not in globals():
         args = {"prompt": prompt}
         if agent is not None:
             args["agent"] = agent
+        if model is not None:
+            args["model"] = model
         if label is not None:
             args["label"] = label
         if schema is not None:
@@ -917,11 +920,13 @@ if "__omp_prelude_loaded__" not in globals():
         def __repr__(self):
             return f"<workpool {self.name} ({self.agent}) {self.limit} agents>"
 
-    def workpool(agent=None, *, name=None, context=None, tools=None):
+    def workpool(agent=None, *, name=None, context=None, tools=None, model=None):
         """Create a pool of keep-alive subagents."""
         args = {"op": "create"}
         if agent is not None:
             args["agent"] = agent
+        if model is not None:
+            args["model"] = model
         if name is not None:
             args["name"] = name
         if context is not None:
