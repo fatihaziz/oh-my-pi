@@ -6,9 +6,6 @@
 
 - Added `ctx.companion` to the extension context: an authoritative final-settle snapshot with subscription, one semantic `submit`, a bounded `interrupt`, the resolvable command list, and a validated resolver for an open `ask` dialog, so an external client can observe turn completion and answer a question through supported APIs instead of scraping the TUI.
 
-### Fixed
-
-- Restored per-call model selection for native task, Eval agent, and workpool spawns, including reasoning-effort suffixes. Explicit selections no longer inherit the parent's model when credentials are unavailable and do not change saved role settings.
 ## [18.2.4] - 2026-09-17
 
 ### Added

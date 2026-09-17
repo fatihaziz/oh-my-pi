@@ -28,7 +28,6 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
     Omitting `agent` selects the spawn-policy default (`{{defaultAgent}}`). Use it only when that agent fits the task.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
     NEVER pass the spawn-policy default explicitly. Only omit it after checking the available agents below.
   - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
-  - `model`: Optional per-spawn model selector, including an effort suffix (for example `provider/model:high`). Overrides role/default routing for this item without changing saved settings.
 {{#if evalToolsEnabled}}  - `tools`: Names of eval-defined tools (`@tool` in Python, `tool(fn, {…})` in JS) to expose to this subagent; each runs inside your kernel when the subagent calls it.
 {{/if}}
 {{#if effortEnabled}}  - `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
@@ -48,7 +47,6 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
   Omitting `agent` selects the spawn-policy default (`{{defaultAgent}}`). Use it only when that agent fits the task.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
   NEVER pass the spawn-policy default explicitly. Only omit it after checking the available agents below.
 - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
-- `model`: Optional per-spawn model selector, including an effort suffix (for example `provider/model:high`). Overrides role/default routing without changing saved settings.
 {{#if evalToolsEnabled}}- `tools`: Names of eval-defined tools (`@tool` in Python, `tool(fn, {…})` in JS) to expose to this subagent; each runs inside your kernel when the subagent calls it.
 {{/if}}
 {{#if effortEnabled}}- `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`

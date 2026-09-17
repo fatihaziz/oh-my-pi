@@ -70,7 +70,6 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 
 	if (op === "create") {
 		const agent = optionalString(record, "agent");
-		const model = optionalString(record, "model");
 		const requestedName = optionalString(record, "name");
 		const context = optionalString(record, "context");
 		const tools = optionalTools(record);
@@ -82,7 +81,6 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 			invocationKind: "eval",
 			assignment: `Create workpool ${requestedName ?? agent ?? "worker"}`,
 			...(agent ? { agent } : {}),
-			...(model ? { model } : {}),
 		});
 		const customTools = tools?.length
 			? createEvalCustomTools(options.session, await describeEvalTools(options.session, tools, options.signal))
@@ -100,7 +98,6 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 		const pool = registry.create(options.session, {
 			name,
 			policy,
-			...(model ? { model } : {}),
 			...(context ? { context } : {}),
 			customTools,
 		});
