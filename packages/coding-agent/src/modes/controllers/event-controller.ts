@@ -685,6 +685,12 @@ export class EventController {
 		// cumulative snapshot is later superseded and never rebuilt.
 		this.#vocalizeDelta(event);
 		this.#vocalizedMessageUpdates.add(event);
+		// The rate meter is per-delta too: a coalesced-away snapshot still
+		// carried generated tokens.
+		const delta = event.assistantMessageEvent;
+		if (delta.type === "text_delta" || delta.type === "thinking_delta" || delta.type === "toolcall_delta") {
+			this.ctx.tokenRate.push(delta.delta);
+		}
 		this.#pendingMessageUpdate = event;
 		if (this.#messageUpdateTimer) return;
 		this.#messageUpdateTimer = setTimeout(() => {
@@ -977,7 +983,6 @@ export class EventController {
 			const matchedLocalSubmission = this.ctx.locallySubmittedUserSignatures.delete(signature);
 			const replacesOptimistic =
 				this.ctx.optimisticUserMessageSignature !== undefined && !wasOptimistic && !matchedLocalSubmission;
-			const wasLocallySubmitted = matchedLocalSubmission || wasOptimistic || replacesOptimistic;
 			if (wasOptimistic) {
 				this.ctx.clearOptimisticUserMessage();
 			} else if (replacesOptimistic) {
@@ -992,15 +997,15 @@ export class EventController {
 				this.ctx.addMessageToChat(event.message);
 			}
 
-			// Clear the editor only when the submission did not originate from a
-			// local submission (optimistic or queued-while-streaming). Both local
-			// paths already cleared the editor at submit time; clearing again here
-			// would race with the user typing the next prompt while the previous
-			// large redraw lands and erase their in-progress draft (#783).
+			// Never clear the editor here. A local submission (optimistic or
+			// queued-while-streaming) already cleared it at submit time, so clearing
+			// again races with the user typing the next prompt while the previous
+			// large redraw lands and erases their in-progress draft (#783). An inbound
+			// user message this session did not submit locally — an extension
+			// delivering `sendUserMessage`, e.g. HCOM — is a real non-synthetic prompt
+			// that arrives *while* the user may be composing, so it must not touch the
+			// draft either.
 			if (!event.message.synthetic) {
-				if (!wasLocallySubmitted) {
-					this.ctx.editor.setText("");
-				}
 				this.ctx.updatePendingMessagesDisplay();
 			}
 			this.ctx.ui.requestRender(true);
@@ -1035,6 +1040,7 @@ export class EventController {
 			this.#finalizeAbandonedPostToolSegments();
 			this.#lastVisibleBlockCount = 0;
 			this.#streamedToolCallIdByIndex.clear();
+			this.ctx.tokenRate.begin(event.message.timestamp);
 			this.ctx.streamingComponent = createAssistantMessageComponent(this.ctx);
 			this.ctx.streamingMessage = event.message;
 			this.ctx.streamingComponent.pickReactionTarget(this.ctx.chatContainer.children);
@@ -1143,6 +1149,27 @@ export class EventController {
 		this.#displaceableTodoComponent = undefined;
 		previous.seal();
 		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Detach both displacement trackers and return whichever components were
+	 * live, without touching their animation state. `#handleToolExecutionEnd`
+	 * settles a displaceable `hub`/`todo` result out of `pendingTools` into
+	 * these trackers instead (see the `isDisplaceableBlock()` branch there), so
+	 * a caller that enumerates only `pendingTools` before replacing the whole
+	 * transcript — the collab guest resync (`guest.ts#finalizeSnapshot`) —
+	 * misses a still-animated "waiting" card. That caller must fold this
+	 * method's result into its own live-block accounting.
+	 */
+	takeDisplaceableComponents(): ToolExecutionHandle[] {
+		const components: ToolExecutionHandle[] = [];
+		if (this.#displaceablePollComponent) components.push(this.#displaceablePollComponent);
+		if (this.#displaceableTodoComponent && this.#displaceableTodoComponent !== this.#displaceablePollComponent) {
+			components.push(this.#displaceableTodoComponent);
+		}
+		this.#displaceablePollComponent = undefined;
+		this.#displaceableTodoComponent = undefined;
+		return components;
 	}
 
 	/**
@@ -1409,6 +1436,24 @@ export class EventController {
 	}
 
 	async #handleMessageEnd(event: Extract<AgentSessionEvent, { type: "message_end" }>): Promise<void> {
+		// The persistence slot exists before message_end notification, unlike
+		// tool_execution_end. Resolve HUD identity only after canonical append.
+		if (event.message.role === "toolResult" && event.message.toolName === "todo" && !event.message.isError) {
+			const details = event.message.details as { op?: string; phases?: TodoPhase[] } | undefined;
+			if (details?.op !== "view" && details?.phases) {
+				const owner = this.ctx.viewSession;
+				const sessionId = owner.sessionManager.getSessionId();
+				const sessionFile = owner.sessionManager.getSessionFile();
+				await owner.settleInFlightMessagePersistence();
+				if (
+					this.ctx.viewSession === owner &&
+					owner.sessionManager.getSessionId() === sessionId &&
+					owner.sessionManager.getSessionFile() === sessionFile
+				) {
+					this.ctx.setTodos(owner.getTodoPhases());
+				}
+			}
+		}
 		if (event.message.role === "user") return;
 		const unlockedThinkingVisibility =
 			event.message.role === "assistant" && this.ctx.noteDisplayableThinkingContent(event.message);
@@ -1428,6 +1473,10 @@ export class EventController {
 			}
 		}
 		if (this.ctx.streamingComponent && event.message.role === "assistant") {
+			this.ctx.tokenRate.end(
+				event.message.usage?.output,
+				event.message.duration ? event.message.timestamp + event.message.duration : undefined,
+			);
 			this.ctx.streamingMessage = event.message;
 			this.#streamingReveal.stop();
 			this.#toolArgsReveal.flushAll();
@@ -1515,6 +1564,7 @@ export class EventController {
 				}
 				this.ctx.lastAssistantUsage = usage;
 			}
+			this.ctx.streamingComponent.setServedModelMismatch(this.ctx.servedModelTracker.check(event.message));
 			this.ctx.streamingComponent.markTranscriptBlockFinalized();
 			let lastPostToolAssistantComponent: AssistantMessageComponent | undefined;
 			for (const [toolCallId, segment] of displayTimeline.afterToolCalls) {
@@ -1738,8 +1788,7 @@ export class EventController {
 		event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>,
 	): void {
 		if (event.toolName === "read") this.#inlineReadToolImages(event.toolCallId, event.result);
-		component.updateResult({ ...event.result, isError: event.isError }, false, event.toolCallId);
-		this.ctx.pendingTools.delete(event.toolCallId);
+		this.#applyToolCompletion(component, event);
 		if (event.toolName === "read") this.#clearReadToolCall(event.toolCallId);
 		if (
 			component instanceof ToolExecutionComponent &&
@@ -1760,6 +1809,22 @@ export class EventController {
 			this.#displaceableTodoComponent = component;
 		}
 		this.ctx.ui.requestRender();
+	}
+
+	#applyToolCompletion(
+		component: ToolExecutionHandle,
+		event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>,
+	): void {
+		const asyncState = (event.result.details as { async?: { state?: string } } | undefined)?.async?.state;
+		const isBackgroundTask = event.toolName === "task" && asyncState === "running";
+		component.updateResult({ ...event.result, isError: event.isError }, isBackgroundTask, event.toolCallId);
+		if (isBackgroundTask) {
+			component.parkAsBackground();
+			this.#backgroundTaskCallIds.add(event.toolCallId);
+		} else {
+			this.ctx.pendingTools.delete(event.toolCallId);
+			this.#backgroundTaskCallIds.delete(event.toolCallId);
+		}
 	}
 
 	async #handleToolExecutionEnd(event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>): Promise<void> {
@@ -1833,16 +1898,7 @@ export class EventController {
 		} else {
 			const component = this.ctx.pendingTools.get(event.toolCallId);
 			if (component) {
-				const asyncState = (event.result.details as { async?: { state?: string } } | undefined)?.async?.state;
-				const isBackgroundTask = event.toolName === "task" && asyncState === "running";
-				component.updateResult({ ...event.result, isError: event.isError }, isBackgroundTask, event.toolCallId);
-				if (isBackgroundTask) {
-					component.parkAsBackground();
-					this.#backgroundTaskCallIds.add(event.toolCallId);
-				} else {
-					this.ctx.pendingTools.delete(event.toolCallId);
-					this.#backgroundTaskCallIds.delete(event.toolCallId);
-				}
+				this.#applyToolCompletion(component, event);
 				if (component instanceof ToolExecutionComponent && component.isDisplaceableBlock()) {
 					if (event.toolName === "hub" && component.canBeDisplacedBy("hub")) {
 						// Remember the waiting poll so the next `hub` call can displace it.
@@ -1873,13 +1929,11 @@ export class EventController {
 			}
 		}
 		if (syntheticFailureCard) this.#syntheticFailureCards.set(event.toolCallId, syntheticFailureCard);
-		// Update todo display when todo tool completes
 		if (event.toolName === "todo" && !event.isError) {
-			const details = event.result.details as { phases?: TodoPhase[] } | undefined;
-			if (details?.phases) {
-				this.ctx.setTodos(details.phases);
-			}
-		} else if (event.toolName === "todo" && event.isError) {
+			const details = event.result.details as { op?: string; phases?: TodoPhase[] } | undefined;
+			if (details?.op !== "view" && details?.phases) this.ctx.setTodos(details.phases);
+		}
+		if (event.toolName === "todo" && event.isError) {
 			const textContent = event.result.content.find(
 				(content: { type: string; text?: string }) => content.type === "text",
 			)?.text;
@@ -1978,6 +2032,9 @@ export class EventController {
 		setTerminalTitleState("idle");
 
 		await this.#finishAgentEnd(event);
+		// This settle may belong to an extension-started turn while the main
+		// input loop remains asleep. Do not await session-idle from its own event.
+		if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
 	}
 
 	async #finishAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
