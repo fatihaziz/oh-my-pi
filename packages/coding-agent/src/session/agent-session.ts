@@ -98,7 +98,8 @@ import {
 	stringProperty,
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
-import { type AdvisorConfig, loadAdvisorTranscriptCosts } from "../advisor";
+import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
+import { loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -114,7 +115,7 @@ import {
 	onExtendedContextChanged,
 	onModelRolesChanged,
 } from "../config/settings";
-import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
+import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import { getEditStore } from "../edit/store";
 import { releaseCompletionHandles } from "../eval/completion-bridge";
 import type { EvalPreludeDefinition } from "../eval/preludes";
@@ -149,29 +150,26 @@ import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { HookCommandContext } from "../extensibility/hooks/types";
-import {
-	buildSkillPromptMessage,
-	getSkillSlashCommandName,
-	parseSkillInvocation,
-	type Skill,
-	type SkillWarning,
-} from "../extensibility/skills";
+import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
 import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
-import type { IrcMessage } from "../irc/bus";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
-import { containsOrchestrate, renderOrchestrateNotice } from "../modes/orchestrate";
-import { theme } from "../modes/theme/theme";
+import { renderOrchestrateNotice } from "../modes/orchestrate";
+import { containsOrchestrate } from "@oh-my-pi/pi-tui/prompt/orchestrate";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
-import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
-import { computeNonMessageTokens } from "../modes/utils/context-usage";
-import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
+import { ULTRATHINK_NOTICE } from "../modes/ultrathink";
+import { containsUltrathink } from "@oh-my-pi/pi-tui/prompt/ultrathink";
+import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { renderWorkflowNotice } from "../modes/workflow";
+import { containsWorkflow } from "@oh-my-pi/pi-tui/prompt/workflow";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
@@ -206,12 +204,13 @@ import {
 	parseConfiguredThinkingLevel,
 	shouldDisableReasoning,
 	toReasoningEffort,
-} from "../thinking";
+} from "@oh-my-pi/pi-tui/thinking";
 import { isLowSignalTitleInput } from "../tiny/text";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
 import type { ImageAttachmentEntry } from "../tools";
 import { resolveApproval } from "../tools/approval";
-import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
+import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
+import { type AskToolInput, recoverAskQuestions } from "../tools/ask";
 import {
 	armIdleCloseForOwner,
 	cancelIdleCloseForOwner,
@@ -227,25 +226,26 @@ import {
 	isPreviewResolutionToolCall,
 	isProposeToolCall,
 	type PlanProposalHandler,
-	PROPOSE_DEVICE_NAME,
 	writeDeviceDispatch,
 } from "../tools/resolve";
+import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
-import type { TodoPhase } from "../tools/todo";
-import { ToolError } from "../tools/tool-errors";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { AgentDefinition } from "../task/types";
-import type { ModelMention } from "./model-mention-syntax";
+import type { ModelMention } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { ModelMentionRegistry } from "./model-mentions";
 import { parseCommandArgs } from "../utils/command-args";
-import type { EditMode } from "../utils/edit-mode";
+import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
 import { normalizeModelContextImages } from "../utils/image-loading";
+import { TokenRateMeter } from "../utils/token-rate";
+import { videoPreviewSource } from "@oh-my-pi/pi-tui/prompt/video";
 import { resumeCommand } from "../utils/resume-command";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
-import { videoPreviewSource } from "../utils/video";
 import type { VibeModeState } from "../vibe/state";
 import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
 import type {
@@ -274,7 +274,7 @@ import type {
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
 import { writeArtifact } from "./artifacts";
-import { formatArtifactErrorNotice, type OutputMeta, stripOutputNotice } from "../tools/output-meta";
+import { formatArtifactErrorNotice, type OutputMeta, stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import {
 	ASYNC_INLINE_RESULT_MAX_CHARS,
 	ASYNC_PREVIEW_MAX_CHARS,
@@ -304,7 +304,6 @@ import {
 	shouldEvaluateCodexAutoRedeem,
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
-import { getCompanionBridge } from "./companion";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
 import {
@@ -372,13 +371,8 @@ import {
 	type SessionAdvisorsHost,
 } from "./session-advisors";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
-import {
-	getRestorableSessionModels,
-	isTranscriptEntry,
-	isUserRequestEntry,
-	transcriptEntryMessage,
-	userTurnDraft,
-} from "./session-context";
+import { getRestorableSessionModels, isTranscriptEntry } from "./session-context";
+import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { formatSessionDumpText } from "./session-dump-format";
 import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
@@ -395,7 +389,7 @@ import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./ses
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
 import type { ShakeMode, ShakeResult } from "./shake-types";
-import { skillPromptTitleInput } from "./skill-title-input";
+import { skillPromptTitleInput } from "@oh-my-pi/pi-tui/chat/skill-title-input";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
@@ -468,12 +462,6 @@ const noOpUIContext: ExtensionUIContext = {
 // AgentSession Class
 // ============================================================================
 
-type MessageEndPersistenceSlot = {
-	readonly promise: Promise<void>;
-	persist: (persistMessage: () => void) => Promise<void>;
-	release: () => void;
-};
-
 type PostPromptSkipReason = "aborted" | "stale-generation";
 
 type AgentContinueSkipReason =
@@ -526,9 +514,7 @@ type SetSessionNameWithTrigger = (
 ) => Promise<boolean>;
 
 const kPersistedSessionEntryId = Symbol("persistedSessionEntryId");
-type PersistedAssistantMessage = AssistantMessage & {
-	[kPersistedSessionEntryId]?: string;
-};
+type PersistedAssistantMessage = AssistantMessage & { [kPersistedSessionEntryId]?: string };
 
 /**
  * Clone one top-level notification field without ever returning an object owned
@@ -644,10 +630,7 @@ export class AgentSession {
 	#unsubscribeEvalPreludeSettings?: () => void;
 	#unsubscribeIdleCloseSetting?: () => void;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
-	#lastAppendOnlyResolution?: {
-		enable: boolean;
-		providerId: string | undefined;
-	};
+	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
 	#activeToolExecutionUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
@@ -909,9 +892,7 @@ export class AgentSession {
 		try {
 			this.#powerAssertion = PowerAssertion.start(options);
 		} catch (error) {
-			logger.warn("Failed to acquire power assertion", {
-				error: String(error),
-			});
+			logger.warn("Failed to acquire power assertion", { error: String(error) });
 		}
 	}
 
@@ -922,9 +903,7 @@ export class AgentSession {
 		try {
 			assertion.stop();
 		} catch (error) {
-			logger.warn("Failed to release power assertion", {
-				error: String(error),
-			});
+			logger.warn("Failed to release power assertion", { error: String(error) });
 		}
 	}
 
@@ -956,9 +935,7 @@ export class AgentSession {
 			try {
 				await callback();
 			} catch (error) {
-				logger.warn("In-flight settle callback failed", {
-					error: String(error),
-				});
+				logger.warn("In-flight settle callback failed", { error: String(error) });
 			}
 		}
 	}
@@ -1144,9 +1121,7 @@ export class AgentSession {
 				try {
 					finishObservation = this.#ircWakeTurnObserver?.(records);
 				} catch (error) {
-					logger.warn("IRC wake turn observer failed to start", {
-						error: String(error),
-					});
+					logger.warn("IRC wake turn observer failed to start", { error: String(error) });
 				}
 				return this.agent.prompt(records);
 			})
@@ -1172,9 +1147,7 @@ export class AgentSession {
 					await this.#waitForPostPromptRecovery(generation);
 				} catch (error) {
 					turnError ??= error;
-					logger.warn("IRC wake turn recovery failed", {
-						error: String(error),
-					});
+					logger.warn("IRC wake turn recovery failed", { error: String(error) });
 				}
 				if (parkedFollowUps.length > 0) {
 					this.agent.replaceQueues(
@@ -1187,9 +1160,7 @@ export class AgentSession {
 					try {
 						await finishObservation?.(turnError);
 					} catch (error) {
-						logger.warn("IRC wake turn observer failed to finish", {
-							error: String(error),
-						});
+						logger.warn("IRC wake turn observer failed to finish", { error: String(error) });
 					}
 				});
 			});
@@ -1266,33 +1237,6 @@ export class AgentSession {
 		this.#emit(queuedContinuation || ircContinuation ? { ...pending, isTerminal: false } : pending);
 	}
 
-	/** Resolve a `/skill:<name>` submission to the same user-attributed message the editor builds. */
-	async #buildCompanionSkillPrompt(text: string): Promise<
-		| {
-				message: Parameters<AgentSession["promptCustomMessage"]>[0];
-				options: { streamingBehavior: "followUp"; queueChipText: string };
-		  }
-		| undefined
-	> {
-		if (!text.startsWith("/")) return undefined;
-		const parsed = parseSkillInvocation(text);
-		if (!parsed) return undefined;
-		const wanted = getSkillSlashCommandName({ name: parsed.name });
-		const skill = this.skills.find(candidate => getSkillSlashCommandName(candidate) === wanted);
-		if (!skill) return undefined;
-		const built = await buildSkillPromptMessage(skill, parsed, "user");
-		return {
-			message: {
-				customType: SKILL_PROMPT_MESSAGE_TYPE,
-				content: built.message,
-				display: true,
-				details: built.details,
-				attribution: "user",
-			},
-			options: { streamingBehavior: "followUp", queueChipText: text },
-		};
-	}
-
 	/**
 	 * Arm prewalk outside the normal startup path so an explicit slash command starts immediately.
 	 */
@@ -1338,75 +1282,20 @@ export class AgentSession {
 	/** `local://` URLs of plan files in the session-local root, newest first —
 	 *  a fallback for `resolveApprovedPlan` when the agent dropped `extra.title`. */
 	async #listPlanFiles(): Promise<string[]> {
-		return listPlanFiles({
-			localProtocolOptions: this.#localProtocolOptions(),
-		});
+		return listPlanFiles({ localProtocolOptions: this.#localProtocolOptions() });
 	}
 
 	#codeModeState: { namespacesInfo?: unknown };
 
+	/** Live generation tok/s for the working row; fed by this session's own streamed deltas. */
+	readonly tokenRate: TokenRateMeter;
+
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		this.tokenRate = new TokenRateMeter(text => this.agent.tokenizer.countTokens(text));
+		this.#reseedTokenRate();
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
-		getCompanionBridge(this.sessionManager).bind({
-			submit: async text => {
-				if (this.#isDisposed) throw new Error("Companion session is no longer active");
-				const accepted = Promise.withResolvers<void>();
-				const unsubscribe = this.subscribe(event => {
-					if (event.type !== "agent_start") return;
-					unsubscribe();
-					accepted.resolve();
-				});
-				// A submitted `/skill:<name>` must run the skill, exactly as the editor
-				// does; `prompt` alone would send the command as literal text.
-				const skill = await this.#buildCompanionSkillPrompt(text);
-				const dispatched = skill
-					? this.promptCustomMessage(skill.message, skill.options)
-					: this.prompt(text, { streamingBehavior: "followUp" });
-				void dispatched.then(
-					() => {
-						unsubscribe();
-						accepted.resolve();
-					},
-					error => {
-						unsubscribe();
-						accepted.reject(error);
-					},
-				);
-				// A turn already runs: the message queues as a follow-up, and that IS
-				// acceptance. Waiting for `agent_start` would block until that turn ends.
-				if (this.isStreaming) {
-					unsubscribe();
-					accepted.resolve();
-				}
-				await accepted.promise;
-			},
-			// Exactly what a companion submit can run: skills, file commands and
-			// extension commands. Editor-only builtins are deliberately absent.
-			commands: () => {
-				const list = new Map<string, string>();
-				for (const skill of this.skills) list.set(getSkillSlashCommandName(skill), skill.description ?? "");
-				for (const command of this.#slashCommands) list.set(command.name, command.description ?? "");
-				for (const command of this.#extensionRunner?.getRegisteredCommands() ?? []) {
-					list.set(command.name, command.description ?? "");
-				}
-				return [...list].map(([name, description]) => ({ name, description }));
-			},
-			interrupt: async () => {
-				if (this.#isDisposed) throw new Error("Companion session is no longer active");
-				void this.abort({ reason: USER_INTERRUPT_LABEL }).catch(error => {
-					logger.warn("Companion interruption failed", { error });
-				});
-			},
-			persist: snapshot => {
-				this.sessionManager.appendCustomEntry("companion_state", {
-					eventId: snapshot.eventId,
-					sessionId: snapshot.sessionId,
-					state: snapshot.state,
-				});
-			},
-		});
 		this.settings = config.settings;
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
@@ -1578,9 +1467,7 @@ export class AgentSession {
 			shakeForRequestBodyReadTimeout: generation => this.#maintenance.shakeForRequestBodyReadTimeout(generation),
 			withBashBranchTransition: operation => this.#bash.withBranchTransition(operation),
 		};
-		this.#recovery = new TurnRecovery(recoveryHost, {
-			initialRetryFallback: config.initialRetryFallback,
-		});
+		this.#recovery = new TurnRecovery(recoveryHost, { initialRetryFallback: config.initialRetryFallback });
 		this.#detachUsageBeforeQueueDequeue = this.agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (
 				!this.settings.get("retry.usageAwareFallback") ||
@@ -1909,11 +1796,7 @@ export class AgentSession {
 			},
 			emit: event => {
 				if (event.type === "goal_updated") {
-					return this.#emitSessionEvent({
-						type: "goal_updated",
-						goal: event.goal,
-						state: event.state,
-					});
+					return this.#emitSessionEvent({ type: "goal_updated", goal: event.goal, state: event.state });
 				}
 			},
 			persist: (mode, state) => {
@@ -2053,10 +1936,7 @@ export class AgentSession {
 			},
 			queueExperimentalContextNotesReminder: prompt => {
 				if (this.#isDisposed) return;
-				this.#experimentalContextNotesReminder = {
-					prompt,
-					generation: this.#promptGeneration,
-				};
+				this.#experimentalContextNotesReminder = { prompt, generation: this.#promptGeneration };
 			},
 			memoryBackendSession: () => this,
 			emitSessionEvent: (event, options) => this.#emitSessionEvent(event, options),
@@ -2171,9 +2051,7 @@ export class AgentSession {
 		});
 		this.#unsubscribeCodeMode = onCodeModeChanged(() => {
 			void this.#tools.reconcileCodeMode().catch(error => {
-				logger.warn("Code Mode reconcile after setting change failed", {
-					error: String(error),
-				});
+				logger.warn("Code Mode reconcile after setting change failed", { error: String(error) });
 			});
 		});
 
@@ -2695,16 +2573,6 @@ export class AgentSession {
 		return queued;
 	}
 
-	/**
-	 * Orders subscriber fan-out across concurrent `#emitSessionEvent` calls.
-	 * Extension emits only await when the event type has handlers, so an event
-	 * with no handlers could otherwise overtake an earlier event still inside
-	 * its extension emit — an instant refusal delivered its assistant
-	 * `message_end` to the TUI before its own `message_start`, skipping the
-	 * turn-ending error render entirely.
-	 */
-	#subscriberEmitGate: Promise<void> = Promise.resolve();
-
 	async #emitSessionEvent(event: AgentSessionEvent, options: { detachExtensions?: boolean } = {}): Promise<void> {
 		if (event.type === "tool_execution_update") {
 			// Returned background calls have no later tool result to persist their
@@ -2719,40 +2587,26 @@ export class AgentSession {
 			void this.#queueExtensionEvent(event);
 			return;
 		}
-		// Take a FIFO ticket before the extension emit: extension deliveries for
-		// consecutive events still run concurrently, but subscriber fan-out waits
-		// for every earlier event's fan-out (or deferral) to happen first.
-		const previousGate = this.#subscriberEmitGate;
-		const { promise: gate, resolve: releaseGate } = Promise.withResolvers<void>();
-		this.#subscriberEmitGate = gate;
-		try {
-			const extensionEmit = this.#emitExtensionEvent(event);
-			if (options.detachExtensions) {
-				void extensionEmit.catch(error => {
-					logger.warn("Detached session event extension emit failed", {
-						type: event.type,
-						error: error instanceof Error ? error.message : String(error),
-					});
-				});
-			} else {
-				await extensionEmit;
-			}
-			await previousGate;
-			// Hold the wire-level agent_end until in-flight prompts unwind. Subscribers
-			// (rpc-mode, ACP, Cursor) treat agent_end as the "session is idle" signal;
-			// emitting while #promptInFlightCount > 0 lets a client fire its next
-			// `prompt` into a session that still reports isStreaming === true. Flush
-			// happens in #endInFlight / #resetInFlight. A later agent_end (e.g. from
-			// an auto-compaction turn that starts before the original prompt unwinds)
-			// supersedes the pending one, which is what subscribers want — they only
-			// care about the final settle.
-			if (event.type === "agent_end" && this.#promptInFlightCount > 0) {
-				this.#pendingAgentEndEmit = event;
-				return;
-			}
+		// Deliver synchronously before awaiting extension notifications. This keeps
+		// starts/results in emission order without letting a stalled observer block
+		// unrelated events, mid-turn maintenance, or queued steering.
+		// RPC/ACP consumers may submit again on agent_end, so defer that frame
+		// until the owning prompt unwinds and the session actually becomes idle.
+		if (event.type === "agent_end" && this.#promptInFlightCount > 0) {
+			this.#pendingAgentEndEmit = event;
+		} else {
 			this.#emit(event);
-		} finally {
-			releaseGate();
+		}
+		const extensionEmit = this.#emitExtensionEvent(event);
+		if (options.detachExtensions) {
+			void extensionEmit.catch(error => {
+				logger.warn("Detached session event extension emit failed", {
+					type: event.type,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+		} else {
+			await extensionEmit;
 		}
 	}
 
@@ -2852,34 +2706,19 @@ export class AgentSession {
 		}
 	};
 
-	#createMessageEndPersistenceSlot(message: AgentMessage): MessageEndPersistenceSlot | undefined {
+	/** Commit messages in emission order without waiting for notification listeners. */
+	#queueMessageEndPersistence(message: AgentMessage, promptGeneration: number): Promise<void> {
 		const key = sessionMessagePersistenceKey(message);
-		if (!key) return undefined;
-		const previous = this.#messageEndPersistenceTail;
-		const { promise, resolve } = Promise.withResolvers<void>();
-		const clear = () => {
-			if (this.#pendingMessageEndPersistence.get(key) === promise) {
-				this.#pendingMessageEndPersistence.delete(key);
-			}
-		};
-		this.#pendingMessageEndPersistence.set(key, promise);
-		this.#messageEndPersistenceTail = promise.catch(() => {});
-		return {
-			promise,
-			persist: async persistMessage => {
-				await previous;
-				try {
-					persistMessage();
-				} finally {
-					resolve();
-					clear();
+		const pending = this.#messageEndPersistenceTail
+			.then(() => this.#persistMessageEnd(message, promptGeneration))
+			.finally(() => {
+				if (key !== undefined && this.#pendingMessageEndPersistence.get(key) === pending) {
+					this.#pendingMessageEndPersistence.delete(key);
 				}
-			},
-			release: () => {
-				resolve();
-				clear();
-			},
-		};
+			});
+		if (key !== undefined) this.#pendingMessageEndPersistence.set(key, pending);
+		this.#messageEndPersistenceTail = pending.catch(() => {});
+		return pending;
 	}
 
 	async #waitForSessionMessagePersistence(message: AgentMessage): Promise<void> {
@@ -3020,7 +2859,8 @@ export class AgentSession {
 				assistantMsg.contextSnapshot = {
 					promptTokens: calculatePromptTokens(assistantMsg.usage),
 					nonMessageTokens:
-						this.#stats.pendingNonMessageTokens ?? computeNonMessageTokens(this, this.agent.tokenizer),
+						this.#stats.pendingNonMessageTokens ??
+						computeNonMessageTokens(this, this.agent.tokenizer, this.settings.revision),
 					compactionEpoch: this.#stats.compactionEpoch,
 				};
 			}
@@ -3063,10 +2903,8 @@ export class AgentSession {
 	}
 
 	#persistMessageEnd(message: AgentMessage, promptGeneration: number): void {
-		// Session transitions bump the prompt generation before replacing the
-		// transcript. A message_end handler may still be awaiting an extension at
-		// that boundary; never let its delayed persistence append the previous
-		// conversation to the replacement session.
+		// Session transitions may replace the transcript before a queued commit
+		// runs. Never append the previous conversation to the replacement session.
 		if (this.#promptGeneration !== promptGeneration) {
 			// The message has already left the agent queue. If it was a deferred TTSR
 			// delivery, queue cleanup cannot clear its reservation.
@@ -3125,9 +2963,7 @@ export class AgentSession {
 		return {
 			role: "custom",
 			customType: INTERRUPTED_THINKING_MESSAGE_TYPE,
-			content: prompt.render(interruptedThinkingTemplate, {
-				reasoning: demoted.reasoning,
-			}),
+			content: prompt.render(interruptedThinkingTemplate, { reasoning: demoted.reasoning }),
 			display: false,
 			details: {
 				interruptedAt,
@@ -3178,6 +3014,20 @@ export class AgentSession {
 			this.#persistSessionMessageIfMissing(turnMessages[index]);
 		}
 		return true;
+	}
+
+	/** Re-seed the rate meter from the last completed assistant turn after a conversation swap (resume, branch switch). */
+	#reseedTokenRate(): void {
+		const messages = this.agent.state.messages;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message?.role !== "assistant") continue;
+			const assistant = message as AssistantMessage;
+			if (assistant.duration === undefined) continue;
+			this.tokenRate.seed(assistant.usage.output, assistant.duration);
+			return;
+		}
+		this.tokenRate.reset();
 	}
 
 	#processAgentEvent = async (event: AgentEvent): Promise<void> => {
@@ -3293,8 +3143,6 @@ export class AgentSession {
 			this.agent.steer(checkpointReminder);
 		}
 
-		const messageEndPersistence =
-			event.type === "message_end" ? this.#createMessageEndPersistenceSlot(event.message) : undefined;
 		// Local completion time for prompt→yield timing: stamped here, not by the
 		// provider, so the usage row's Δ is exact and provider-independent — some
 		// providers never report `duration` (gitlab-duo) or stamp `timestamp` at
@@ -3302,6 +3150,12 @@ export class AgentSession {
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			event.message.completedAt = Date.now();
 		}
+		// Turn-boundary maintenance awaits this commit before draining steering;
+		// extension notifications must not own or delay the persistence work.
+		const messageEndPersistence =
+			event.type === "message_end"
+				? this.#queueMessageEndPersistence(event.message, eventPromptGeneration)
+				: undefined;
 
 		// Deobfuscate assistant message content for display emission — the LLM echoes back
 		// obfuscated placeholders, but listeners (TUI, extensions, exporters) must see real
@@ -3314,10 +3168,7 @@ export class AgentSession {
 			const message = event.message;
 			const deobfuscatedContent = deobfuscateAssistantContent(obfuscator, message.content);
 			if (deobfuscatedContent !== message.content) {
-				displayEvent = {
-					...event,
-					message: { ...message, content: deobfuscatedContent },
-				};
+				displayEvent = { ...event, message: { ...message, content: deobfuscatedContent } };
 			}
 		}
 
@@ -3342,19 +3193,31 @@ export class AgentSession {
 		if (event.type === "turn_start") this.#ttsr.onTurnStart();
 		if (event.type === "message_start" && event.message.role === "assistant") this.#ttsr.onAssistantMessageStart();
 
+		// Meter generation per session: each session tracks its own stream, so a
+		// background subagent holds a live reading by the time it is focused and
+		// the main session's reading survives focus round-trips.
+		if (event.type === "message_start" && event.message.role === "assistant") {
+			this.tokenRate.begin(event.message.timestamp);
+		} else if (event.type === "message_update" && event.message.role === "assistant") {
+			const delta = event.assistantMessageEvent;
+			if (delta.type === "text_delta" || delta.type === "thinking_delta" || delta.type === "toolcall_delta") {
+				this.tokenRate.push(delta.delta);
+			}
+		} else if (event.type === "message_end" && event.message.role === "assistant") {
+			const assistant = event.message as AssistantMessage;
+			this.tokenRate.end(
+				assistant.usage.output,
+				assistant.duration !== undefined ? assistant.timestamp + assistant.duration : undefined,
+			);
+		}
+
 		if (event.type !== "agent_end") {
 			try {
 				await this.#emitSessionEvent(displayEvent);
 			} catch (error) {
 				if (event.type === "message_end") {
 					try {
-						if (messageEndPersistence) {
-							await messageEndPersistence.persist(() =>
-								this.#persistMessageEnd(event.message, eventPromptGeneration),
-							);
-						} else {
-							this.#persistMessageEnd(event.message, eventPromptGeneration);
-						}
+						await messageEndPersistence;
 					} catch (persistenceError) {
 						logger.warn("Failed to persist message after session event emission failed", {
 							error: String(persistenceError),
@@ -3423,11 +3286,7 @@ export class AgentSession {
 
 		// Handle session persistence
 		if (event.type === "message_end") {
-			if (messageEndPersistence) {
-				await messageEndPersistence.persist(() => this.#persistMessageEnd(event.message, eventPromptGeneration));
-			} else {
-				this.#persistMessageEnd(event.message, eventPromptGeneration);
-			}
+			await messageEndPersistence;
 			if (this.#promptGeneration !== eventPromptGeneration) return;
 			if (interruptedThinkingMessage) {
 				this.sessionManager.appendCustomMessageEntry(
@@ -3563,10 +3422,7 @@ export class AgentSession {
 				// Public agent_end is held out of the eager display pass and emitted
 				// here after maintenance routing, tagged isTerminal so subscribers can
 				// tell final settles from scheduled continuations.
-				await this.#emitSessionEvent({
-					...event,
-					isTerminal: !options?.willContinue,
-				});
+				await this.#emitSessionEvent({ ...event, isTerminal: !options?.willContinue });
 				void this.#emitAgentEndNotification([...activeMessages], options).catch(err => {
 					logger.error("Agent end extension notification failed", { err });
 				});
@@ -3738,9 +3594,7 @@ export class AgentSession {
 			if (activeGoal) {
 				// Payload rejections get a pre-compaction chain consult; checkCompaction()'s overflow path commits a remedy before returning (#9235).
 				if (AIError.isPayloadRejection(msg) && this.#recovery.isHardErrorFallbackEligible(msg)) {
-					const didRetry = await this.#recovery.handleRetryableError(msg, {
-						hardErrorFallback: true,
-					});
+					const didRetry = await this.#recovery.handleRetryableError(msg, { hardErrorFallback: true });
 					if (didRetry) {
 						await emitAgentEndNotification({ willContinue: true });
 						return;
@@ -3842,9 +3696,7 @@ export class AgentSession {
 				// DIFFERENT model is a fresh chance — consult the chain before
 				// surfacing the failure. #handleRetryableError bails out (no
 				// backoff-retry of the failing model) when no switch happens.
-				const didRetry = await this.#recovery.handleRetryableError(msg, {
-					hardErrorFallback: true,
-				});
+				const didRetry = await this.#recovery.handleRetryableError(msg, { hardErrorFallback: true });
 				if (didRetry) {
 					await emitAgentEndNotification({ willContinue: true });
 					return;
@@ -3966,11 +3818,7 @@ export class AgentSession {
 
 	#schedulePostPromptTask(
 		task: (signal: AbortSignal) => Promise<void>,
-		options?: {
-			delayMs?: number;
-			generation?: number;
-			onSkip?: (reason: PostPromptSkipReason) => void;
-		},
+		options?: { delayMs?: number; generation?: number; onSkip?: (reason: PostPromptSkipReason) => void },
 	): void {
 		const delayMs = options?.delayMs ?? 0;
 		const signal = this.#postPromptTasksAbortController.signal;
@@ -4308,10 +4156,7 @@ export class AgentSession {
 			return undefined;
 		}
 		const eventArgs = computer
-			? {
-					actions: computer.actions,
-					pendingSafetyChecks: computer.pendingSafetyChecks,
-				}
+			? { actions: computer.actions, pendingSafetyChecks: computer.pendingSafetyChecks }
 			: ctx.args;
 		runner.markToolCallEmitted(ctx.toolCall.id, ctx.tool.name);
 		const callResult = await runner.emitToolCall(
@@ -4324,10 +4169,7 @@ export class AgentSession {
 			signal,
 		);
 		if (callResult?.block) {
-			return {
-				block: true,
-				reason: callResult.reason || "Tool execution was blocked by an extension",
-			};
+			return { block: true, reason: callResult.reason || "Tool execution was blocked by an extension" };
 		}
 		// A computer call's event input is a synthetic {actions, pendingSafetyChecks}
 		// view, not the execution params — a revision cannot map back onto them.
@@ -4579,10 +4421,7 @@ export class AgentSession {
 				role: event.role,
 			});
 		} else if (event.type === "ttsr_triggered") {
-			await this.#extensionRunner.emit({
-				type: "ttsr_triggered",
-				rules: event.rules,
-			});
+			await this.#extensionRunner.emit({ type: "ttsr_triggered", rules: event.rules });
 		} else if (event.type === "todo_reminder") {
 			await this.#extensionRunner.emit({
 				type: "todo_reminder",
@@ -4806,9 +4645,7 @@ export class AgentSession {
 		try {
 			await withTimeout(task, 3_000, "Timed out draining auto-learn capture during dispose");
 		} catch (error) {
-			logger.warn("Auto-learn capture did not settle during dispose", {
-				error: String(error),
-			});
+			logger.warn("Auto-learn capture did not settle during dispose", { error: String(error) });
 		}
 	}
 
@@ -4907,15 +4744,10 @@ export class AgentSession {
 				"Timed out releasing owned browser tabs during dispose",
 			);
 			if (released > 0) {
-				logger.debug("Released owned browser tabs during dispose", {
-					ownerId,
-					released,
-				});
+				logger.debug("Released owned browser tabs during dispose", { ownerId, released });
 			}
 		} catch (error) {
-			logger.warn("Failed to release owned browser tabs during dispose", {
-				error: String(error),
-			});
+			logger.warn("Failed to release owned browser tabs during dispose", { error: String(error) });
 		}
 	}
 
@@ -4940,10 +4772,7 @@ export class AgentSession {
 					"Timed out closing idle browser tabs at turn settle",
 				);
 				if (closed > 0) {
-					logger.debug("Closed idle owned browser tabs at turn settle", {
-						ownerId,
-						closed,
-					});
+					logger.debug("Closed idle owned browser tabs at turn settle", { ownerId, closed });
 				}
 			} else {
 				// Idle close disabled at runtime: drop any deadline armed
@@ -4957,16 +4786,11 @@ export class AgentSession {
 					"Timed out freezing owned browser tabs at turn settle",
 				);
 				if (frozen > 0) {
-					logger.debug("Froze owned browser tabs at turn settle", {
-						ownerId,
-						frozen,
-					});
+					logger.debug("Froze owned browser tabs at turn settle", { ownerId, frozen });
 				}
 			}
 		} catch (error) {
-			logger.warn("Failed to settle owned browser tabs at turn end", {
-				error: String(error),
-			});
+			logger.warn("Failed to settle owned browser tabs at turn end", { error: String(error) });
 		}
 	}
 
@@ -4979,9 +4803,7 @@ export class AgentSession {
 				"Timed out releasing native computer session during dispose",
 			);
 		} catch (error) {
-			logger.warn("Failed to release native computer session during dispose", {
-				error: String(error),
-			});
+			logger.warn("Failed to release native computer session during dispose", { error: String(error) });
 		}
 	}
 
@@ -4994,9 +4816,7 @@ export class AgentSession {
 				"Timed out disconnecting owned MCP manager during dispose",
 			);
 		} catch (error) {
-			logger.warn("Failed to disconnect owned MCP manager during dispose", {
-				error: String(error),
-			});
+			logger.warn("Failed to disconnect owned MCP manager during dispose", { error: String(error) });
 		}
 	}
 
@@ -5022,9 +4842,7 @@ export class AgentSession {
 		try {
 			await emitSessionShutdownEvent(this.#extensionRunner);
 		} catch (error) {
-			logger.warn("Failed to emit session_shutdown event", {
-				error: String(error),
-			});
+			logger.warn("Failed to emit session_shutdown event", { error: String(error) });
 		}
 
 		// Stop fallback extension timers before aborting deferred work they could enqueue.
@@ -5040,9 +4858,7 @@ export class AgentSession {
 				"Timed out draining post-prompt tasks during dispose",
 			);
 		} catch (error) {
-			logger.warn("Post-prompt tasks still draining at dispose deadline", {
-				error: String(error),
-			});
+			logger.warn("Post-prompt tasks still draining at dispose deadline", { error: String(error) });
 		}
 		await this.#drainAutolearnCapture();
 		await this.#memory.transition;
@@ -5055,9 +4871,7 @@ export class AgentSession {
 		try {
 			releaseSharpshooterSession(this);
 		} catch (error) {
-			logger.warn("Session dispose: Sharpshooter release failed", {
-				error: String(error),
-			});
+			logger.warn("Session dispose: Sharpshooter release failed", { error: String(error) });
 		}
 		const advisorRecorderClosed = this.#advisors.recorderClosed();
 		const results = await Promise.allSettled([
@@ -5139,9 +4953,7 @@ export class AgentSession {
 			);
 			drained = true;
 		} catch (error) {
-			logger.warn("Active agent run still settling at dispose deadline", {
-				error: String(error),
-			});
+			logger.warn("Active agent run still settling at dispose deadline", { error: String(error) });
 		}
 
 		// Event handlers can reopen the append writer while they persist their
@@ -5178,11 +4990,7 @@ export class AgentSession {
 				await this.agent.waitForIdle();
 				await this.#drainInFlightEventHandlers();
 				this.#releaseRetainedSessionMemory();
-			})().catch(error =>
-				logger.warn("Deferred dispose finalization failed", {
-					error: String(error),
-				}),
-			);
+			})().catch(error => logger.warn("Deferred dispose finalization failed", { error: String(error) }));
 		}
 	}
 
@@ -5547,10 +5355,7 @@ export class AgentSession {
 		const previousAllowAcpAgentInitiatedTurns = this.#allowAcpAgentInitiatedTurns;
 		this.#allowAcpAgentInitiatedTurns = true;
 		try {
-			const drained = await manager.drainDeliveries({
-				timeoutMs: options?.timeoutMs,
-				filter: ownerFilter,
-			});
+			const drained = await manager.drainDeliveries({ timeoutMs: options?.timeoutMs, filter: ownerFilter });
 			const after = manager.getDeliveryState(ownerFilter);
 			return drained && (before.queued !== after.queued || before.delivering !== after.delivering);
 		} finally {
@@ -5953,10 +5758,7 @@ export class AgentSession {
 	}
 
 	/** Scoped models for cycling (from --models flag) */
-	get scopedModels(): ReadonlyArray<{
-		model: Model;
-		thinkingLevel?: ThinkingLevel;
-	}> {
+	get scopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> {
 		return this.#models.scopedModels;
 	}
 
@@ -6323,10 +6125,7 @@ export class AgentSession {
 		return {
 			role: "custom",
 			customType: "goal-mode-context",
-			content: prompt.render(goalModeContextPrompt, {
-				goalContext: content,
-				todoContext,
-			}),
+			content: prompt.render(goalModeContextPrompt, { goalContext: content, todoContext }),
 			display: false,
 			attribution: "agent",
 			timestamp: Date.now(),
@@ -6375,10 +6174,7 @@ export class AgentSession {
 				} else {
 					open++;
 				}
-				return {
-					content: this.#sanitizeGoalTodoText(task.content),
-					status: task.status,
-				};
+				return { content: this.#sanitizeGoalTodoText(task.content), status: task.status };
 			}),
 		}));
 
@@ -6410,10 +6206,7 @@ export class AgentSession {
 			notices.push({
 				role: "custom",
 				customType: "video-attachment",
-				content: prompt.render(videoAttachmentPrompt, {
-					index: String(index + 1),
-					path: sourcePath,
-				}),
+				content: prompt.render(videoAttachmentPrompt, { index: String(index + 1), path: sourcePath }),
 				display: false,
 				attribution: "user",
 				timestamp,
@@ -6684,12 +6477,7 @@ export class AgentSession {
 					synthetic: true,
 					userInitiated: options?.userInitiated === true ? true : undefined,
 				}
-			: {
-					role: "user" as const,
-					content: userContent,
-					attribution: promptAttribution,
-					timestamp: submittedAt,
-				};
+			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: submittedAt };
 
 		const preludeMessages: AgentMessage[] = [];
 		if (eagerTodoPrelude) {
@@ -7165,12 +6953,9 @@ export class AgentSession {
 			}
 
 			const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
-			const nonMessageTokens = computeNonMessageTokens(this, this.agent.tokenizer);
+			const nonMessageTokens = computeNonMessageTokens(this, this.agent.tokenizer, this.settings.revision);
 			const contextWindow = this.model?.contextWindow ?? 0;
-			const breakdown = this.getContextBreakdown({
-				contextWindow,
-				pendingMessages: messages,
-			});
+			const breakdown = this.getContextBreakdown({ contextWindow, pendingMessages: messages });
 			const promptTokens =
 				breakdown?.usedTokens ??
 				nonMessageTokens +
@@ -7246,7 +7031,6 @@ export class AgentSession {
 		}
 
 		return {
-			companion: getCompanionBridge(this.sessionManager).context(),
 			ui: noOpUIContext,
 			mode: "print",
 			hasUI: false,
@@ -7273,9 +7057,7 @@ export class AgentSession {
 			getAsyncJobSnapshot: () => this.getAsyncJobSnapshot(),
 			waitForIdle: () => this.waitForIdle(),
 			newSession: async options => {
-				const success = await this.newSession({
-					parentSession: options?.parentSession,
-				});
+				const success = await this.newSession({ parentSession: options?.parentSession });
 				if (!success) {
 					return { cancelled: true };
 				}
@@ -7289,9 +7071,7 @@ export class AgentSession {
 				return { cancelled: result.cancelled };
 			},
 			navigateTree: async (targetId, options) => {
-				const result = await this.navigateTree(targetId, {
-					summarize: options?.summarize,
-				});
+				const result = await this.navigateTree(targetId, { summarize: options?.summarize });
 				return { cancelled: result.cancelled };
 			},
 			compact: async instructionsOrOptions => {
@@ -8070,10 +7850,7 @@ export class AgentSession {
 		);
 	}
 
-	getQueuedMessages(): {
-		steering: readonly string[];
-		followUp: readonly string[];
-	} {
+	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[] } {
 		return {
 			steering: this.agent.peekSteeringQueue().filter(isUserQueuedMessage).map(queueChipText),
 			followUp: this.agent.peekFollowUpQueue().filter(isUserQueuedMessage).map(queueChipText),
@@ -8473,9 +8250,7 @@ export class AgentSession {
 			// finishes, or the replacement turn's events are neither forwarded nor persisted.
 			await manualCompactionCleanup;
 			await this.#drainAutolearnCapture();
-			await this.#goalRuntime.onTaskAborted({
-				reason: options?.goalReason ?? "interrupted",
-			});
+			await this.#goalRuntime.onTaskAborted({ reason: options?.goalReason ?? "interrupted" });
 			// Clear prompt-in-flight state: waitForIdle resolves when the agent loop's finally
 			// block runs, but nested prompt setup/finalizers may still be unwinding. Without this,
 			// a subsequent prompt() can incorrectly observe the session as busy after an abort.
@@ -8538,9 +8313,7 @@ export class AgentSession {
 		this.#cancelOwnAsyncJobs();
 		this.#closeAllProviderSessions("new session");
 		await this.#bash.flushPending();
-		const bashTransition = this.#bash.beginSessionTransition({
-			persistDetached: options?.drop !== true,
-		});
+		const bashTransition = this.#bash.beginSessionTransition({ persistDetached: options?.drop !== true });
 		let sessionTransitioned = false;
 		try {
 			advisorRecordersDetached = true;
@@ -8548,6 +8321,7 @@ export class AgentSession {
 			try {
 				this.#releaseQueuedTtsrReservations();
 				this.agent.reset();
+				this.tokenRate.reset();
 				if (options?.drop && previousSessionFile) {
 					try {
 						await this.sessionManager.dropSession(previousSessionFile);
@@ -8863,9 +8637,7 @@ export class AgentSession {
 				await this.sendCustomMessage(
 					{
 						customType: "skillful-notice",
-						content: prompt.render(skillfulNoticePrompt, {
-							skills: renderedSkills,
-						}),
+						content: prompt.render(skillfulNoticePrompt, { skills: renderedSkills }),
 						display: false,
 					},
 					{ deliverAs: "nextTurn" },
@@ -9053,9 +8825,7 @@ export class AgentSession {
 				logger.warn("Rewind branch checkpoint missing, falling back to root", {
 					error: error instanceof Error ? error.message : String(error),
 				});
-				this.sessionManager.branchWithSummary(null, report, {
-					startedAt: checkpointState.startedAt,
-				});
+				this.sessionManager.branchWithSummary(null, report, { startedAt: checkpointState.startedAt });
 			}
 		});
 
@@ -9068,11 +8838,7 @@ export class AgentSession {
 			details,
 			"agent",
 		);
-		this.#lastCompletedRewind = {
-			report,
-			startedAt: checkpointState.startedAt,
-			rewoundAt,
-		};
+		this.#lastCompletedRewind = { report, startedAt: checkpointState.startedAt, rewoundAt };
 
 		if (activeMessages) {
 			for (const message of activeMessages) {
@@ -9179,9 +8945,7 @@ export class AgentSession {
 				await this.#setModelWithProviderSessionReset(updated);
 			}
 		} catch (error) {
-			logger.warn("extended-context policy reapply failed", {
-				error: String(error),
-			});
+			logger.warn("extended-context policy reapply failed", { error: String(error) });
 		}
 	}
 
@@ -9223,18 +8987,14 @@ export class AgentSession {
 			try {
 				await this.#tools.reconcileCodeMode();
 			} catch (error) {
-				logger.warn("Code Mode reconcile after model change failed", {
-					error: String(error),
-				});
+				logger.warn("Code Mode reconcile after model change failed", { error: String(error) });
 			}
 		}
 
 		try {
 			await this.#tools.reconcileThinkTool();
 		} catch (error) {
-			logger.warn("think tool reconcile after model change failed", {
-				error: String(error),
-			});
+			logger.warn("think tool reconcile after model change failed", { error: String(error) });
 		}
 	}
 
@@ -9398,11 +9158,7 @@ export class AgentSession {
 	executeBash(
 		command: string,
 		onChunk?: (chunk: string) => void,
-		options?: {
-			excludeFromContext?: boolean;
-			useUserShell?: boolean;
-			pty?: BashPtyOptions;
-		},
+		options?: { excludeFromContext?: boolean; useUserShell?: boolean; pty?: BashPtyOptions },
 	): Promise<BashResult> {
 		return this.#bash.executeBash(command, onChunk, options);
 	}
@@ -9602,10 +9358,7 @@ export class AgentSession {
 				// instead of turning a malformed side-channel response into a session-mute crash.
 				const rawContent = Array.isArray(event.message.content) ? event.message.content : [];
 				assistantMessage = this.#obfuscator?.hasSecrets()
-					? {
-							...event.message,
-							content: deobfuscateAssistantContent(this.#obfuscator, rawContent),
-						}
+					? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
 					: { ...event.message, content: rawContent };
 				break;
 			}
@@ -9855,6 +9608,7 @@ export class AgentSession {
 			}
 
 			this.agent.replaceMessages(sessionContext.messages);
+			this.#reseedTokenRate();
 			this.#advisors.resetSessionState({ preserveCost: true });
 			this.#todo.syncFromBranch();
 			this.#modelMentions.syncFromBranch();
@@ -9972,9 +9726,7 @@ export class AgentSession {
 			// of restarting at zero.
 			if (switchingToDifferentSession) {
 				const providersBySlug = new Map<string, Set<string>>();
-				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, {
-					providersBySlug,
-				});
+				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, { providersBySlug });
 				this.#advisors.restoreCost(costs, providersBySlug);
 			}
 			this.#bash.finishSessionTransition(bashTransition, true);
@@ -10061,9 +9813,7 @@ export class AgentSession {
 				if (rollbackFailure) {
 					this.beginDispose();
 					this.#bash.finishSessionTransition(bashTransition, false);
-					logger.warn("Failed to restore cwd after session switch", {
-						cwd: previousSessionState.cwd,
-					});
+					logger.warn("Failed to restore cwd after session switch", { cwd: previousSessionState.cwd });
 					const original = error instanceof Error ? error.message : String(error);
 					throw new Error(`${original} (${rollbackFailure}; the process may remain in ${cwdChangeTarget})`);
 				}
@@ -10140,9 +9890,7 @@ export class AgentSession {
 				if (!selectedEntry.parentId) {
 					const title = this.sessionManager.getSessionName();
 					const titleSource = this.sessionManager.titleSource;
-					await this.sessionManager.newSession({
-						parentSession: previousSessionFile,
-					});
+					await this.sessionManager.newSession({ parentSession: previousSessionFile });
 					if (title) await this.sessionManager.setSessionName(title, titleSource);
 				} else {
 					this.sessionManager.createBranchedSession(selectedEntry.parentId);
@@ -10168,7 +9916,6 @@ export class AgentSession {
 
 			// Emit session_branch event to hooks (after branch completes)
 			if (this.#extensionRunner) {
-				getCompanionBridge(this.sessionManager).reset();
 				await this.#extensionRunner.emit({
 					type: "session_branch",
 					previousSessionFile,
@@ -10305,7 +10052,6 @@ export class AgentSession {
 			const sessionContext = this.buildDisplaySessionContext();
 
 			if (this.#extensionRunner) {
-				getCompanionBridge(this.sessionManager).reset();
 				await this.#extensionRunner.emit({
 					type: "session_branch",
 					previousSessionFile,
@@ -10654,7 +10400,6 @@ export class AgentSession {
 		// `renderInitialMessages(...)` (issue #6483). Plain leaf moves and the
 		// read-only `reopenAsk` probe leave the flag unset.
 
-		getCompanionBridge(this.sessionManager).reset();
 		// Emit session_tree event; only handlers can mutate session entries, so skip
 		// the emit and the context rebuild when no handlers are registered (mirrors
 		// the session_before_tree guard above).
@@ -11015,11 +10760,7 @@ export class AgentSession {
 			activeBlockUnblockAtMs,
 		});
 		if (plan.skipped.length > 0) {
-			logger.debug("codex-auto-reset: plan", {
-				trigger,
-				actions: plan.actions.length,
-				skipped: plan.skipped,
-			});
+			logger.debug("codex-auto-reset: plan", { trigger, actions: plan.actions.length, skipped: plan.skipped });
 		}
 		return plan;
 	}
@@ -11095,9 +10836,7 @@ export class AgentSession {
 					);
 					break;
 				case "no_credit":
-					logger.debug("codex-auto-reset: no_credit (snapshot/live mismatch)", {
-						account: action.accountKey,
-					});
+					logger.debug("codex-auto-reset: no_credit (snapshot/live mismatch)", { account: action.accountKey });
 					break;
 				case "nothing_to_reset":
 					// Routine for opportunistic salvage on a partially-used window —
@@ -11109,9 +10848,7 @@ export class AgentSession {
 							"codex-auto-reset",
 						);
 					} else {
-						logger.debug("codex-auto-reset: nothing_to_reset deferred", {
-							account: action.accountKey,
-						});
+						logger.debug("codex-auto-reset: nothing_to_reset deferred", { account: action.accountKey });
 					}
 					break;
 				default:
@@ -11197,10 +10934,7 @@ export class AgentSession {
 			.catch(error => {
 				// Eligibility IO (cache invalidation / usage fetch) failed; the
 				// retry pipeline must keep running, so a blocked pass never rejects.
-				logger.warn("codex-auto-reset: blocked pass failed", {
-					account: accountKey,
-					error: String(error),
-				});
+				logger.warn("codex-auto-reset: blocked pass failed", { account: accountKey, error: String(error) });
 				return false;
 			})
 			.finally(() => coordinator.inFlightByAccount.delete(accountKey));
@@ -11561,10 +11295,7 @@ export class AgentSession {
 	 * flag and per-advisor name/status without computing token/cost breakdowns.
 	 * Avoids re-tokenizing the advisor transcript on every render frame.
 	 */
-	getAdvisorStatusOverview(): {
-		configured: boolean;
-		advisors: AdvisorStatusOverviewEntry[];
-	} {
+	getAdvisorStatusOverview(): { configured: boolean; advisors: AdvisorStatusOverviewEntry[] } {
 		return this.#advisors.getAdvisorStatusOverview();
 	}
 

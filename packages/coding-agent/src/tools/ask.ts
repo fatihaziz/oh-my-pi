@@ -1,3 +1,4 @@
+import type { AskToolDetails, QuestionResult } from "@oh-my-pi/pi-tui/tools/ask";
 /**
  * Ask Tool - Interactive user prompting during execution
  *
@@ -18,35 +19,20 @@
 import { type as arkType } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
-import {
-	type Component,
-	Ellipsis,
-	Markdown,
-	type MarkdownTheme,
-	renderInlineMarkdown,
-	replaceTabs,
-	TERMINAL,
-	Text,
-	truncateToWidth,
-	visibleWidth,
-} from "@oh-my-pi/pi-tui";
+import { Ellipsis, replaceTabs, TERMINAL, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import type { RenderResultOptions } from "../extensibility/custom-tools/types";
+
 import type { ExtensionUISelectItem } from "../extensibility/extensions";
-import { getMarkdownTheme, type Theme, theme } from "../modes/theme/theme";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
-import { getCompanionBridge } from "../session/companion";
 import { vocalizer } from "../tts/vocalizer";
-import { framedBlock, outputBlockContentWidth, renderStatusLine } from "../tui";
+
 import type { ToolSession } from ".";
 import {
 	disambiguateDisplayLabels,
-	formatErrorMessage,
-	formatMeta,
-	formatTitle,
 	sanitizeCarriageReturns,
 	TRUNCATE_LENGTHS,
-} from "./render-utils";
+} from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolAbortError } from "./tool-errors";
 
 // =============================================================================
@@ -102,38 +88,6 @@ export function recoverAskQuestions(toolCallArguments: unknown): AskToolInput["q
 	const parsed = askSchema(toolCallArguments);
 	if (parsed instanceof arkType.errors) return undefined;
 	return parsed.questions;
-}
-
-/** Result for a single question */
-export interface QuestionResult {
-	id: string;
-	question: string;
-	options: string[];
-	multi: boolean;
-	selectedOptions: string[];
-	customInput?: string;
-	/** Optional note attached to the selected answer in the rich ask dialog. */
-	note?: string;
-	/** True when the answer was auto-selected because the dialog timed out. */
-	timedOut?: boolean;
-}
-
-export interface AskToolDetails {
-	question?: string;
-	options?: string[];
-	multi?: boolean;
-	selectedOptions?: string[];
-	customInput?: string;
-	/** Optional note attached to the selected answer in the rich ask dialog. */
-	note?: string;
-	/** True when the answer was auto-selected because the dialog timed out. */
-	timedOut?: boolean;
-	/** Multi-part question mode */
-	results?: QuestionResult[];
-	/** Chat redirect: the user chose "Chat about this" instead of answering. */
-	chatRedirect?: boolean;
-	/** Questions surfaced when chatRedirect is true. */
-	questions?: string[];
 }
 
 interface AskOption {
@@ -352,10 +306,7 @@ function buildCustomInputRows(
 					: isSelected
 						? `${theme.nav.cursor} `
 						: "  ";
-		rows.push({
-			text: clampLineToWidth(prefix + label, contentWidth),
-			priority: -1,
-		});
+		rows.push({ text: clampLineToWidth(prefix + label, contentWidth), priority: -1 });
 		const description = getSelectOptionDescription(option);
 		if (description) {
 			const flat = flattenDescription(description);
@@ -478,16 +429,8 @@ async function askSingleQuestion(
 		prompt: string,
 		optionsToShow: ExtensionUISelectItem[],
 		initialIndex?: number,
-		marker?: {
-			selectionMarker: "radio" | "checkbox";
-			checkedIndices?: readonly number[];
-			markableCount: number;
-		},
-	): Promise<{
-		choice: string | undefined;
-		timedOut: boolean;
-		navigation?: "back" | "forward";
-	}> => {
+		marker?: { selectionMarker: "radio" | "checkbox"; checkedIndices?: readonly number[]; markableCount: number },
+	): Promise<{ choice: string | undefined; timedOut: boolean; navigation?: "back" | "forward" }> => {
 		let timeoutTriggered = false;
 		const onTimeout = () => {
 			timeoutTriggered = true;
@@ -552,18 +495,10 @@ async function askSingleQuestion(
 				const elapsed = Date.now() - timeoutStartedMs;
 				timeoutTriggered = elapsed >= timeout && elapsed <= timeout + TIMEOUT_DETECTION_TOLERANCE_MS;
 			}
-			return {
-				choice,
-				timedOut: timeoutTriggered,
-				navigation: navigationAction,
-			};
+			return { choice, timedOut: timeoutTriggered, navigation: navigationAction };
 		} catch (error) {
 			if (timeoutTriggered && error instanceof Error && error.name === "AbortError") {
-				return {
-					choice: undefined,
-					timedOut: true,
-					navigation: navigationAction,
-				};
+				return { choice: undefined, timedOut: true, navigation: navigationAction };
 			}
 			throw error;
 		} finally {
@@ -616,26 +551,14 @@ async function askSingleQuestion(
 			});
 
 			if (arrowNavigation) {
-				return {
-					selectedOptions: Array.from(selected),
-					customInput,
-					note,
-					timedOut,
-					navigation: arrowNavigation,
-				};
+				return { selectedOptions: Array.from(selected), customInput, note, timedOut, navigation: arrowNavigation };
 			}
 			if (choice === undefined) {
 				if (selectTimedOut) {
 					timedOut = true;
 					break;
 				}
-				return {
-					selectedOptions: Array.from(selected),
-					customInput,
-					note,
-					timedOut,
-					cancelled: true,
-				};
+				return { selectedOptions: Array.from(selected), customInput, note, timedOut, cancelled: true };
 			}
 			if (choice === doneLabel) break;
 
@@ -709,23 +632,11 @@ async function askSingleQuestion(
 			timedOut = selectTimedOut;
 
 			if (arrowNavigation) {
-				return {
-					selectedOptions,
-					customInput,
-					note,
-					timedOut,
-					navigation: arrowNavigation,
-				};
+				return { selectedOptions, customInput, note, timedOut, navigation: arrowNavigation };
 			}
 			if (choice === undefined) {
 				if (!timedOut) {
-					return {
-						selectedOptions,
-						customInput,
-						note,
-						timedOut,
-						cancelled: true,
-					};
+					return { selectedOptions, customInput, note, timedOut, cancelled: true };
 				}
 				break;
 			}
@@ -757,13 +668,7 @@ async function askSingleQuestion(
 			selectedOptions = getAutoSelectionOnTimeout(questionOptions, recommended);
 		}
 		if (navigation?.allowForward) {
-			return {
-				selectedOptions,
-				customInput,
-				note,
-				timedOut,
-				navigation: "forward",
-			};
+			return { selectedOptions, customInput, note, timedOut, navigation: "forward" };
 		}
 	}
 
@@ -856,14 +761,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						id: "auth_method",
 						question: "Which authentication method should this API use?",
 						options: [
-							{
-								label: "JWT",
-								description: "Bearer tokens for stateless API clients.",
-							},
-							{
-								label: "OAuth2",
-								description: "Delegated authorization with external identity providers.",
-							},
+							{ label: "JWT", description: "Bearer tokens for stateless API clients." },
+							{ label: "OAuth2", description: "Delegated authorization with external identity providers." },
 							{
 								label: "Session cookies",
 								description: "Browser-first authentication backed by server-side sessions.",
@@ -1048,7 +947,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const richAskDialog = extensionUi.askDialog;
 		if (richAskDialog) {
 			try {
-				const showRichDialog = (dialogSignal = signal) =>
+				const showRichDialog = () =>
 					richAskDialog(
 						params.questions.map(q => ({
 							id: q.id,
@@ -1062,13 +961,9 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 							...(q.multi !== undefined ? { multi: q.multi } : {}),
 							...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
 						})),
-						{ timeout: timeout ?? undefined, signal: dialogSignal },
+						{ timeout: timeout ?? undefined, signal },
 					);
-				const richResult = this.session.sessionManager?.getSessionId
-					? await getCompanionBridge(this.session.sessionManager).ask(params.questions, showRichDialog, signal)
-					: signal
-						? await untilAborted(signal, showRichDialog)
-						: await showRichDialog();
+				const richResult = signal ? await untilAborted(signal, showRichDialog) : await showRichDialog();
 				if (!richResult) {
 					context.abort();
 					throw new ToolAbortError("Ask tool was cancelled by the user");
@@ -1082,10 +977,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 								text: `User chose to chat about this instead of answering.\n\nQuestions asked:\n${questionText}`,
 							},
 						],
-						details: {
-							chatRedirect: true,
-							questions: params.questions.map(q => q.question),
-						},
+						details: { chatRedirect: true, questions: params.questions.map(q => q.question) },
 					};
 				}
 				if (richResult.results.length !== params.questions.length) {
@@ -1134,17 +1026,11 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						timedOut: result.timedOut,
 					};
 					const responseText = formatSingleQuestionResponse(result);
-					return {
-						content: [{ type: "text" as const, text: responseText }],
-						details,
-					};
+					return { content: [{ type: "text" as const, text: responseText }], details };
 				}
 				const details: AskToolDetails = { results };
 				const responseText = `User answers:\n${results.map(formatQuestionResult).join("\n")}`;
-				return {
-					content: [{ type: "text" as const, text: responseText }],
-					details,
-				};
+				return { content: [{ type: "text" as const, text: responseText }], details };
 			} catch (error) {
 				if (error instanceof Error && error.name === "AbortError") {
 					throw new ToolAbortError("Ask input was cancelled");
@@ -1176,15 +1062,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						navigation: options?.navigation,
 					},
 				);
-				return {
-					optionLabels,
-					selectedOptions,
-					customInput,
-					note,
-					navigation,
-					cancelled,
-					timedOut,
-				};
+				return { optionLabels, selectedOptions, customInput, note, navigation, cancelled, timedOut };
 			} catch (error) {
 				if (error instanceof Error && error.name === "AbortError") {
 					throw new ToolAbortError("Ask input was cancelled");
@@ -1219,15 +1097,10 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				multi: q.multi ?? false,
 			});
 
-			return {
-				content: [{ type: "text" as const, text: responseText }],
-				details,
-			};
+			return { content: [{ type: "text" as const, text: responseText }], details };
 		}
 
-		const resultsByIndex: Array<QuestionResult | undefined> = Array.from({
-			length: params.questions.length,
-		});
+		const resultsByIndex: Array<QuestionResult | undefined> = Array.from({ length: params.questions.length });
 		let questionIndex = 0;
 		while (questionIndex < params.questions.length) {
 			const q = params.questions[questionIndex];
@@ -1288,60 +1161,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const responseLines = results.map(formatQuestionResult);
 		const responseText = `User answers:\n${responseLines.join("\n")}`;
 
-		return {
-			content: [{ type: "text" as const, text: responseText }],
-			details,
-		};
+		return { content: [{ type: "text" as const, text: responseText }], details };
 	}
-}
-
-// =============================================================================
-// TUI Renderer
-// =============================================================================
-
-interface AskRenderOption {
-	label: string;
-	description?: string;
-}
-
-interface AskRenderArgs {
-	question?: string;
-	options?: AskRenderOption[];
-	multi?: boolean;
-	questions?: Array<{
-		id: string;
-		question: string;
-		options: AskRenderOption[];
-		multi?: boolean;
-	}>;
-}
-
-/**
- * Coerce an untrusted option list (streamed or model-mangled call args) into
- * well-formed render options. Bare strings become labels; entries without a
- * string label are dropped.
- */
-function normalizeRenderOptions(raw: unknown): AskRenderOption[] | undefined {
-	if (!Array.isArray(raw)) return undefined;
-	const out: AskRenderOption[] = [];
-	for (const entry of raw) {
-		if (typeof entry === "string") {
-			out.push({ label: sanitizeCarriageReturns(entry) });
-			continue;
-		}
-		if (!entry || typeof entry !== "object") continue;
-		const { label, description } = entry as Partial<AskRenderOption>;
-		if (typeof label !== "string") continue;
-		out.push(
-			typeof description === "string"
-				? {
-						label: sanitizeCarriageReturns(label),
-						description: sanitizeCarriageReturns(description),
-					}
-				: { label: sanitizeCarriageReturns(label) },
-		);
-	}
-	return out;
 }
 
 /**
@@ -1372,404 +1193,3 @@ function sanitizeAskParams(params: AskParams): AskParams {
 		})),
 	};
 }
-
-/**
- * Strip the `\r` runs degenerate models inject from persisted result details,
- * so transcripts completed before params sanitization still render as prose.
- * Display-only — the persisted payload is untouched.
- */
-function sanitizeAskResultDetails(details: AskToolDetails): AskToolDetails {
-	return {
-		...details,
-		...(details.question !== undefined ? { question: sanitizeCarriageReturns(details.question) } : {}),
-		...(details.options !== undefined ? { options: details.options.map(sanitizeCarriageReturns) } : {}),
-		...(details.selectedOptions !== undefined
-			? {
-					selectedOptions: details.selectedOptions.map(sanitizeCarriageReturns),
-				}
-			: {}),
-		...(details.customInput !== undefined ? { customInput: sanitizeCarriageReturns(details.customInput) } : {}),
-		...(details.note !== undefined ? { note: sanitizeCarriageReturns(details.note) } : {}),
-		...(details.questions !== undefined ? { questions: details.questions.map(sanitizeCarriageReturns) } : {}),
-		...(details.results !== undefined
-			? {
-					results: details.results.map(entry => ({
-						...entry,
-						id: sanitizeCarriageReturns(entry.id),
-						question: sanitizeCarriageReturns(entry.question),
-						options: entry.options.map(sanitizeCarriageReturns),
-						selectedOptions: entry.selectedOptions.map(sanitizeCarriageReturns),
-						...(entry.customInput !== undefined
-							? { customInput: sanitizeCarriageReturns(entry.customInput) }
-							: {}),
-						...(entry.note !== undefined ? { note: sanitizeCarriageReturns(entry.note) } : {}),
-					})),
-				}
-			: {}),
-	};
-}
-/**
- * Coerce untrusted `questions` call args into a renderable array. Models
- * occasionally double-encode the array as a JSON string — a bare string passes
- * a truthy `.length` check but has no `.map`, which used to crash the TUI
- * render loop. Partially streamed args can also be missing fields.
- */
-function normalizeRenderQuestions(raw: unknown): NonNullable<AskRenderArgs["questions"]> | undefined {
-	if (typeof raw === "string") {
-		try {
-			raw = JSON.parse(raw);
-		} catch {
-			return undefined;
-		}
-	}
-	if (!Array.isArray(raw)) return undefined;
-	const out: NonNullable<AskRenderArgs["questions"]> = [];
-	for (const entry of raw) {
-		if (!entry || typeof entry !== "object") continue;
-		const q = entry as Partial<NonNullable<AskRenderArgs["questions"]>[number]>;
-		out.push({
-			id: typeof q.id === "string" ? sanitizeCarriageReturns(q.id) : "?",
-			question: typeof q.question === "string" ? sanitizeCarriageReturns(q.question) : "",
-			options: normalizeRenderOptions(q.options) ?? [],
-			multi: q.multi === true,
-		});
-	}
-	return out;
-}
-
-/** Render a custom free-text answer as a status line plus indented continuation rows. */
-function renderCustomInputLines(uiTheme: Theme, customInput: string): string[] {
-	const lines = customInput.split("\n");
-	const out: string[] = [
-		` ${uiTheme.styledSymbol("status.success", "success")} ${uiTheme.fg("toolOutput", lines[0] ?? "")}`,
-	];
-	for (let i = 1; i < lines.length; i++) out.push(`   ${uiTheme.fg("toolOutput", lines[i])}`);
-	return out;
-}
-
-/** Render an answer note with tab replacement and line-width clamping. */
-function renderNoteLines(uiTheme: Theme, note: string, width: number): string[] {
-	const prefix = " Note: ";
-	const continuationPrefix = "       ";
-	const firstLineWidth = Math.max(1, width - visibleWidth(prefix));
-	const continuationWidth = Math.max(1, width - visibleWidth(continuationPrefix));
-	return replaceTabs(note)
-		.split("\n")
-		.map((line, index) => {
-			const linePrefix = index === 0 ? `${uiTheme.fg("dim", " Note:")} ` : continuationPrefix;
-			const maxWidth = index === 0 ? firstLineWidth : continuationWidth;
-			return `${linePrefix}${uiTheme.fg("toolOutput", truncateToWidth(line, maxWidth))}`;
-		});
-}
-
-/**
- * Marker glyph for a question option. Single-choice questions render circular radio
- * buttons (pick one); multi-select questions render rectangular checkboxes (pick many).
- */
-function optionMarker(uiTheme: Theme, multi: boolean | undefined, selected: boolean): string {
-	if (multi) return selected ? uiTheme.checkbox.checked : uiTheme.checkbox.unchecked;
-	return selected ? uiTheme.radio.selected : uiTheme.radio.unselected;
-}
-
-/** Render the offered options for a question form as flat marker bullets (no tree guides). */
-function renderQuestionOptionLines(
-	uiTheme: Theme,
-	mdTheme: MarkdownTheme,
-	options: AskRenderOption[],
-	multi: boolean | undefined,
-): string[] {
-	const out: string[] = [];
-	for (const opt of options) {
-		const optLabel = renderInlineMarkdown(opt.label, mdTheme, t => uiTheme.fg("muted", t));
-		out.push(` ${uiTheme.fg("dim", optionMarker(uiTheme, multi, false))} ${optLabel}`);
-		if (opt.description?.trim()) {
-			const description = renderInlineMarkdown(opt.description.trim(), mdTheme, t => uiTheme.fg("dim", t));
-			out.push(`   ${uiTheme.fg("dim", "↳")} ${description}`);
-		}
-	}
-	return out;
-}
-
-/**
- * Resolve selected labels to option indices against the RAW persisted labels.
- * Sanitizing can merge distinct options (`Retry\rnow`/`Retry now`) into one
- * display label, after which a label set would mark every colliding row —
- * indices survive normalization because it preserves order and length.
- * Every option exactly matching a selected label is marked: the legacy
- * selector recorded a single occurrence for duplicate rows it marked
- * together, while the rich dialog recorded one entry per row, and both
- * shapes must replay as originally shown.
- * Returns undefined when raw options are missing so the caller falls back to
- * label matching.
- */
-function selectedIndicesFor(
-	rawOptions: string[] | undefined,
-	rawSelected: string[] | undefined,
-): Set<number> | undefined {
-	if (!rawOptions || rawOptions.length === 0) return undefined;
-	const wanted = new Set(rawSelected ?? []);
-	const indices = new Set<number>();
-	rawOptions.forEach((option, index) => {
-		if (wanted.has(option)) indices.add(index);
-	});
-	return indices;
-}
-/**
- * Render the answered option list for a question: every offered option with its
- * selection marker filled in, plus any custom free-text answer. Flat marker
- * bullets — the frame is the container, so no tree guides are drawn.
- */
-function renderAnswerOptionLines(
-	uiTheme: Theme,
-	mdTheme: MarkdownTheme,
-	options: string[] | undefined,
-	selectedOptions: string[] | undefined,
-	multi: boolean | undefined,
-	customInput: string | undefined,
-	note: string | undefined,
-	width: number,
-	selectedIndices?: ReadonlySet<number>,
-): string[] {
-	const selected = new Set(selectedOptions ?? []);
-	// Prefer the full recorded option set; fall back to the selected labels when
-	// details omit the options array.
-	const list = options && options.length > 0 ? options : (selectedOptions ?? []);
-
-	// Nothing was chosen (and no custom answer) → a lone cancelled marker.
-	if (selected.size === 0 && customInput === undefined && note === undefined) {
-		return [` ${uiTheme.styledSymbol("status.warning", "warning")} ${uiTheme.fg("warning", "Cancelled")}`];
-	}
-
-	const out: string[] = [];
-	for (const [index, label] of list.entries()) {
-		const isSelected = selectedIndices !== undefined ? selectedIndices.has(index) : selected.has(label);
-		const marker = optionMarker(uiTheme, multi, isSelected);
-		const markerStyled = isSelected ? uiTheme.fg("success", marker) : uiTheme.fg("dim", marker);
-		const labelStyled = renderInlineMarkdown(label, mdTheme, t =>
-			isSelected ? uiTheme.fg("toolOutput", t) : uiTheme.fg("muted", t),
-		);
-		out.push(` ${markerStyled} ${labelStyled}`);
-	}
-	if (customInput !== undefined) out.push(...renderCustomInputLines(uiTheme, customInput));
-	if (note !== undefined) out.push(...renderNoteLines(uiTheme, note, width));
-	return out;
-}
-
-export const askToolRenderer = {
-	mergeCallAndResult: true,
-	renderCall(args: AskRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
-		const label = formatTitle("Ask", uiTheme);
-		const mdTheme = getMarkdownTheme();
-		const accentStyle = { color: (t: string) => uiTheme.fg("accent", t) };
-		const md = (text: string, width: number) =>
-			new Markdown(text, 1, 0, mdTheme, accentStyle).render(Math.max(1, outputBlockContentWidth(width) + 1));
-
-		// Multi-part questions: one divider-labelled section per question.
-		// Call args are untrusted (partially streamed or model-mangled) and a
-		// throw here takes down the whole TUI render loop — normalize first.
-		const questions = normalizeRenderQuestions(args.questions);
-		if (questions && questions.length > 0) {
-			const header = `${label} ${uiTheme.fg("muted", `${questions.length} questions`)}`;
-			return framedBlock(uiTheme, width => {
-				const sections = questions.map(q => {
-					const meta: string[] = [];
-					if (q.multi) meta.push("multi");
-					if (q.options?.length) meta.push(`options:${q.options.length}`);
-					const metaStr = meta.length > 0 ? uiTheme.fg("dim", ` · ${meta.join(" · ")}`) : "";
-					// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
-					const mdLines = md(q.question, width);
-					const lines = q.options?.length
-						? [...mdLines, ...renderQuestionOptionLines(uiTheme, mdTheme, q.options, q.multi)]
-						: mdLines;
-					return {
-						label: `${uiTheme.fg("dim", `[${q.id}]`)}${metaStr}`,
-						lines,
-					};
-				});
-				return {
-					header,
-					sections,
-					state: "pending",
-					borderColor: "borderMuted",
-					width,
-				};
-			});
-		}
-
-		// Single question
-		if (typeof args.question !== "string" || !args.question) {
-			const errorLine = formatErrorMessage("No question provided", uiTheme);
-			return framedBlock(uiTheme, width => ({
-				header: errorLine,
-				sections: [],
-				state: "error",
-				borderColor: "error",
-				width,
-			}));
-		}
-
-		const question = sanitizeCarriageReturns(args.question);
-		const meta: string[] = [];
-		if (args.multi) meta.push("multi");
-		const questionOptions = normalizeRenderOptions(args.options);
-		if (questionOptions?.length) meta.push(`options:${questionOptions.length}`);
-		const header = `${label}${formatMeta(meta, uiTheme)}`;
-		const multi = args.multi;
-		return framedBlock(uiTheme, width => {
-			// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
-			const mdLines = md(question, width);
-			const bodyLines = questionOptions?.length
-				? [...mdLines, ...renderQuestionOptionLines(uiTheme, mdTheme, questionOptions, multi)]
-				: mdLines;
-			return {
-				header,
-				sections: bodyLines.length > 0 ? [{ lines: bodyLines }] : [],
-				state: "pending",
-				borderColor: "borderMuted",
-				width,
-			};
-		});
-	},
-
-	renderResult(
-		result: {
-			content: Array<{ type: string; text?: string }>;
-			details?: AskToolDetails;
-		},
-		_options: RenderResultOptions,
-		uiTheme: Theme,
-	): Component {
-		const rawDetails = result.details;
-		const mdTheme = getMarkdownTheme();
-		const accentStyle = { color: (t: string) => uiTheme.fg("accent", t) };
-		const md = (text: string, width: number) =>
-			new Markdown(text, 1, 0, mdTheme, accentStyle).render(Math.max(1, outputBlockContentWidth(width) + 1));
-
-		if (!rawDetails) {
-			const txt = result.content[0];
-			const fallback = txt?.type === "text" && txt.text ? sanitizeCarriageReturns(txt.text) : "";
-			const header = renderStatusLine({ icon: "warning", title: "Ask" }, uiTheme);
-			const body = fallback ? `\n${uiTheme.fg("dim", fallback)}` : "";
-			return new Text(`${header}${body}`, 0, 0);
-		}
-		const details = sanitizeAskResultDetails(rawDetails);
-
-		// Chat redirect: user chose "Chat about this" instead of answering.
-		if (details.chatRedirect) {
-			const header = renderStatusLine({ icon: "info", title: "Ask", meta: ["chat redirect"] }, uiTheme);
-			const questions = details.questions ?? [];
-			return framedBlock(uiTheme, width => ({
-				header,
-				sections: questions.length > 0 ? [{ lines: questions.flatMap(q => md(q, width)) }] : [],
-				state: "warning",
-				borderColor: "borderMuted",
-				width,
-			}));
-		}
-
-		// Multi-part results: one divider-labelled section per question.
-		if (details.results && details.results.length > 0) {
-			const results = details.results;
-			const hasAnySelection = results.some(
-				r =>
-					r.customInput !== undefined ||
-					r.note !== undefined ||
-					(r.selectedOptions && r.selectedOptions.length > 0),
-			);
-			const header = renderStatusLine(
-				{
-					icon: hasAnySelection ? "success" : "warning",
-					title: "Ask",
-					meta: [`${results.length} questions`],
-				},
-				uiTheme,
-			);
-			return framedBlock(uiTheme, width => {
-				const rawResults = rawDetails.results ?? [];
-				const sections = results.map((r, index) => {
-					// Sanitizing preserves order and length, so raw indices align with `r`.
-					const raw = rawResults[index];
-					// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
-					const lines = [
-						...md(r.question, width),
-						...renderAnswerOptionLines(
-							uiTheme,
-							mdTheme,
-							r.options,
-							r.selectedOptions,
-							r.multi,
-							r.customInput,
-							r.note,
-							width,
-							selectedIndicesFor(raw?.options, raw?.selectedOptions),
-						),
-					];
-					return { label: uiTheme.fg("dim", `[${r.id}]`), lines };
-				});
-				return {
-					header,
-					sections,
-					state: hasAnySelection ? "success" : "warning",
-					borderColor: "borderMuted",
-					width,
-				};
-			});
-		}
-
-		// Single question result
-		if (!details.question) {
-			const txt = result.content[0];
-			const fallback = txt?.type === "text" && txt.text ? sanitizeCarriageReturns(txt.text) : "";
-			return new Text(fallback, 0, 0);
-		}
-
-		const question = details.question;
-		const hasSelection =
-			details.customInput !== undefined ||
-			details.note !== undefined ||
-			(details.selectedOptions && details.selectedOptions.length > 0);
-		const header = renderStatusLine(
-			hasSelection
-				? {
-						iconOverride: uiTheme.styledSymbol("tool.ask", "accent"),
-						title: "Ask",
-					}
-				: { icon: "warning", title: "Ask" },
-			uiTheme,
-		);
-		const dOptions = details.options;
-		const dSelected = details.selectedOptions;
-		const dMulti = details.multi;
-		const dCustom = details.customInput;
-		const dNote = details.note;
-		const dTimedOut = details.timedOut;
-		return framedBlock(uiTheme, width => {
-			// md() returns a shared cached array (module-level Markdown LRU) — copy before appending.
-			const bodyLines = [
-				...md(question, width),
-				...renderAnswerOptionLines(
-					uiTheme,
-					mdTheme,
-					dOptions,
-					dSelected,
-					dMulti,
-					dCustom,
-					dNote,
-					width,
-					selectedIndicesFor(rawDetails.options, rawDetails.selectedOptions),
-				),
-			];
-			if (dTimedOut) {
-				// Distinguish auto-selection from a real user choice in the transcript.
-				bodyLines.push(uiTheme.fg("dim", "auto-selected after timeout — not a user choice"));
-			}
-			return {
-				header,
-				sections: bodyLines.length > 0 ? [{ lines: bodyLines }] : [],
-				state: hasSelection ? "success" : "warning",
-				borderColor: "borderMuted",
-				width,
-			};
-		});
-	},
-};
