@@ -150,7 +150,13 @@ import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { HookCommandContext } from "../extensibility/hooks/types";
-import type { Skill, SkillWarning } from "../extensibility/skills";
+import {
+	buildSkillPromptMessage,
+	getSkillSlashCommandName,
+	parseSkillInvocation,
+	type Skill,
+	type SkillWarning,
+} from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
 import { GoalRuntime } from "../goals/runtime";
@@ -304,6 +310,7 @@ import {
 	shouldEvaluateCodexAutoRedeem,
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
+import { getCompanionBridge } from "./companion";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
 import {
@@ -1237,6 +1244,33 @@ export class AgentSession {
 		this.#emit(queuedContinuation || ircContinuation ? { ...pending, isTerminal: false } : pending);
 	}
 
+	/** Resolve a `/skill:<name>` submission to the same user-attributed message the editor builds. */
+	async #buildCompanionSkillPrompt(text: string): Promise<
+		| {
+				message: Parameters<AgentSession["promptCustomMessage"]>[0];
+				options: { streamingBehavior: "followUp"; queueChipText: string };
+		  }
+		| undefined
+	> {
+		if (!text.startsWith("/")) return undefined;
+		const parsed = parseSkillInvocation(text);
+		if (!parsed) return undefined;
+		const wanted = getSkillSlashCommandName({ name: parsed.name });
+		const skill = this.skills.find(candidate => getSkillSlashCommandName(candidate) === wanted);
+		if (!skill) return undefined;
+		const built = await buildSkillPromptMessage(skill, parsed, "user");
+		return {
+			message: {
+				customType: SKILL_PROMPT_MESSAGE_TYPE,
+				content: built.message,
+				display: true,
+				details: built.details,
+				attribution: "user",
+			},
+			options: { streamingBehavior: "followUp", queueChipText: text },
+		};
+	}
+
 	/**
 	 * Arm prewalk outside the normal startup path so an explicit slash command starts immediately.
 	 */
@@ -1296,6 +1330,64 @@ export class AgentSession {
 		this.#reseedTokenRate();
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
+		getCompanionBridge(this.sessionManager).bind({
+			submit: async text => {
+				if (this.#isDisposed) throw new Error("Companion session is no longer active");
+				const accepted = Promise.withResolvers<void>();
+				const unsubscribe = this.subscribe(event => {
+					if (event.type !== "agent_start") return;
+					unsubscribe();
+					accepted.resolve();
+				});
+				// A submitted `/skill:<name>` must run the skill, exactly as the editor
+				// does; `prompt` alone would send the command as literal text.
+				const skill = await this.#buildCompanionSkillPrompt(text);
+				const dispatched = skill
+					? this.promptCustomMessage(skill.message, skill.options)
+					: this.prompt(text, { streamingBehavior: "followUp" });
+				void dispatched.then(
+					() => {
+						unsubscribe();
+						accepted.resolve();
+					},
+					error => {
+						unsubscribe();
+						accepted.reject(error);
+					},
+				);
+				// A turn already runs: the message queues as a follow-up, and that IS
+				// acceptance. Waiting for `agent_start` would block until that turn ends.
+				if (this.isStreaming) {
+					unsubscribe();
+					accepted.resolve();
+				}
+				await accepted.promise;
+			},
+			// Exactly what a companion submit can run: skills, file commands and
+			// extension commands. Editor-only builtins are deliberately absent.
+			commands: () => {
+				const list = new Map<string, string>();
+				for (const skill of this.skills) list.set(getSkillSlashCommandName(skill), skill.description ?? "");
+				for (const command of this.#slashCommands) list.set(command.name, command.description ?? "");
+				for (const command of this.#extensionRunner?.getRegisteredCommands() ?? []) {
+					list.set(command.name, command.description ?? "");
+				}
+				return [...list].map(([name, description]) => ({ name, description }));
+			},
+			interrupt: async () => {
+				if (this.#isDisposed) throw new Error("Companion session is no longer active");
+				void this.abort({ reason: USER_INTERRUPT_LABEL }).catch(error => {
+					logger.warn("Companion interruption failed", { error });
+				});
+			},
+			persist: snapshot => {
+				this.sessionManager.appendCustomEntry("companion_state", {
+					eventId: snapshot.eventId,
+					sessionId: snapshot.sessionId,
+					state: snapshot.state,
+				});
+			},
+		});
 		this.settings = config.settings;
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
@@ -2454,6 +2546,10 @@ export class AgentSession {
 
 	/** Emit an event to all listeners */
 	#emit(event: AgentSessionEvent): void {
+		// Companion state tracks exactly what external subscribers see: a held-back
+		// agent_end reaches the bridge only after #flushPendingAgentEnd downgraded
+		// (or confirmed) its `isTerminal`, so `completed` never fires mid-turn.
+		getCompanionBridge(this.sessionManager).observe(event);
 		// Copy array before iteration to avoid mutation during iteration.
 		const listeners = [...this.#eventListeners];
 		for (const l of listeners) {
@@ -7031,6 +7127,7 @@ export class AgentSession {
 		}
 
 		return {
+			companion: getCompanionBridge(this.sessionManager).context(),
 			ui: noOpUIContext,
 			mode: "print",
 			hasUI: false,
@@ -9916,6 +10013,7 @@ export class AgentSession {
 
 			// Emit session_branch event to hooks (after branch completes)
 			if (this.#extensionRunner) {
+				getCompanionBridge(this.sessionManager).reset();
 				await this.#extensionRunner.emit({
 					type: "session_branch",
 					previousSessionFile,
@@ -10052,6 +10150,7 @@ export class AgentSession {
 			const sessionContext = this.buildDisplaySessionContext();
 
 			if (this.#extensionRunner) {
+				getCompanionBridge(this.sessionManager).reset();
 				await this.#extensionRunner.emit({
 					type: "session_branch",
 					previousSessionFile,
@@ -10400,6 +10499,7 @@ export class AgentSession {
 		// `renderInitialMessages(...)` (issue #6483). Plain leaf moves and the
 		// read-only `reopenAsk` probe leave the flag unset.
 
+		getCompanionBridge(this.sessionManager).reset();
 		// Emit session_tree event; only handlers can mutate session entries, so skip
 		// the emit and the context rebuild when no handlers are registered (mirrors
 		// the session_before_tree guard above).
