@@ -94,7 +94,12 @@ class CompanionBridge {
 		};
 	}
 
-	#publish(state: CompanionSnapshot["state"], text = "", question?: CompanionSnapshot["question"]): void {
+	#publish(
+		state: CompanionSnapshot["state"],
+		text = "",
+		question?: CompanionSnapshot["question"],
+		options?: { persist: boolean },
+	): void {
 		if (this.#disposed) return;
 		this.#snapshot = {
 			...this.#initial(),
@@ -102,10 +107,12 @@ class CompanionBridge {
 			text,
 			...(question ? { question } : {}),
 		};
-		try {
-			this.#actions?.persist(this.#snapshot);
-		} catch (error) {
-			logger.warn("Companion state could not be persisted", { error });
+		if (options?.persist !== false) {
+			try {
+				this.#actions?.persist(this.#snapshot);
+			} catch (error) {
+				logger.warn("Companion state could not be persisted", { error });
+			}
 		}
 		for (const listener of this.#listeners) {
 			try {
@@ -153,10 +160,16 @@ class CompanionBridge {
 		}
 	}
 
+	/**
+	 * Session branch / tree navigation drops the old turn state. No transcript
+	 * entry: `persist` appends a custom entry, which advances the session leaf,
+	 * and these callers reset mid-navigation — the appended entry would become
+	 * the new leaf instead of the caller's target.
+	 */
 	reset(): void {
 		this.cancel();
 		this.#interrupted = false;
-		this.#publish("unknown");
+		this.#publish("unknown", "", undefined, { persist: false });
 	}
 
 	interrupting(): void {

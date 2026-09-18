@@ -111,11 +111,12 @@ describe("Companion's supported session boundary", () => {
 	test("abort and a session switch revoke old question authority", async () => {
 		let sessionId = "before";
 		const bridge = getCompanionBridge({ getSessionId: () => sessionId });
+		const persisted: CompanionSnapshot[] = [];
 		bridge.bind({
 			submit: async () => {},
 			commands: () => [],
 			interrupt: async () => {},
-			persist: () => {},
+			persist: snapshot => persisted.push(snapshot),
 		});
 		const controller = new AbortController();
 		const result = bridge.ask(
@@ -133,7 +134,11 @@ describe("Companion's supported session boundary", () => {
 		controller.abort();
 		expect(await result).toBeUndefined();
 		sessionId = "after";
+		const persistedBeforeReset = persisted.length;
 		bridge.reset();
+		// A reset writes no transcript entry: `persist` appends a custom session
+		// entry, which would steal the leaf from the branch/navigate in progress.
+		expect(persisted).toHaveLength(persistedBeforeReset);
 		await expect(api.answer(requestId, [{ id: "choice", selectedOptions: ["Continue"] }])).rejects.toThrow(
 			"no longer active",
 		);
