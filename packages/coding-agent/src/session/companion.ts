@@ -16,7 +16,6 @@ type Actions = {
 	submit(text: string): Promise<void>;
 	commands(): CompanionCommandInfo[];
 	interrupt(): Promise<void>;
-	persist(snapshot: CompanionSnapshot): void;
 };
 type PendingQuestion = {
 	requestId: string;
@@ -85,6 +84,9 @@ class CompanionBridge {
 			},
 			interrupt: async () => {
 				assertLive();
+				// The final settle reads this: an aborted turn whose provider reports
+				// `error` instead of `aborted` is still an interrupt, not a failure.
+				this.#interrupted = true;
 				await this.#actions!.interrupt();
 			},
 			answer: async (requestId, answers) => {
@@ -94,12 +96,13 @@ class CompanionBridge {
 		};
 	}
 
-	#publish(
-		state: CompanionSnapshot["state"],
-		text = "",
-		question?: CompanionSnapshot["question"],
-		options?: { persist: boolean },
-	): void {
+	/**
+	 * Snapshots reach subscribers only. A session entry is the wrong channel:
+	 * `appendCustomEntry` advances the session leaf, so a state write lands
+	 * between the turn's real entries and becomes the leaf a branch, a tree
+	 * move, or the next prompt attaches to.
+	 */
+	#publish(state: CompanionSnapshot["state"], text = "", question?: CompanionSnapshot["question"]): void {
 		if (this.#disposed) return;
 		this.#snapshot = {
 			...this.#initial(),
@@ -107,13 +110,6 @@ class CompanionBridge {
 			text,
 			...(question ? { question } : {}),
 		};
-		if (options?.persist !== false) {
-			try {
-				this.#actions?.persist(this.#snapshot);
-			} catch (error) {
-				logger.warn("Companion state could not be persisted", { error });
-			}
-		}
 		for (const listener of this.#listeners) {
 			try {
 				const result: unknown = listener(this.snapshot());
@@ -160,21 +156,11 @@ class CompanionBridge {
 		}
 	}
 
-	/**
-	 * Session branch / tree navigation drops the old turn state. No transcript
-	 * entry: `persist` appends a custom entry, which advances the session leaf,
-	 * and these callers reset mid-navigation — the appended entry would become
-	 * the new leaf instead of the caller's target.
-	 */
+	/** Session branch or tree navigation drops the old turn's state. */
 	reset(): void {
 		this.cancel();
 		this.#interrupted = false;
-		this.#publish("unknown", "", undefined, { persist: false });
-	}
-
-	interrupting(): void {
-		this.#interrupted = true;
-		this.cancel();
+		this.#publish("unknown");
 	}
 
 	cancel(): void {

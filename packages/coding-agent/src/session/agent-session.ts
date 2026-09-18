@@ -1380,13 +1380,6 @@ export class AgentSession {
 					logger.warn("Companion interruption failed", { error });
 				});
 			},
-			persist: snapshot => {
-				this.sessionManager.appendCustomEntry("companion_state", {
-					eventId: snapshot.eventId,
-					sessionId: snapshot.sessionId,
-					state: snapshot.state,
-				});
-			},
 		});
 		this.settings = config.settings;
 		this.memoryEnabled = config.memoryEnabled ?? true;
