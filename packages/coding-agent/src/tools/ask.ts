@@ -25,6 +25,7 @@ import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type { ExtensionUISelectItem } from "../extensibility/extensions";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
+import { getCompanionBridge } from "../session/companion";
 import { vocalizer } from "../tts/vocalizer";
 
 import type { ToolSession } from ".";
@@ -947,7 +948,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const richAskDialog = extensionUi.askDialog;
 		if (richAskDialog) {
 			try {
-				const showRichDialog = () =>
+				const showRichDialog = (dialogSignal = signal) =>
 					richAskDialog(
 						params.questions.map(q => ({
 							id: q.id,
@@ -961,9 +962,13 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 							...(q.multi !== undefined ? { multi: q.multi } : {}),
 							...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
 						})),
-						{ timeout: timeout ?? undefined, signal },
+						{ timeout: timeout ?? undefined, signal: dialogSignal },
 					);
-				const richResult = signal ? await untilAborted(signal, showRichDialog) : await showRichDialog();
+				const richResult = this.session.sessionManager?.getSessionId
+					? await getCompanionBridge(this.session.sessionManager).ask(params.questions, showRichDialog, signal)
+					: signal
+						? await untilAborted(signal, showRichDialog)
+						: await showRichDialog();
 				if (!richResult) {
 					context.abort();
 					throw new ToolAbortError("Ask tool was cancelled by the user");

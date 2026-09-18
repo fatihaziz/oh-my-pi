@@ -425,7 +425,49 @@ export interface ExtensionModelQuery {
 /** Runtime host mode exposed to Pi-compatible extensions. */
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
+export interface CompanionAnswer {
+	id: string;
+	selectedOptions: string[];
+	customInput?: string;
+}
+
+export interface CompanionSnapshot {
+	eventId: string;
+	sessionId: string;
+	state: "unknown" | "working" | "waiting" | "completed" | "interrupted" | "failed";
+	text: string;
+	question?: {
+		requestId: string;
+		questions: Array<{
+			id: string;
+			question: string;
+			options: Array<{ label: string }>;
+			multi?: boolean;
+		}>;
+	};
+}
+
+/** A slash command a companion submit can actually run in this session. */
+export interface CompanionCommandInfo {
+	name: string;
+	description: string;
+}
+
+/** Live-session controls. Invalid/stale requests reject without consuming a pending question. */
+export interface CompanionContext {
+	snapshot(): CompanionSnapshot;
+	subscribe(listener: (snapshot: CompanionSnapshot) => void): () => void;
+	/** Resolves when accepted/queued, not when the model finishes. */
+	submit(text: string): Promise<void>;
+	/** Skills, file commands and extension commands `submit` resolves; never editor-only builtins. */
+	commands(): CompanionCommandInfo[];
+	/** Resolves after requesting interruption, not after agent teardown. */
+	interrupt(): Promise<void>;
+	answer(requestId: string, answers: CompanionAnswer[]): Promise<void>;
+}
+
 export interface ExtensionContext {
+	companion: CompanionContext;
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
 	/** Current run mode. Use `"tui"` to guard terminal-only UI such as custom components. */
