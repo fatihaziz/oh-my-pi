@@ -754,7 +754,15 @@ function toLegacyPiResolveResult(resolvedPath: string): LegacyPiResolveResult {
 		const registryKey = resolvedPath.slice(BUNDLED_VIRTUAL_SCHEME.length);
 		return { path: registryKey, namespace: BUNDLED_VIRTUAL_NAMESPACE };
 	}
-	return { path: resolvedPath };
+	let fsPath = resolvedPath;
+	if (fsPath.startsWith("file://")) {
+		try {
+			fsPath = url.fileURLToPath(fsPath);
+		} catch {
+			// keep raw path if not a valid URL
+		}
+	}
+	return { path: fsPath };
 }
 
 /** Maps a bundled virtual specifier or registry key to Bun's plugin namespace shape. */
@@ -1052,15 +1060,22 @@ function remapLegacyPiSpecifier(specifier: string): string | null {
 	return `${CANONICAL_PI_SCOPE}/${remappedSubpath}`;
 }
 
+let isResolvingCanonicalPiSpecifier = false;
+
 function getResolvedSpecifier(specifier: string): string {
 	const cached = resolvedSpecifierFallbacks.get(specifier);
 	if (cached) {
 		return cached;
 	}
 
-	const resolved = Bun.resolveSync(specifier, import.meta.dir);
-	resolvedSpecifierFallbacks.set(specifier, resolved);
-	return resolved;
+	isResolvingCanonicalPiSpecifier = true;
+	try {
+		const resolved = Bun.resolveSync(specifier, import.meta.dir);
+		resolvedSpecifierFallbacks.set(specifier, resolved);
+		return resolved;
+	} finally {
+		isResolvingCanonicalPiSpecifier = false;
+	}
 }
 
 /**
@@ -1071,9 +1086,36 @@ function getResolvedSpecifier(specifier: string): string {
  * mode); callers handle that the same way they would for non-overridden
  * specifiers.
  */
-function resolveCanonicalPiSpecifier(remappedSpecifier: string): string {
+function resolveCanonicalPiSpecifier(remappedSpecifier: string, importer?: string): string {
 	const override = legacyPiPackageRootOverrides[remappedSpecifier];
 	if (override) {
+		if (importer && !isBundledVirtualSpecifier(override)) {
+			let normalizedImporter = importer;
+			const queryIndex = normalizedImporter.indexOf("?");
+			if (queryIndex >= 0) {
+				normalizedImporter = normalizedImporter.slice(0, queryIndex);
+			}
+			if (normalizedImporter.startsWith("file://")) {
+				try {
+					normalizedImporter = url.fileURLToPath(normalizedImporter);
+				} catch {
+					// keep raw path if not a valid URL
+				}
+			}
+			let normalizedOverride = override;
+			if (normalizedOverride.startsWith("file://")) {
+				try {
+					normalizedOverride = url.fileURLToPath(normalizedOverride);
+				} catch {
+					// keep raw path if not a valid URL
+				}
+			}
+			const p1 = path.resolve(stripWindowsExtendedLengthPathPrefix(normalizedImporter));
+			const p2 = path.resolve(stripWindowsExtendedLengthPathPrefix(normalizedOverride));
+			if (process.platform === "win32" ? p1.toLowerCase() === p2.toLowerCase() : p1 === p2) {
+				return getResolvedSpecifier(remappedSpecifier);
+			}
+		}
 		return override;
 	}
 	return getResolvedSpecifier(remappedSpecifier);
@@ -1083,7 +1125,7 @@ function toImportSpecifier(resolvedPath: string): string {
 	// Virtual `omp-legacy-pi-bundled:` specifiers are served by the synthetic
 	// onLoad in `installLegacyPiSpecifierShim()`; wrapping them as `file://`
 	// would corrupt the scheme.
-	if (isBundledVirtualSpecifier(resolvedPath)) {
+	if (isBundledVirtualSpecifier(resolvedPath) || resolvedPath.startsWith("file:")) {
 		return resolvedPath;
 	}
 	return url.pathToFileURL(stripWindowsExtendedLengthPathPrefix(resolvedPath)).href;
@@ -1126,7 +1168,7 @@ async function rewriteLegacyExtensionSource(
 		const remappedSpecifier = remapLegacyPiSpecifier(specifier);
 		if (remappedSpecifier) {
 			try {
-				replacement = toImportSpecifier(resolveCanonicalPiSpecifier(remappedSpecifier));
+				replacement = toImportSpecifier(resolveCanonicalPiSpecifier(remappedSpecifier, importerPath));
 			} catch {
 				// Compiled fallback may be absent from a malformed build. Continue to
 				// the extension's on-disk peer dependency resolution below.
@@ -1174,7 +1216,7 @@ export async function __rewriteLegacyExtensionSourceForTests(
  * cache-bust does not reach Windows extensions until Bun changes that.
  */
 function toGraphImportSpecifier(resolvedPath: string, mtimeTag: string | null): string {
-	if (isBundledVirtualSpecifier(resolvedPath)) {
+	if (isBundledVirtualSpecifier(resolvedPath) || resolvedPath.startsWith("file:")) {
 		return resolvedPath;
 	}
 	if (process.platform === "win32" || !mtimeTag) {
@@ -1857,7 +1899,7 @@ async function resolveExtensionCommonJsRequire(specifier: string, importerPath: 
 	if (remappedSpecifier) {
 		let resolved: string | null = null;
 		try {
-			resolved = resolveCanonicalPiSpecifier(remappedSpecifier);
+			resolved = resolveCanonicalPiSpecifier(remappedSpecifier, importerPath);
 		} catch {
 			// A malformed compiled registry can still fall through to an
 			// extension-installed legacy peer dependency.
@@ -2634,15 +2676,27 @@ function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {
 }
 
 function resolveLegacyPiSpecifier(args: { path: string; importer: string }): LegacyPiResolveResult | undefined {
+	if (isResolvingCanonicalPiSpecifier) {
+		return undefined;
+	}
+
 	const remappedSpecifier = remapLegacyPiSpecifier(args.path);
 	if (!remappedSpecifier) {
+		return undefined;
+	}
+
+	// In non-bundled mode (dev / source-link), if the specifier is already canonical
+	// and has no package-root shim override, let Bun's native module resolver handle it.
+	// Returning a filesystem path from onResolve breaks Bun's Windows CommonJS require()
+	// (which prepends "file:" causing ENOENT) and causes recursive resolve loops.
+	if (!USE_BUNDLED_PI_MODULES && args.path === remappedSpecifier && !legacyPiPackageRootOverrides[remappedSpecifier]) {
 		return undefined;
 	}
 
 	// Primary: resolve the canonical @oh-my-pi/* specifier from the host binary
 	// location. Works in dev mode and in source-link installs.
 	try {
-		return toLegacyPiResolveResult(resolveCanonicalPiSpecifier(remappedSpecifier));
+		return toLegacyPiResolveResult(resolveCanonicalPiSpecifier(remappedSpecifier, args.importer));
 	} catch {
 		// Fallback for compiled binary mode: the bundled packages live inside
 		// /$bunfs/root and aren't reachable by filesystem resolution. Prefer the
