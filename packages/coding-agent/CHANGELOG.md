@@ -5,6 +5,27 @@
 ### Added
 
 - Added `ctx.companion` to the extension context: an authoritative final-settle snapshot with subscription, one semantic `submit`, a bounded `interrupt`, the resolvable command list, and a validated resolver for an open `ask` dialog, so an external client can observe turn completion and answer a question through supported APIs instead of scraping the TUI.
+## [18.2.8] - 2026-09-21
+
+### Added
+
+- Added comprehensive browser automation tools for accessibility auditing, React inspection, console and network monitoring, performance tracing, semantic DOM queries, tab management, screen recording with cursor overlays, downloads, custom initialization scripts, persistent storage, and WebMCP cross-frame tool discovery.
+- Added support for buffered cloud transcription with OpenAI-compatible models.
+- Added visual change detection for video processing, including FFMPEG analysis and SVG overlays.
+- Added support for declaring native judges through custom providers using the `typesafe` and `openrouter-decisions` API values, with configurable base URLs, API keys, and headers.
+
+### Changed
+
+- Expanded browser security and resilience controls with configurable HTTPS error handling, domain allow-listing, and automatic tab recycling when security-sensitive state changes.
+- Updated background job notifications to deliver output as follow-up messages and discourage unnecessary polling.
+- Expanded the bash tool's documented auxiliary utilities and removed its truncation footer notice.
+
+### Fixed
+
+- Improved responsiveness in long sessions by significantly reducing the time required to scan provider context for credential patterns.
+- Fixed native judges failing to honor configured request headers, enabling authenticated and header-routed judge providers to work as configured.
+- Fixed LSP requests hanging when aborted while waiting for an earlier write to complete.
+
 ## [18.2.7] - 2026-09-21
 
 ### Breaking Changes
