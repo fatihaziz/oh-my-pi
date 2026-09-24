@@ -167,29 +167,32 @@ describe("openai-codex configuration_update", () => {
 	};
 	const secondUser = { role: "user" as const, content: "two", timestamp: 3 };
 
-	it("keeps reasoning.effort stable for gpt-6-astra and inserts the update before the new user turn", async () => {
-		const model = createCodexModel("gpt-6-astra");
-		const providerSessionState = new Map<string, ProviderSessionState>();
-		const options = { apiKey: "token", sessionId: "astra-session", providerSessionState };
+	it.each(["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6-sol-wm", "gpt-6-luna-wm"])(
+		"keeps reasoning.effort stable for %s and inserts the update before the new user turn",
+		async modelId => {
+			const model = createCodexModel(modelId);
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const options = { apiKey: "token", sessionId: "astra-session", providerSessionState };
 
-		const first = await buildTransformedCodexRequestBody(model, turnContext([firstUser]), {
-			...options,
-			reasoning: "low",
-		});
-		expect(first.reasoning?.effort).toBe("low");
+			const first = await buildTransformedCodexRequestBody(model, turnContext([firstUser]), {
+				...options,
+				reasoning: "low",
+			});
+			expect(first.reasoning?.effort).toBe("low");
 
-		const second = await buildTransformedCodexRequestBody(
-			model,
-			turnContext([firstUser, firstAssistant, secondUser]),
-			{ ...options, reasoning: "high" },
-		);
-		expect(second.reasoning?.effort).toBe("low");
-		const input = second.input ?? [];
-		const updateIndex = input.findIndex(item => item.type === "configuration_update");
-		expect(updateIndex).toBeGreaterThan(0);
-		expect(input[updateIndex]).toEqual(update("high"));
-		expect(input[updateIndex + 1]?.role).toBe("user");
-	});
+			const second = await buildTransformedCodexRequestBody(
+				model,
+				turnContext([firstUser, firstAssistant, secondUser]),
+				{ ...options, reasoning: "high" },
+			);
+			expect(second.reasoning?.effort).toBe("low");
+			const input = second.input ?? [];
+			const updateIndex = input.findIndex(item => item.type === "configuration_update");
+			expect(updateIndex).toBeGreaterThan(0);
+			expect(input[updateIndex]).toEqual(update("high"));
+			expect(input[updateIndex + 1]?.role).toBe("user");
+		},
+	);
 
 	it("sends the changed effort at the request level for models without configuration_update", async () => {
 		const model = createCodexModel("gpt-5.6-sol");
@@ -275,41 +278,45 @@ describe("openai-responses configuration_update", () => {
 		});
 	}
 
-	it("pins the request-level effort and replays the update on the platform Responses endpoint", async () => {
-		const providerSessionState = new Map<string, ProviderSessionState>();
-		const bodies: Array<Record<string, unknown>> = [];
-		const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-			bodies.push(typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {});
-			return sse(`resp_${bodies.length}`);
-		});
-		const run = (context: Context, reasoning: "low" | "high") =>
-			streamOpenAIResponses(model, context, {
-				apiKey: "test-key",
-				fetch: fetchMock,
-				providerSessionState,
-				sessionId: "astra-responses-session",
-				reasoning,
-			}).result();
+	it.each(["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"])(
+		"pins the request-level effort and replays the update on the platform Responses endpoint for %s",
+		async modelId => {
+			const selectedModel = buildModel({ ...model, id: modelId, compat: undefined });
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const bodies: Array<Record<string, unknown>> = [];
+			const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+				bodies.push(typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {});
+				return sse(`resp_${bodies.length}`);
+			});
+			const run = (context: Context, reasoning: "low" | "high") =>
+				streamOpenAIResponses(selectedModel, context, {
+					apiKey: "test-key",
+					fetch: fetchMock,
+					providerSessionState,
+					sessionId: "astra-responses-session",
+					reasoning,
+				}).result();
 
-		const firstUser = { role: "user" as const, content: "first", timestamp: 1 };
-		const firstResponse = await run({ systemPrompt: ["stable system"], messages: [firstUser] }, "low");
-		await run(
-			{
-				systemPrompt: ["stable system"],
-				messages: [firstUser, firstResponse, { role: "user", content: "second", timestamp: 2 }],
-			},
-			"high",
-		);
+			const firstUser = { role: "user" as const, content: "first", timestamp: 1 };
+			const firstResponse = await run({ systemPrompt: ["stable system"], messages: [firstUser] }, "low");
+			await run(
+				{
+					systemPrompt: ["stable system"],
+					messages: [firstUser, firstResponse, { role: "user", content: "second", timestamp: 2 }],
+				},
+				"high",
+			);
 
-		expect(bodies).toHaveLength(2);
-		expect(bodies[0]?.reasoning).toEqual({ effort: "low", summary: "auto" });
-		expect(bodies[1]?.reasoning).toEqual({ effort: "low", summary: "auto" });
-		const input = bodies[1]?.input;
-		if (!Array.isArray(input)) throw new Error("expected input array");
-		const updateIndex = input.findIndex(item => item.type === "configuration_update");
-		expect(input[updateIndex]).toEqual(update("high"));
-		expect(input[updateIndex + 1]?.role).toBe("user");
-	});
+			expect(bodies).toHaveLength(2);
+			expect(bodies[0]?.reasoning).toEqual({ effort: "low", summary: "auto" });
+			expect(bodies[1]?.reasoning).toEqual({ effort: "low", summary: "auto" });
+			const input = bodies[1]?.input;
+			if (!Array.isArray(input)) throw new Error("expected input array");
+			const updateIndex = input.findIndex(item => item.type === "configuration_update");
+			expect(input[updateIndex]).toEqual(update("high"));
+			expect(input[updateIndex + 1]?.role).toBe("user");
+		},
+	);
 
 	/** The gpt-6-astra id served by a custom Responses-compatible proxy — the shape a `models.yml` entry builds. */
 	function proxyModel(compat?: ModelSpec<"openai-responses">["compat"]): Model<"openai-responses"> {

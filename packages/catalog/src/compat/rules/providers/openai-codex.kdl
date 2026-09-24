@@ -9,6 +9,20 @@ provider "openai-codex" {
 	web-search "codex"
 
 	seed api="openai-codex-responses" base-url="https://chatgpt.com/backend-api" bundle="always" {
+		// Offline fallback uses Codex's conservative default prompt window.
+		// Live discovery remains authoritative for account availability and context.
+		model "gpt-6-sol" name="GPT-6 Sol" {
+			reasoning #true
+			input "text" "image"
+			cost input=2 output=10 cache-read=0.2 cache-write=0
+			limits context=272000 max-tokens=128000
+		}
+		model "gpt-6-luna" name="GPT-6 Luna" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.1 output=0.5 cache-read=0.01 cache-write=0
+			limits context=272000 max-tokens=128000
+		}
 		model "gpt-image-1" name="GPT Image 1" {
 			reasoning #false
 			input "text" "image"
@@ -79,6 +93,37 @@ provider "openai-codex" {
 			context-window 272000
 		}
 		max-context-window 922000
+	}
+	// https://learn.chatgpt.com/docs/pricing#credits-overview
+	// Credit-equivalent rates have no separate cache-write charge or API premium tier.
+	models "gpt-6-sol" "gpt-6-sol-wm" {
+		cost-patch {
+			input 2
+			output 10
+			cache-read 0.2
+			cache-write 0
+		}
+	}
+	models "gpt-6-luna" "gpt-6-luna-wm" {
+		cost-patch {
+			input 0.1
+			output 0.5
+			cache-read 0.01
+			cache-write 0
+		}
+	}
+	models "gpt-6-sol" "gpt-6-sol-wm" "gpt-6-luna" "gpt-6-luna-wm" {
+		thinking-mode "effort"
+		thinking-default-level "medium"
+		reasoning-disable-mode "none-effort"
+		service-tier-cost {
+			flex 0.5
+			priority 2.5
+		}
+		max-context-window 922000
+	}
+	models "gpt-6-sol-wm" "gpt-6-luna-wm" {
+		supports-configuration-update #true
 	}
 	class "openai" {
 		revision ">=5.3 <5.7" {
