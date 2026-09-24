@@ -187,9 +187,9 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 
 		expect(headers.Accept).toBe("application/json");
-		// Pinned literally (not via the imported constant) so a wrong version bump is caught
-		// on an observable wire header: this is the exact User-Agent the upstream expects.
-		expect(headers["User-Agent"]).toBe("claude-cli/2.1.257 (external, cli)");
+		// Newer models reject OAuth clients advertising a version below this minimum.
+		const advertisedVersion = /^claude-cli\/(\d+\.\d+\.\d+) \(external, cli\)$/.exec(headers["User-Agent"])?.[1];
+		expect(Bun.semver.satisfies(advertisedVersion ?? "", ">=2.1.280")).toBe(true);
 		expect(headers["X-Stainless-Arch"]).toBe(mapStainlessArch(process.arch));
 		expect(headers["X-Stainless-OS"]).toBe(mapStainlessOs(process.platform));
 		expect(headers["X-Stainless-Package-Version"]).toBe("0.112.1");
