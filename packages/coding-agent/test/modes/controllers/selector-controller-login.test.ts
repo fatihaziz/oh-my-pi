@@ -24,6 +24,23 @@ beforeAll(async () => {
 });
 
 describe("SelectorController login", () => {
+	it("keeps auth selection usable after a runtime plugin installs a filesystem resolver", async () => {
+		const child = Bun.spawn(
+			[process.execPath, Bun.fileURLToPath(new URL("../../fixtures/selector-auth-resolver.ts", import.meta.url))],
+			{
+				stdout: "pipe",
+				stderr: "pipe",
+			},
+		);
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
+		expect(stdout).toContain("No stored provider credentials to log out");
+	}, 30_000);
+
 	it("awaits a provider-scoped online refresh, then presents OAuth success", async () => {
 		const loginSaved = Promise.withResolvers<void>();
 		const presentedBlocks: unknown[] = [];
