@@ -37,8 +37,11 @@ class "openai" {
 	revision "=5.6" {
 		delegation-bias "gated"
 	}
+	// GPT-6 accepts `response.steer` over the Responses WebSocket: user input
+	// joins the in-flight response instead of waiting for the next request.
 	revision ">=6" {
 		delegation-bias "restrained"
+		supports-steering #true
 	}
 	// GPT-6 supports cache-preserving effort changes in standard single-agent mode.
 	// https://developers.openai.com/api/docs/guides/reasoning#change-reasoning-mid-conversation
