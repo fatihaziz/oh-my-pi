@@ -45,6 +45,7 @@ import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
 import type { SettingsGatedToolDelta } from "./session-tools";
 import type { SessionManager } from "./session-manager";
+import type { ParentServices } from "../task/worker-services";
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
 export const SHUTDOWN_CONSOLIDATE_BUDGET_MS = 1_500;
@@ -276,6 +277,8 @@ export interface AgentSessionConfig {
 	obfuscator?: SecretObfuscator;
 	/** Inherited eval executor session id from a parent agent. */
 	parentEvalSessionId?: string;
+	/** Services a natively hosted worker reaches in its parent process. */
+	parentServices?: ParentServices;
 	/** Logical owner for retained eval kernels created by this session. */
 	evalKernelOwnerId?: string;
 	/** Async job manager owned and disposed by this session. */

@@ -34,6 +34,8 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 	}
 
 	async execute(_id: string, params: MemoryRecallParams, signal?: AbortSignal): Promise<AgentToolResult> {
+		const parentMemory = this.session.getParentServices?.()?.memory;
+		if (parentMemory) return parentMemory.executeTool(this.name, _id, params, this.session, signal);
 		return untilAborted(signal, async () => {
 			const backend = cfgMemoryBackend.get(this.session.settings);
 			if (backend === "mnemopi") {

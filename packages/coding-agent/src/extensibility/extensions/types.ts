@@ -56,6 +56,7 @@ import type {
 	UsageProvider,
 } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
+import type { ExternalSubagentExecutor } from "../../task/external-executor";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -469,6 +470,8 @@ export interface CompanionContext {
 
 export interface ExtensionContext {
 	companion: CompanionContext;
+	/** Register an external lifecycle owner for this session's children. Disconnect fences native fallback. */
+	registerSubagentExecutor(executor: ExternalSubagentExecutor): () => void;
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
 	/** Current run mode. Use `"tui"` to guard terminal-only UI such as custom components. */

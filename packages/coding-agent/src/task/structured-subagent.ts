@@ -30,6 +30,7 @@ import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { type ExecutorOptions, runSubprocess } from "./executor";
+import { externalExecutorForSession } from "./external-executor";
 import {
 	applyEligibleNestedPatches,
 	type IsolationContext,
@@ -461,6 +462,29 @@ function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
 	return { skills, autoloadSkills };
 }
 
+/** Resolve a native launch without allocating a session writer or worktree. */
+export async function prepareExternalSubagentLaunch(
+	request: StructuredSubagentRequest,
+	policy: EffectiveSubagentPolicy,
+): Promise<ExecutorOptions> {
+	const sessionFile = request.session.getSessionFile();
+	if (!sessionFile) throw new Error("External delegation requires a persisted parent session");
+	const id = await reserveStructuredSubagentId(request.session, request.identity);
+	const options = buildExecutorOptions(
+		request,
+		policy,
+		{
+			sessionFile,
+			artifactsDir: sessionFile.slice(0, -6),
+			temporary: false,
+			unregister: undefined,
+		},
+		id,
+	);
+	options.planReference = await loadPlanReference(request, policy);
+	return options;
+}
+
 function buildExecutorOptions(
 	request: StructuredSubagentRequest,
 	policy: EffectiveSubagentPolicy,
@@ -546,6 +570,7 @@ function buildExecutorOptions(
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		parentTelemetry: session.getTelemetry?.(),
 		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
+		parentServices: session.getParentServices?.(),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
 	};
@@ -679,6 +704,14 @@ function attachStructuredOutputMetadata(result: SingleResult, schema: Structured
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
 	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
+	const external = externalExecutorForSession(request.session.getSessionFile());
+	if (external) {
+		const execution = await external.execute(request, policy);
+		attachStructuredOutputMetadata(execution.result, policy.schema);
+		if (request.invocationKind === "eval")
+			request.session.recordEvalSubagentUsage?.(execution.result.usage?.output ?? 0);
+		return { ...execution, policy };
+	}
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
 	let changesApplied: boolean | null = null;
 	let mergeSummary = "";

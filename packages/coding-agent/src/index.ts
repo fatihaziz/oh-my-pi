@@ -54,6 +54,9 @@ export * from "./session/session-migrations";
 export * from "./session/session-storage";
 export * from "./session/sql-session-storage";
 export * from "./task/executor";
+export * from "./task/external-executor";
+export * from "./task/external-executor-client";
+export type { HostedExecutorOptions } from "./task/executor-host";
 export type * from "./task/types";
 export type {
 	AgentSource,

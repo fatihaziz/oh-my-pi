@@ -53,7 +53,9 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 		return new LearnTool(session);
 	}
 
-	async execute(_id: string, params: LearnParams): Promise<AgentToolResult> {
+	async execute(_id: string, params: LearnParams, signal?: AbortSignal): Promise<AgentToolResult> {
+		const parentMemory = this.session.getParentServices?.()?.memory;
+		if (parentMemory) return parentMemory.executeTool(this.name, _id, params, this.session, signal);
 		// 1) Persist or queue the lesson to long-term memory (mirrors MemoryRetainTool).
 		const backend = cfgMemoryBackend.get(this.session.settings);
 		let memoryMessage = "Lesson stored";
@@ -70,8 +72,8 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 					source: "coding-agent-learn",
 					importance: 0.8,
 					metadata: {
-						session_id: state.sessionId,
-						cwd: state.session.sessionManager.getCwd(),
+						session_id: this.session.getSessionId?.() ?? state.sessionId,
+						cwd: this.session.cwd,
 						context: params.context ?? null,
 						tool: "learn",
 					},

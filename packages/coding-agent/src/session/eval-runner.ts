@@ -14,6 +14,7 @@ import type { ToolSession } from "../tools";
 import { outputMeta } from "../tools/output-meta";
 import type { PythonExecutionMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
+import type { ParentEval } from "../task/worker-services";
 
 import { cfgPythonInterpreter, cfgPythonKernelMode } from "../eval/settings";
 
@@ -33,15 +34,20 @@ export class EvalRunner {
 	readonly #host: EvalRunnerHost;
 	readonly #kernelOwnerId: string;
 	readonly #parentSessionId: string | undefined;
+	readonly #parentEval: ParentEval | undefined;
 	#abortControllers = new Set<AbortController>();
 	#pendingMessages: PythonExecutionMessage[] = [];
 	#activeExecutions = new Set<Promise<unknown>>();
 	#disposing = false;
 
-	constructor(host: EvalRunnerHost, options: { kernelOwnerId: string; parentSessionId: string | undefined }) {
+	constructor(
+		host: EvalRunnerHost,
+		options: { kernelOwnerId: string; parentSessionId: string | undefined; parentEval?: ParentEval },
+	) {
 		this.#host = host;
 		this.#kernelOwnerId = options.kernelOwnerId;
 		this.#parentSessionId = options.parentSessionId;
+		this.#parentEval = options.parentEval;
 	}
 
 	/** Executes Python in the session's shared kernel. */
@@ -184,6 +190,8 @@ export class EvalRunner {
 		const results = await Promise.allSettled([
 			disposeKernelSessionsByOwner(this.#kernelOwnerId),
 			disposeVmContextsByOwner(this.#kernelOwnerId),
+			// A hosted worker's cells ran in its parent's kernels under this owner.
+			this.#parentEval?.release(this.#kernelOwnerId),
 		]);
 		const errors: unknown[] = [];
 		for (const result of results) if (result.status === "rejected") errors.push(result.reason);

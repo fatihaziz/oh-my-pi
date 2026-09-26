@@ -133,7 +133,9 @@ export const mnemopiBackend: MemoryBackend = {
 		const state = getMnemopiSessionState(session);
 		const primary = state?.aliasOf ?? state;
 		const parts = [prompt.render(mnemopiInstructions, { toolRefs: memoryToolRefs(session?.getXdevToolEntries()) })];
-		if (primary?.lastRecallSnippet) parts.push(primary.lastRecallSnippet);
+		// A hosted worker has no local state; its parent owns the recall block an in-process alias would share.
+		const snippet = primary ? primary.lastRecallSnippet : await session?.getParentServices()?.memory?.recallSnippet();
+		if (snippet) parts.push(snippet);
 		const rendered = parts.join("\n\n").trim();
 		if (!rendered) return undefined;
 		return truncateApproxTokens(rendered, cfgMnemopiInjectionTokenLimit.get(settings));

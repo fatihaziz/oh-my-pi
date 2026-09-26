@@ -320,9 +320,12 @@ async function resolveBackend(
 	const backends = resolveEvalBackends(session);
 	const allowPy = backends.python;
 	const allowJs = backends.js;
+	// A hosted worker shares its parent's retained kernels, so its cells run in the parent process.
+	const parentEval = session.getParentServices?.()?.eval;
 
 	if (language === "python") {
 		if (!allowPy) throw new ToolError("Python backend is disabled (PI_PY=0 or eval.py = false).");
+		if (parentEval) return { backend: parentEval.backend("python") };
 		const available = await pythonBackend.isAvailable(session, probeOpts);
 		throwIfAborted(probeOpts?.signal);
 		if (!available) {
@@ -335,7 +338,7 @@ async function resolveBackend(
 		return { backend: pythonBackend };
 	}
 	if (!allowJs) throw new ToolError("JavaScript backend is disabled (PI_JS=0 or eval.js = false).");
-	return { backend: jsBackend };
+	return { backend: parentEval?.backend("js") ?? jsBackend };
 }
 function formatEvalInputLanguage(value: string): string {
 	if (value === "py" || value === "python") return "python";
@@ -452,6 +455,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			open: async context => {
 				if (!this.session) return undefined;
 				if (cfgEvalAutoBackgroundEnabled.get(this.session.settings)) return undefined;
+				// Shadow cells replay against a local kernel; a hosted worker's kernel is its parent's.
+				if (this.session.getParentServices?.()?.eval) return undefined;
 				const parentToolCallId = context.parentToolCallId;
 				const cell = new EvalShadowCellSession({
 					coordinator: context.coordinator,

@@ -129,6 +129,8 @@ import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
 import { formatEvalStateContext } from "../eval/state";
 import { WorkPoolRegistry } from "../task/workpool";
+import { registerExternalSubagentExecutor } from "../task/external-executor";
+import type { ParentServices } from "../task/worker-services";
 import type { BashPtyOptions, BashResult } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
@@ -981,6 +983,7 @@ export class AgentSession implements SettingsScope {
 	#synchronouslyTerminatedYieldToolCallIds = new Set<string>();
 	#providerSessionState = new Map<string, ProviderSessionState>();
 	#hindsightSessionState: HindsightSessionState | undefined = undefined;
+	readonly #parentServices: ParentServices | undefined;
 	readonly #memory: SessionMemory;
 	readonly rawSseDebugBuffer: RawSseDebugBuffer;
 
@@ -1516,9 +1519,11 @@ export class AgentSession implements SettingsScope {
 				this.sessionManager.appendMessage(message);
 			},
 		};
+		this.#parentServices = config.parentServices;
 		this.#eval = new EvalRunner(evalHost, {
 			kernelOwnerId: config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`,
 			parentSessionId: config.parentEvalSessionId,
+			parentEval: config.parentServices?.eval,
 		});
 		this.#evalToolSession = config.evalToolSession;
 		const initialEvalStateContext = this.#buildEvalStateContextMessage();
@@ -2559,6 +2564,11 @@ export class AgentSession implements SettingsScope {
 
 	getMnemopiSessionState(): MnemopiSessionState | undefined {
 		return getMnemopiSessionState(this);
+	}
+
+	/** Services this hosted worker reaches in its parent process; undefined for an in-process session. */
+	getParentServices(): ParentServices | undefined {
+		return this.#parentServices;
 	}
 
 	/** TTSR manager for time-traveling stream rules */
@@ -7450,6 +7460,11 @@ export class AgentSession implements SettingsScope {
 
 		return {
 			companion: getCompanionBridge(this.sessionManager).context(),
+			registerSubagentExecutor: executor => {
+				const root = this.sessionManager.getSessionFile();
+				if (!root) throw new Error("External subagents require a persisted parent session");
+				return registerExternalSubagentExecutor(root, executor);
+			},
 			ui: noOpUIContext,
 			mode: "print",
 			hasUI: false,

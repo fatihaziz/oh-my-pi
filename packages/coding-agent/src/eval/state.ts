@@ -265,6 +265,9 @@ function cloneRuntime(runtime: MutableEvalRuntimeState): EvalRuntimeState {
 
 /** Returns the current process's retained runtimes relevant to this tool session. */
 export function getEvalState(session: ToolSession): EvalStateSnapshot | undefined {
+	// A hosted worker's kernels live in its parent process; report the parent's view of this owner.
+	const parentEval = session.getParentServices?.()?.eval;
+	if (parentEval) return parentEval.state(normalizeOptional(session.getEvalKernelOwnerId?.()) ?? null);
 	const sessionId = evalSessionId(session);
 	const ownerId = evalOwnerId(session);
 	const cwd = normalizeCwd(session.cwd);

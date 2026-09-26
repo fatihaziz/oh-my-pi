@@ -6,6 +6,8 @@ import type { AsyncJobManager } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { EvalPreludeDefinition } from "../eval/preludes";
+import type { EvalBridgeValue } from "../eval/js/tool-bridge";
+import type { RuntimeCallIdentity } from "../eval/js/shared/runtime";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
@@ -40,6 +42,7 @@ import type { AgentOutputManager } from "../task/output-manager";
 import { type AgentDefinition, canSpawnAtDepth } from "../task/types";
 import { type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
+import type { ParentServices } from "../task/worker-services";
 import type { EventBus } from "../utils/event-bus";
 import { WebSearchTool } from "../web/search";
 import type { WorkspaceTree } from "../workspace-tree";
@@ -346,6 +349,17 @@ export interface ToolSession {
 	getHindsightSessionState?: () => HindsightSessionState | undefined;
 	/** Get Mnemopi runtime state for this agent session. */
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
+	/** Services a natively hosted worker reaches in its parent process (shared memory, retained Eval kernels). */
+	getParentServices?: () => ParentServices | undefined;
+	/**
+	 * Set on a parent-side view of a worker session: every call a kernel makes
+	 * through the eval bridge runs back in that worker, as it would in-process.
+	 */
+	forwardEvalBridgeCall?: (
+		name: string,
+		args: unknown,
+		options: { signal?: AbortSignal; identity?: RuntimeCallIdentity },
+	) => Promise<EvalBridgeValue>;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */

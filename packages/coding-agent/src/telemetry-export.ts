@@ -46,6 +46,12 @@ export function isTelemetryExportEnabled(): boolean {
 	return otlp?.isTelemetryExportEnabled() ?? false;
 }
 
+/** Hooks {@link createTelemetryExportConfig} adds; each wraps the base config's hook of the same name. */
+export const TELEMETRY_EXPORT_HOOKS = ["onChatUsage", "onRunEnd", "onTelemetryWarning"] as const;
+
+/** Base config beneath OTLP export hooks. Enumerable, so spreading an exported config keeps it. */
+const TELEMETRY_EXPORT_BASE = Symbol("omp.telemetryExportBase");
+
 /**
  * Merge OTLP metrics/log hooks into an existing agent telemetry config.
  *
@@ -57,7 +63,16 @@ export function isTelemetryExportEnabled(): boolean {
 export function createTelemetryExportConfig(
 	config: AgentTelemetryConfig | undefined,
 ): AgentTelemetryConfig | undefined {
-	return otlp ? otlp.createTelemetryExportConfig(config) : config;
+	const exported = otlp ? otlp.createTelemetryExportConfig(config) : config;
+	if (!exported || exported === config) return exported;
+	return Object.assign(exported, { [TELEMETRY_EXPORT_BASE]: config ?? {} });
+}
+
+/** The config beneath OTLP export hooks, or undefined when `config` was not built by {@link createTelemetryExportConfig}. */
+export function telemetryExportBase(config: AgentTelemetryConfig): AgentTelemetryConfig | undefined {
+	if (!(TELEMETRY_EXPORT_BASE in config)) return undefined;
+	const base = config[TELEMETRY_EXPORT_BASE];
+	return base && typeof base === "object" ? base : undefined;
 }
 
 /**

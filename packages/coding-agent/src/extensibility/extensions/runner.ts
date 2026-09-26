@@ -26,6 +26,7 @@ import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
 import { getCompanionBridge } from "../../session/companion";
 import type { SessionManager } from "../../session/session-manager";
+import { registerExternalSubagentExecutor } from "../../task/external-executor";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
@@ -1241,6 +1242,11 @@ export class ExtensionRunner {
 		const runEphemeralTurn = this.#runEphemeralTurnFn;
 		return {
 			companion: getCompanionBridge(this.sessionManager).context(),
+			registerSubagentExecutor: executor => {
+				const root = this.sessionManager.getSessionFile();
+				if (!root) throw new Error("External subagents require a persisted parent session");
+				return registerExternalSubagentExecutor(root, executor);
+			},
 			ui: this.#uiContext,
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),

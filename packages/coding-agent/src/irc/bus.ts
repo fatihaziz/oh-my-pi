@@ -14,6 +14,7 @@ import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
+import { externalExecutorForSession } from "../task/external-executor";
 
 interface IrcWaiter {
 	from?: string;
@@ -72,6 +73,14 @@ export class IrcBus {
 	 */
 	async send(msg: Omit<IrcMessage, "id" | "ts">, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		return this.deliver(message, opts);
+	}
+
+	/** Deliver an already identified message from the authenticated external owner. */
+	async deliver(
+		message: IrcMessage,
+		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+	): Promise<IrcDeliveryReceipt> {
 		const receipt = await this.#deliver(message, opts);
 		if (receipt.outcome !== "failed") {
 			let sent = this.#lastSent.get(message.from);
@@ -117,6 +126,12 @@ export class IrcBus {
 				outcome: "failed",
 				error: `Agent "${message.to}" is a read-only advisor transcript and cannot be messaged.`,
 			};
+		}
+		try {
+			const external = externalExecutorForSession(ref.sessionFile, false);
+			if (external) return await external.deliver(ref, message, opts);
+		} catch (error) {
+			return { to: message.to, outcome: "failed", error: error instanceof Error ? error.message : String(error) };
 		}
 
 		// A `parked` recipient always needs the lifecycle to revive it — this is

@@ -400,7 +400,12 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 			if (!caller.legacy) {
 				if (backend === "hindsight") throw new Error(HINDSIGHT_UNADDRESSABLE);
 				if (backend === "mnemopi") {
-					const hit = caller.session ? callerMnemopiState(caller.session)?.getScopedMemory(namespace) : undefined;
+					const parentMemory = caller.session?.getParentServices()?.memory;
+					const hit = parentMemory
+						? await parentMemory.getScopedMemory(namespace)
+						: caller.session
+							? callerMnemopiState(caller.session)?.getScopedMemory(namespace)
+							: undefined;
 					if (hit) return renderMnemopiMemory(url, hit);
 					throw new Error(
 						`Mnemopi memory ${namespace} not found in the calling session's scoped bank. Use \`recall\` to list available ids.`,
@@ -473,7 +478,8 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 			? mnemopiSessionStatesFromRegistry().length > 0
 			: caller.backend === "mnemopi" &&
 				caller.session !== undefined &&
-				callerMnemopiState(caller.session) !== undefined;
+				(caller.session.getParentServices()?.memory !== undefined ||
+					callerMnemopiState(caller.session) !== undefined);
 		if (mnemopiAvailable) {
 			completions.push({
 				value: "<memory-id>",

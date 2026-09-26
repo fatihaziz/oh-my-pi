@@ -12,6 +12,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
+import { externalExecutorForSession } from "../task/external-executor";
 
 import { MAIN_AGENT_ID, type AgentStatus, type AgentMetricsSummary } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 export { MAIN_AGENT_ID };
@@ -341,7 +342,12 @@ export class AgentRegistry {
 	/** Whether a ref's claimed running state is corroborated by its attached live session. */
 	isRunning(ref: AgentRef): boolean {
 		if (ref.status !== "running") return false;
-		return ref.session?.isStreaming === true;
+		if (ref.session) return ref.session.isStreaming === true;
+		try {
+			return externalExecutorForSession(ref.sessionFile, false) !== undefined;
+		} catch {
+			return false;
+		}
 	}
 
 	/** Mirror a session's authoritative run-state notifications into its owned registry ref. */

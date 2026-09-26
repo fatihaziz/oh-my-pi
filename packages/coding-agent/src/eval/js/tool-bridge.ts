@@ -43,7 +43,8 @@ export interface ToolBridgeOptions {
 	shadowCell?: EvalShadowCellSession;
 }
 
-type ToolValue =
+/** Value a bridge call returns to the kernel. */
+export type EvalBridgeValue =
 	| string
 	| EvalBudgetResult
 	| EvalAgentHandleResult
@@ -162,7 +163,7 @@ export function bridgeValueFromToolResult(
 	result: AgentToolResult,
 	emitStatus?: (event: JsStatusEvent) => void,
 	summarize: StatusSummarizer = summarizeToolResult,
-): ToolValue {
+): EvalBridgeValue {
 	const textBlocks = result.content.filter(
 		(content): content is { type: "text"; text: string } =>
 			content.type === "text" && typeof content.text === "string",
@@ -178,7 +179,7 @@ export function bridgeValueFromToolResult(
 		if (event) emitStatus(event);
 	}
 	if (result.details === undefined && imageBlocks.length === 0 && !hasError) return text;
-	const value: Exclude<ToolValue, string> = { text, details: result.details };
+	const value: Exclude<EvalBridgeValue, string> = { text, details: result.details };
 	if (imageBlocks.length > 0) {
 		value.images = imageBlocks.map(block => ({ mimeType: block.mimeType, data: block.data }));
 	}
@@ -208,7 +209,15 @@ function waitForSpeculativeClaim<T>(claim: Promise<T>, signal?: AbortSignal): Pr
 	return promise;
 }
 
-export async function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
+export async function callSessionTool(
+	name: string,
+	args: unknown,
+	options: ToolBridgeOptions,
+): Promise<EvalBridgeValue> {
+	// A parent-side view of a worker session: the call belongs to the worker, including preludes and status.
+	if (options.session.forwardEvalBridgeCall) {
+		return options.session.forwardEvalBridgeCall(name, args, { signal: options.signal, identity: options.identity });
+	}
 	if (name === "__prelude__") {
 		const request = parsePreludeRequest(args);
 		const toolCallId = `prelude-${request.name}-${crypto.randomUUID()}`;

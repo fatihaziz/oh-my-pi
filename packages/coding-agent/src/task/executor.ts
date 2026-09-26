@@ -81,6 +81,8 @@ import { trackLateCleanup } from "../utils/late-cleanup";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
 import { attributeSubagentError } from "./error-attribution";
+import { externalExecutorForAgent, externalExecutorForSession } from "./external-executor";
+import type { ParentServices } from "./worker-services";
 import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
@@ -579,6 +581,12 @@ export interface ExecutorOptions {
 	parentMnemopiSessionState?: MnemopiSessionState;
 	/** Parent agent's eval executor session id. Subagents reuse it so eval state is shared. */
 	parentEvalSessionId?: string;
+	/**
+	 * Services the calling session reaches in its own parent process. Set only
+	 * inside a native worker host: a child launched from there inherits the same
+	 * owners, as an in-process grandchild inherits its ancestors' state.
+	 */
+	parentServices?: ParentServices;
 	/**
 	 * Parent agent's OpenTelemetry configuration. When defined, the subagent's
 	 * loop is started with the same tracer/hooks but its own agent identity
@@ -3226,6 +3234,8 @@ export interface FollowUpTurnOptions {
  * revive), and an aborted turn only aborts the in-flight turn.
  */
 export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Promise<SingleResult> {
+	const external = externalExecutorForAgent(options.id);
+	if (external) return external.followUp(options);
 	const { id, agent, message, signal } = options;
 	const index = options.index ?? 0;
 	const startTime = Date.now();
@@ -3381,6 +3391,8 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
  * Run a single agent in-process.
  */
 export async function runSubprocess(options: ExecutorOptions): Promise<SingleResult> {
+	const external = externalExecutorForSession(options.sessionFile);
+	if (external) return external.start(options);
 	const {
 		cwd,
 		agent,
@@ -3913,6 +3925,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				localProtocolOptions: options.localProtocolOptions,
 				telemetry: subagentTelemetry,
 				parentEvalSessionId: options.parentEvalSessionId,
+				parentServices: options.parentServices,
 				onFirstChatDispatch: () => {
 					firstChatDispatchAt ??= performance.now();
 				},

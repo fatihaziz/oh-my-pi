@@ -37,7 +37,13 @@ export class MemoryRetainTool implements AgentTool<typeof memoryRetainSchema, Me
 		return new MemoryRetainTool(session);
 	}
 
-	async execute(_id: string, params: MemoryRetainParams): Promise<AgentToolResult<MemoryRetainDetails>> {
+	async execute(
+		_id: string,
+		params: MemoryRetainParams,
+		signal?: AbortSignal,
+	): Promise<AgentToolResult<MemoryRetainDetails>> {
+		const parentMemory = this.session.getParentServices?.()?.memory;
+		if (parentMemory) return parentMemory.executeTool(this.name, _id, params, this.session, signal);
 		const backend = cfgMemoryBackend.get(this.session.settings);
 		if (backend === "mnemopi") {
 			const state = this.session.getMnemopiSessionState?.();
@@ -56,8 +62,8 @@ export class MemoryRetainTool implements AgentTool<typeof memoryRetainSchema, Me
 						source: "coding-agent-retain",
 						importance: 0.75,
 						metadata: {
-							session_id: state.sessionId,
-							cwd: state.session.sessionManager.getCwd(),
+							session_id: this.session.getSessionId?.() ?? state.sessionId,
+							cwd: this.session.cwd,
 							context: item.context ?? null,
 							tool: "retain",
 						},
