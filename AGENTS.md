@@ -43,32 +43,32 @@ When authorized to create or edit a contributor-submitted PR, follow the checkli
 
 This checkout is a fork. Local behavior lives **directly in the source tree** on `local/main`, applied on top of an upstream release tag. There is no patch file, no patch engine, and no release worktree: the previous `scripts/omp-unified.patch` mechanism is retired.
 
+Scope rule (owner decision, 2026-09-26): the fork carries **only what Foyer needs**. Every other file matches the upstream tag; `git diff v<TAG> --stat` must list only the rows below, this section, and the `/tmp/` line in `.gitignore`.
+
 Local behavior carried on top of upstream:
 
 | ID | Behavior | Files | Upstream plan |
 |---|---|---|---|
 | P14 | `ctx.companion` exposes an authoritative final-settle snapshot, one semantic submit, a bounded interrupt, the resolvable command list, and a validated resolver for an open `ask` dialog, so an external client (Foyer's Telegram Companion) observes completion and answers questions through supported APIs | `src/session/companion.ts`, `src/session/agent-session.ts` (`#emit` observation, `bind` in the constructor, `#buildCompanionSkillPrompt`, `#createCommandContext`, `reset()` at both branch sites and the tree-navigation site), `src/tools/ask.ts`, `src/extensibility/extensions/{runner,types}.ts`, `test/companion.test.ts` | retire when upstream exposes a public final-settle subscription and an ask-resolution API |
-| P21 | The project `tui` tool ignores PTY output queued after `terminal.close()` and skips the `/bin/sh` spawn gate on Windows, so headless TUI sessions stop and restart cleanly on this machine | `.omp/tools/tui.ts` (`Session.closed`, `gated`), `test/project-tui-lifecycle.test.ts`, `test/fixtures/tui-output-child.ts` | upstream as a PR; retire when merged |
-| P22 | GPT-6 Sol/Luna offline seeds for the OpenAI API and Codex routes, the API long-context tariff, and `configuration_update` effort changes on the `-wm` worker routes; upstream carries only the Codex `cost-patch` | `packages/catalog/src/compat/rules/{classes/openai,providers/openai,providers/openai-codex,runtime/behavior}.kdl`, `packages/catalog/test/openai-gpt6.test.ts`, `packages/ai/test/openai-configuration-update.test.ts` | retire rows as upstream discovery and rules cover them |
 | P23 | An external owner (Foyer) can register for a root session and run its task/eval subagents in native worker hosts (`__omp_worker_subagent`) over stdin/stdout. Shared memory, retained Eval kernels, registry changes, and telemetry are bridged back to the parent. An owner failure never falls back to an in-process worker | `src/task/{external-executor,external-executor-client,executor-host,external-telemetry,worker-services}.ts`, hooks in `src/task/{executor,structured-subagent}.ts`, `src/cli.ts` + `src/cli/worker-selectors.ts` (`SUBAGENT_WORKER_ARG`), `src/sdk.ts`/`src/tools/index.ts` (`parentServices`), memory tools, `src/eval/*`, `src/registry/*`, `test/task/external-executor.test.ts` | retire when upstream exposes an out-of-process subagent executor seam |
 
-Retired, do not reintroduce: S1, P1, P3, P5, P6, P7, P8, P9, P10, P11, P12, P13, P15, P16, P17, P18, P19 (upstream-native, owner decision, or not worth the rebase cost), and P20 (omitting the Antigravity `requestType`) — Google targets OMP's prompt fingerprint and the upstream maintainer refuses an in-tree bypass ([#11809](https://github.com/can1357/oh-my-pi/issues/11809)); bypassing it risks the account.
+Retired, do not reintroduce: S1, P1, P3, P5, P6, P7, P8, P9, P10, P11, P12, P13, P15, P16, P17, P18, P19 (upstream-native, owner decision, or not worth the rebase cost); P20 (omitting the Antigravity `requestType`) — Google targets OMP's prompt fingerprint and the upstream maintainer refuses an in-tree bypass ([#11809](https://github.com/can1357/oh-my-pi/issues/11809)); bypassing it risks the account; P21 (project `tui` tool Windows fixes) and P22 (GPT-6 Sol/Luna catalog rules) — not Foyer scope, dropped 2026-09-26; upstream ships Sol/Luna rows and Codex pricing.
 
 ### Updating to a new upstream release
 
 1. `git fetch origin main --tags`, then merge the new release tag into `local/main`: `git merge v<NEW>`.
-2. **Resolve every conflict properly.** Read both sides as one contract; never resolve by taking ours/theirs wholesale, and never drop an upstream change to keep a local one. A conflict in a P14 file means upstream moved the seam — follow it.
+2. **Resolve every conflict properly.** Read both sides as one contract; never resolve by taking ours/theirs wholesale, and never drop an upstream change to keep a local one. A conflict in a P14 or P23 file means upstream moved the seam — follow it. Then run `git diff --name-status v<NEW>`: any file outside the carried rows goes back to the tag.
 3. Refresh the native addon to the new release; the loader enforces a release-specific export sentinel and a stale `.node` fails to load:
    ```sh
    npm pack @oh-my-pi/pi-natives-win32-x64@<NEW> --pack-destination tmp --ignore-scripts
    # extract package/pi_natives.win32-x64-baseline.node into packages/natives/native/
    ```
-4. `bun install --frozen-lockfile`, `bun run check:ts`, and the P14 tests (`bun test packages/coding-agent/test/companion.test.ts`).
+4. `bun install --frozen-lockfile`, `bun run check:ts`, the carried tests (`bun test packages/coding-agent/test/companion.test.ts packages/coding-agent/test/task/external-executor.test.ts`), and `omp --smoke-test`.
 5. The global `omp` is a Bun link to this checkout (see below), so a merge is live immediately for new processes. Update `ompInstall.version` in the vault's `___claude-fatih/env.yml` to the new release for the record.
 
 ### Installed binding
 
-`omp` on this machine resolves to this checkout through `bun link` from `packages/coding-agent`, whose `bin.omp` points at `src/cli.ts`. There is no npm copy of `@oh-my-pi/pi-coding-agent` to patch and no `dist/cli.js` to rebuild. Do not run `bun add -g @oh-my-pi/pi-coding-agent`: it replaces the link with a published tarball and silently drops P14.
+`omp` on this machine resolves to this checkout through `bun link` from `packages/coding-agent`, whose `bin.omp` points at `src/cli.ts`. There is no npm copy of `@oh-my-pi/pi-coding-agent` to patch and no `dist/cli.js` to rebuild. Do not run `bun add -g @oh-my-pi/pi-coding-agent`: it replaces the link with a published tarball and silently drops P14 and P23.
 
 ## Code Quality
 

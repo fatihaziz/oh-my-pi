@@ -673,15 +673,12 @@ interface Session {
 	raw: Buffer[];
 	rawBytes: number;
 	exit: number | null;
-	closed: boolean;
 }
 
 const sessions = new Map<string, Session>();
 
 /** Appends one PTY chunk to the session's capped raw capture. */
 function capture(session: Session, chunk: Uint8Array) {
-	// Native PTY output can remain queued after terminal.close().
-	if (session.closed) return;
 	session.screen.feed(chunk);
 	const bytes = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
 	session.raw.push(bytes);
@@ -798,7 +795,6 @@ async function stopSession(session: Session): Promise<number | null> {
 		session.proc.kill("SIGKILL");
 		await session.proc.exited.catch(() => {});
 	}
-	session.closed = true;
 	session.sock?.destroy();
 	session.proc.terminal.close();
 	session.screen.dispose();
@@ -962,8 +958,6 @@ function unescapeBytes(text: string): Buffer {
  * guarantees the watch is armed before the child can exit.
  */
 function gated(gate: string, command: string[]): string[] {
-	// No /bin/sh on Windows; the exit-watch race above is a macOS observation.
-	if (process.platform === "win32") return command;
 	const script = 'gate=$1; shift; while [ ! -e "$gate" ]; do sleep 0.01; done; exec "$@"';
 	return ["/bin/sh", "-c", script, "sh", gate, ...command];
 }
@@ -1047,7 +1041,6 @@ const factory = (omp: ToolHost) => {
 			raw: [],
 			rawBytes: 0,
 			exit: null,
-			closed: false,
 		};
 		proc.exited.then((code) => {
 			session.exit = code;
@@ -1376,7 +1369,6 @@ const factory = (omp: ToolHost) => {
 		onSession(event: { reason?: string }) {
 			if (event.reason === "shutdown") {
 				for (const session of sessions.values()) {
-					session.closed = true;
 					try {
 						session.proc.kill("SIGKILL");
 						session.proc.terminal.close();

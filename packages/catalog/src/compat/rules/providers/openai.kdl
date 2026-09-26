@@ -9,26 +9,14 @@ provider "openai" {
 		stt "openai-transcriptions"
 	}
 
-	// Seed newly released GPT-6 models and approval-gated Daybreak aliases
-	// ahead of catalog discovery. Upstream rows outrank these offline fallbacks.
+	// Daybreak models are approval-gated first-party Responses models that are
+	// not yet present in stencil.so. Seed the documented aliases and current
+	// Cyber snapshot so fresh installs expose them without credentialed
+	// discovery; upstream catalog rows outrank these once discovery serves them.
 	// Blue rides the standard GPT-5.6 Sol tariff, Red and Cyber the standard
 	// GPT-5.6 Cyber tariff. The >272K long-context tier is rule-owned
 	// (`providers/openai.kdl` long-context-cost) and baked at build time.
 	seed api="openai-responses" base-url="https://api.openai.com/v1" bundle="always" {
-		// https://developers.openai.com/api/docs/models/gpt-6-sol
-		model "gpt-6-sol" name="GPT-6 Sol" {
-			reasoning #true
-			input "text" "image"
-			cost input=2 output=10 cache-read=0.2 cache-write=2.5
-			limits context=1050000 max-tokens=128000
-		}
-		// https://developers.openai.com/api/docs/models/gpt-6-luna
-		model "gpt-6-luna" name="GPT-6 Luna" {
-			reasoning #true
-			input "text" "image"
-			cost input=0.1 output=0.5 cache-read=0.01 cache-write=0.125
-			limits context=1050000 max-tokens=128000
-		}
 		model "daybreak-blue-latest" name="Daybreak Blue" {
 			reasoning #true
 			input "text" "image"
@@ -187,33 +175,6 @@ provider "openai" {
 			output 75.0
 			cache-read 2.0
 			cache-write 25.0
-		}
-	}
-	// Sol/Luna accept `none`; their >272K API tariff follows the model cards.
-	models "gpt-6-sol" "gpt-6-luna" {
-		reasoning-disable-mode "none-effort"
-		thinking-default-level "medium"
-		service-tier-cost {
-			flex 0.5
-			priority 2
-		}
-	}
-	models "gpt-6-sol" {
-		long-context-cost {
-			input-threshold 272000
-			input 4
-			output 15
-			cache-read 0.4
-			cache-write 5
-		}
-	}
-	models "gpt-6-luna" {
-		long-context-cost {
-			input-threshold 272000
-			input 0.2
-			output 0.75
-			cache-read 0.02
-			cache-write 0.25
 		}
 	}
 	// residue: the bare Daybreak rolling aliases pin the documented 5.6-gen
