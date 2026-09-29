@@ -61,6 +61,7 @@ export type HostedExecutorOptions = Pick<
 	| "modelRole"
 	| "thinkingLevel"
 	| "effort"
+	| "solutionSpace"
 	| "outputSchema"
 	| "outputSchemaMode"
 	| "outputSchemaSource"
@@ -82,6 +83,7 @@ export type HostedExecutorOptions = Pick<
 	| "preloadedCustomToolPaths"
 	| "parentServiceTier"
 	| "serviceTierOverride"
+	| "inheritedSessionAgents"
 	| "autoloadSkills"
 	| "parentAgentId"
 	| "parentEvalSessionId"
@@ -105,35 +107,38 @@ const telemetrySchema = schema({
 	"+": "reject",
 });
 
+const agentDefinitionSchema = schema({
+	name: "string",
+	description: "string",
+	systemPrompt: "string",
+	source: "'bundled' | 'user' | 'project'",
+	"tools?": "string[]",
+	"spawns?": "string[] | '*'",
+	"model?": "string[]",
+	"thinkingLevel?": "string",
+	"output?": "unknown",
+	"blocking?": "boolean",
+	"autoloadSkills?": "string[]",
+	"readSummarize?": "boolean",
+	"prewalk?": "boolean | string",
+	"advisor?": "boolean | string",
+	"filePath?": "string",
+	"+": "reject",
+});
+
 const launchSchema = schema({
 	cwd: "string",
 	id: "string",
 	index: "number.integer >= 0",
 	task: "string",
-	agent: {
-		name: "string",
-		description: "string",
-		systemPrompt: "string",
-		source: "'bundled' | 'user' | 'project'",
-		"tools?": "string[]",
-		"spawns?": "string[] | '*'",
-		"model?": "string[]",
-		"thinkingLevel?": "string",
-		"output?": "unknown",
-		"blocking?": "boolean",
-		"autoloadSkills?": "string[]",
-		"readSummarize?": "boolean",
-		"prewalk?": "boolean | string",
-		"advisor?": "boolean | string",
-		"filePath?": "string",
-		"+": "reject",
-	},
+	agent: agentDefinitionSchema,
 	"additionalDirectories?": "string[]",
 	"worktree?": "string",
 	"assignment?": "string",
 	"context?": "string",
 	"description?": "string",
 	"parentToolCallId?": "string",
+	"solutionSpace?": "string",
 	"parentAgentId?": "string",
 	"modelOverride?": "string | string[]",
 	"modelRole?": "string",
@@ -166,6 +171,7 @@ const launchSchema = schema({
 	"promptTemplates?": "object[]",
 	"workspaceTree?": "object",
 	"autoloadSkills?": "object[]",
+	"inheritedSessionAgents?": agentDefinitionSchema.array(),
 	"planReference?": { path: "string", content: "string" },
 	"workPoolYieldItems?": schema({ id: "string", index: "number.integer >= 0" }).array(),
 	"parentServiceTier?": schema({ "openai?": "string", "anthropic?": "string", "google?": "string" }).or("null"),
@@ -173,6 +179,12 @@ const launchSchema = schema({
 	"parentEvalSessionId?": "string",
 	"+": "reject",
 });
+/** Reject unknown launch fields before the host initializes the child. */
+export function parseHostedExecutorLaunch(input: unknown): HostedExecutorOptions {
+	const validated = launchSchema(input);
+	if (validated instanceof schema.errors) throw new Error(`Invalid native launch: ${validated.summary}`);
+	return validated as HostedExecutorOptions;
+}
 
 /** One process hosts one native child identity for its whole lifetime. */
 export async function runExecutorHost(): Promise<void> {
@@ -511,9 +523,7 @@ export async function runExecutorHost(): Promise<void> {
 			if (launch || admitting) throw new Error("This native worker already owns a child");
 			if (!isRecord(frame.options) || !isRecord(frame.options.agent))
 				throw new Error("Missing resolved launch options");
-			const validated = launchSchema(frame.options);
-			if (validated instanceof schema.errors) throw new Error(`Invalid native launch: ${validated.summary}`);
-			const options = validated as HostedExecutorOptions;
+			const options = parseHostedExecutorLaunch(frame.options);
 			// Nested ids are dot-joined segments ("Parent.Child"); an empty segment would allow `..` in the transcript path.
 			if (!/^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/.test(options.id) || options.id === "main")
 				throw new Error("Invalid native child id");

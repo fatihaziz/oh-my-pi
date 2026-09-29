@@ -10,6 +10,7 @@ import { AgentRegistry } from "../../src/registry/agent-registry";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { IrcBus } from "../../src/irc/bus";
 import { createExternalSubagentExecutor } from "../../src/task/external-executor-client";
+import { parseHostedExecutorLaunch } from "../../src/task/executor-host";
 
 const root = path.resolve("tmp/external-owner/root.jsonl");
 const child = path.resolve("tmp/external-owner/root/Child.jsonl");
@@ -227,4 +228,22 @@ test("shared Eval and memory are declared to the worker instead of dropped", asy
 	expect(starts[0].services).toEqual({ memory: true, eval: { state: null } });
 	expect(starts[0].options).toMatchObject({ parentEvalSessionId: "shared-parent-kernel" });
 	expect(starts[0].options).not.toHaveProperty("parentServices");
+});
+
+test("native launch accepts inherited agents and classifier context without opening the wire schema", () => {
+	const inheritedAgent = { ...childLaunch.agent, name: "Approved", model: ["openai-codex/gpt-6-sol"] };
+	const options = {
+		...childLaunch,
+		sessionFile: root,
+		artifactsDir: root.slice(0, -6),
+		solutionSpace: "single bounded read",
+		inheritedSessionAgents: [inheritedAgent],
+	};
+	const validated = parseHostedExecutorLaunch(options);
+	expect(validated.solutionSpace).toBe("single bounded read");
+	expect(validated.inheritedSessionAgents?.[0]?.model).toEqual(["openai-codex/gpt-6-sol"]);
+	expect(() =>
+		parseHostedExecutorLaunch({ ...options, inheritedSessionAgents: [{ ...inheritedAgent, source: "remote" }] }),
+	).toThrow("Invalid native launch");
+	expect(() => parseHostedExecutorLaunch({ ...options, arbitrary: true })).toThrow("Invalid native launch");
 });

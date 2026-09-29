@@ -10,6 +10,8 @@
 ### Fixed
 
 - Native executor startup now initializes process-wide settings from the validated parent snapshot without loading or writing disk configuration. Attaching a worker's InteractiveMode no longer fails with `Settings not initialized`. Terminal attachment retains the existing session, model authorization and owner controls.
+- Foyer-owned native workers now start with inherited agent choices and task open-endedness intact after upstream's task contract changed.
+
 ## [18.4.3] - 2026-09-28
 
 ### Added
