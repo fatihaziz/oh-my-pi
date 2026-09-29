@@ -26,6 +26,7 @@ import { toolWireSchema, validateJsonSchemaValue } from "@oh-my-pi/pi-ai/utils/s
 import { type as schema } from "@oh-my-pi/omptype";
 import { context, propagation, ROOT_CONTEXT } from "@opentelemetry/api";
 import { flushTelemetryExport } from "../telemetry-export";
+import { cfgTelemetryOtlpExportEnabled } from "../telemetry-settings";
 import { type ImportedWorkerTelemetry, importWorkerTelemetry, type WorkerTelemetry } from "./external-telemetry";
 import {
 	createWorkerServiceClients,
@@ -601,6 +602,7 @@ export async function runExecutorHost(): Promise<void> {
 			if (shared instanceof schema.errors) throw new Error(`Invalid parent services: ${shared.summary}`);
 			if (shared?.eval && options.parentEvalSessionId === undefined)
 				throw new Error("Shared Eval requires the parent's Eval session identity");
+			const childSettings = Settings.initFromSnapshot(frame.settings);
 			let telemetry: ImportedWorkerTelemetry | undefined;
 			if (frame.telemetry !== undefined) {
 				const transferred = telemetrySchema(frame.telemetry);
@@ -609,7 +611,10 @@ export async function runExecutorHost(): Promise<void> {
 				// Exporter registration is asynchronous; hold the claim so a concurrent start cannot slip in.
 				admitting = true;
 				try {
-					telemetry = await importWorkerTelemetry(transferred as WorkerTelemetry);
+					telemetry = await importWorkerTelemetry(
+						transferred as WorkerTelemetry,
+						cfgTelemetryOtlpExportEnabled.get(childSettings),
+					);
 				} finally {
 					admitting = false;
 				}
@@ -621,7 +626,6 @@ export async function runExecutorHost(): Promise<void> {
 					peers.localSessionFile !== path.join(options.artifactsDir!, `${options.id}.jsonl`))
 			)
 				throw new Error("Launch does not match the native peer identity");
-			const childSettings = Settings.initFromSnapshot(frame.settings);
 			launch = options;
 			if (shared && (shared.memory || shared.eval)) {
 				serviceClients = createWorkerServiceClients(ownerTransport, options.id, {

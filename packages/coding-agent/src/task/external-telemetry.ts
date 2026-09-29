@@ -80,13 +80,16 @@ export interface ImportedWorkerTelemetry {
 }
 
 /** Rebuild the parent's telemetry inside a worker; rejects when this process would export elsewhere. */
-export async function importWorkerTelemetry(telemetry: WorkerTelemetry): Promise<ImportedWorkerTelemetry> {
+export async function importWorkerTelemetry(
+	telemetry: WorkerTelemetry,
+	exportEnabled: boolean,
+): Promise<ImportedWorkerTelemetry> {
 	if (otelEnvironment() !== telemetry.environment) {
 		throw new Error(
 			"Worker OpenTelemetry environment differs from the parent; refusing to launch with divergent telemetry",
 		);
 	}
-	await initTelemetryExport();
+	await initTelemetryExport(exportEnabled);
 	const config = isTelemetryExportEnabled()
 		? createTelemetryExportConfig({
 				tracerName: telemetry.tracerName,

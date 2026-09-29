@@ -58,9 +58,10 @@ Retired, do not reintroduce: S1, P1, P3, P5, P6, P7, P8, P9, P10, P11, P12, P13,
 
 1. `git fetch origin main --tags`, then merge the new release tag into `local/main`: `git merge v<NEW>`.
 2. **Resolve every conflict properly.** Read both sides as one contract; never resolve by taking ours/theirs wholesale, and never drop an upstream change to keep a local one. A conflict in a P14 or P23 file means upstream moved the seam — follow it. Then run `git diff --name-status v<NEW>`: any file outside the carried rows goes back to the tag.
-3. Refresh the native addon to the new release; the loader enforces a release-specific export sentinel and a stale `.node` fails to load:
+3. Refresh the native addon to the new release; the loader checks the stamped release version and rejects a mismatched `.node`. Put the downloaded package in the user cache, not the repository's `tmp/`:
    ```sh
-   npm pack @oh-my-pi/pi-natives-win32-x64@<NEW> --pack-destination tmp --ignore-scripts
+   mkdir -p "$HOME/.cache/omp"
+   npm pack @oh-my-pi/pi-natives-win32-x64@<NEW> --pack-destination "$HOME/.cache/omp" --ignore-scripts
    # extract package/pi_natives.win32-x64-baseline.node into packages/natives/native/
    ```
 4. `bun install --frozen-lockfile`, `bun run check:ts`, the carried tests (`bun test packages/coding-agent/test/companion.test.ts packages/coding-agent/test/task/external-executor.test.ts`), and `omp --smoke-test`.
@@ -347,8 +348,6 @@ Test the contract the system exposes — not the easiest internal detail to asse
 ## Changelog
 
 Location: `packages/*/CHANGELOG.md` (per package).
-
-**NEVER update changelogs unless explicitly asked.** Do not add, edit, or reorder entries as part of a feature, fix, or PR unless the user requests it.
 
 **Format** — sections under `## [Unreleased]`:
 
