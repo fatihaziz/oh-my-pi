@@ -1,3 +1,4 @@
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type as schema } from "@oh-my-pi/omptype";
@@ -38,6 +39,29 @@ const planSchema = schema({
 	"+": "reject",
 });
 
+function pathsMatch(a: string | undefined, b: string): boolean {
+	if (!a) return false;
+	const resA = path.resolve(a);
+	const resB = path.resolve(b);
+	if (resA === resB) return true;
+	if (process.platform === "win32" && resA.toLowerCase() === resB.toLowerCase()) return true;
+	const canonical = (p: string): string => {
+		try {
+			return fsSync.realpathSync.native(p);
+		} catch {
+			const parent = path.dirname(p);
+			if (parent === p) return p;
+			return path.join(canonical(parent), path.basename(p));
+		}
+	};
+	try {
+		const canA = canonical(resA);
+		const canB = canonical(resB);
+		return process.platform === "win32" ? canA.toLowerCase() === canB.toLowerCase() : canA === canB;
+	} catch {
+		return false;
+	}
+}
 type WorkspacePlan = typeof planSchema.infer;
 type WorkspacePhase =
 	| "planned"
@@ -124,8 +148,8 @@ export class ExecutorWorkspace {
 		if (
 			options.id !== this.plan.agentId ||
 			options.sessionFile !== this.plan.sessionFile ||
-			path.resolve(options.cwd) !== this.cwd ||
-			options.worktree !== this.cwd
+			!pathsMatch(options.cwd, this.cwd) ||
+			!pathsMatch(options.worktree, this.cwd)
 		)
 			throw new Error("Native launch does not match its reserved workspace");
 	}
@@ -206,7 +230,7 @@ export class ExecutorWorkspace {
 				description: baseOptions.description,
 				buildCommitMessage: makeIsolationCommitMessage({ settings, modelRegistry: baseOptions.modelRegistry }),
 				onPrepared: async (handle, preparedContext) => {
-					if (handle.mergedDir !== this.cwd)
+					if (!pathsMatch(handle.mergedDir, this.cwd))
 						throw new Error("Native workspace path differs from the owner reservation");
 					this.#handle = handle;
 					this.#context = preparedContext;
