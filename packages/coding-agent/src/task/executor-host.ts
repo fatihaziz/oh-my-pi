@@ -602,6 +602,12 @@ export async function runExecutorHost(): Promise<void> {
 			if (shared instanceof schema.errors) throw new Error(`Invalid parent services: ${shared.summary}`);
 			if (shared?.eval && options.parentEvalSessionId === undefined)
 				throw new Error("Shared Eval requires the parent's Eval session identity");
+			if (
+				peers &&
+				(peers.localId !== options.id ||
+					peers.localSessionFile !== path.join(options.artifactsDir!, `${options.id}.jsonl`))
+			)
+				throw new Error("Launch does not match the native peer identity");
 			const childSettings = Settings.initFromSnapshot(frame.settings);
 			let telemetry: ImportedWorkerTelemetry | undefined;
 			if (frame.telemetry !== undefined) {
@@ -620,12 +626,6 @@ export async function runExecutorHost(): Promise<void> {
 				}
 				lifetime.signal.throwIfAborted();
 			}
-			if (
-				peers &&
-				(peers.localId !== options.id ||
-					peers.localSessionFile !== path.join(options.artifactsDir!, `${options.id}.jsonl`))
-			)
-				throw new Error("Launch does not match the native peer identity");
 			launch = options;
 			if (shared && (shared.memory || shared.eval)) {
 				serviceClients = createWorkerServiceClients(ownerTransport, options.id, {
