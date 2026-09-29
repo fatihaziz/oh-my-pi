@@ -24,6 +24,21 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MnemopiScopedMemoryHit } from "../mnemopi/state";
 import { BUILTIN_TOOLS, type ToolSession } from "../tools";
 import type { ExecutorOptions } from "./executor";
+import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { cfgTaskMaxEffort } from "./settings";
+
+/** Authorized catalog choices; credentials remain in the native parent. */
+export function workerModelChoices(owner: ExecutorOptions) {
+	if (!owner.modelRegistry || !owner.settings) throw new Error("Native parent model settings are unavailable");
+	const ceiling = THINKING_EFFORTS.indexOf(cfgTaskMaxEffort.get(owner.settings));
+	return owner.modelRegistry.getAvailable().flatMap(model => {
+		const supported = getSupportedEfforts(model);
+		const efforts = supported.filter(effort => THINKING_EFFORTS.indexOf(effort) <= ceiling);
+		if (supported.length > 0 && efforts.length === 0) return [];
+		return [{ provider: model.provider, id: model.id, name: model.name, efforts }];
+	});
+}
 
 /** Worker session a parent-side service acts for. */
 export interface WorkerIdentity {

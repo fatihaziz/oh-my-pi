@@ -1098,6 +1098,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	unsubscribe?: () => void;
 	onInputCallback?: (input: SubmittedUserInput) => void;
+	hostedInput?: InteractiveModeContext["hostedInput"];
 	optimisticUserMessageSignature: string | undefined = undefined;
 	locallySubmittedUserSignatures: Set<string> = new Set();
 	#pendingSubmittedInput: SubmittedUserInput | undefined;
@@ -1249,18 +1250,25 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 	get focusedAgentId(): string | undefined {
-		return this.#focusController.focusedAgentId;
+		return this.hostedInput?.agentId ?? this.#focusController.focusedAgentId;
 	}
 	get sessionName(): string | undefined {
 		return this.session.sessionName;
 	}
 	focusAgentSession(id: string): Promise<void> {
+		if (this.hostedInput && id !== this.hostedInput.agentId)
+			return Promise.reject(new Error("Select the target agent in the Office"));
 		return this.#focusController.focusAgent(id);
 	}
 	focusParentSession(): Promise<void> {
+		if (this.hostedInput) return this.unfocusSession();
 		return this.#focusController.focusParent();
 	}
 	unfocusSession(): Promise<void> {
+		if (this.hostedInput) {
+			this.showStatus("Select another agent in the Office to change terminals");
+			return Promise.resolve();
+		}
 		return this.#focusController.unfocus();
 	}
 	invalidatePendingFocus(): void {
@@ -1934,12 +1942,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		await logger.time("InteractiveMode.init:hooks", () => this.initHooksAndCustomTools());
 
 		// Restore mode from session (e.g. plan mode on resume)
-		this.session.setSessionBeforeSwitchReconciler?.(async () => {
-			await this.#liveCommandController.stop();
-			await this.#quiesceVibeForSessionSwitch();
-		});
-		this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession({ preserveActiveGoal: true }));
-		await logger.time("InteractiveMode.init:reconcileMode", () => this.#reconcileModeFromSession());
+		if (!this.hostedInput) {
+			this.session.setSessionBeforeSwitchReconciler?.(async () => {
+				await this.#liveCommandController.stop();
+				await this.#quiesceVibeForSessionSwitch();
+			});
+			this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession({ preserveActiveGoal: true }));
+			await logger.time("InteractiveMode.init:reconcileMode", () => this.#reconcileModeFromSession());
+		}
 
 		// Brand-new sessions optionally start in plan mode when the user has made it
 		// the startup default. "Brand-new" means the resolved branch carries no
@@ -1954,7 +1964,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// execution handoff clear never get dragged back into plan mode. #enterPlanMode
 		// is idempotent and self-guards against an already-active plan/goal mode; it
 		// does not check plan.enabled itself.
-		if (shouldEnterPlanModeOnStartup(this.sessionManager, this.session.settings)) {
+		if (!this.hostedInput && shouldEnterPlanModeOnStartup(this.sessionManager, this.session.settings)) {
 			await this.#enterPlanMode();
 		}
 

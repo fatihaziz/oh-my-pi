@@ -15,6 +15,7 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
 import { externalExecutorForSession } from "../task/external-executor";
+import { hostedPeerRoute } from "../task/hosted-peers";
 
 interface IrcWaiter {
 	from?: string;
@@ -71,7 +72,10 @@ export class IrcBus {
 	 * agent directly: the main agent then already sees the body as its own
 	 * incoming card, so relaying the sibling legs would duplicate it.
 	 */
-	async send(msg: Omit<IrcMessage, "id" | "ts">, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
+	async send(
+		msg: Omit<IrcMessage, "id" | "ts">,
+		opts?: { suppressRelay?: boolean; activeOnly?: boolean },
+	): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		return this.deliver(message, opts);
 	}
@@ -79,7 +83,7 @@ export class IrcBus {
 	/** Deliver an already identified message from the authenticated external owner. */
 	async deliver(
 		message: IrcMessage,
-		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+		opts?: { expectsReply?: boolean; suppressRelay?: boolean; activeOnly?: boolean },
 	): Promise<IrcDeliveryReceipt> {
 		const receipt = await this.#deliver(message, opts);
 		if (receipt.outcome !== "failed") {
@@ -103,7 +107,10 @@ export class IrcBus {
 		return ts !== undefined && ts >= sinceTs;
 	}
 
-	async #deliver(message: IrcMessage, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
+	async #deliver(
+		message: IrcMessage,
+		opts?: { suppressRelay?: boolean; activeOnly?: boolean },
+	): Promise<IrcDeliveryReceipt> {
 		const ref = this.#registry.get(message.to);
 		if (!ref) {
 			return {
@@ -128,6 +135,8 @@ export class IrcBus {
 			};
 		}
 		try {
+			const peer = hostedPeerRoute(ref);
+			if (peer) return await peer.deliver(ref, message, opts);
 			const external = externalExecutorForSession(ref.sessionFile, false);
 			if (external) return await external.deliver(ref, message, opts);
 		} catch (error) {
@@ -145,8 +154,9 @@ export class IrcBus {
 		const lifecycle = this.#lifecycle();
 		const lifecycleOwnsRegistry = lifecycle.manages(this.#registry);
 		const needsLifecycleGate =
-			ref.status === "parked" ||
-			(lifecycleOwnsRegistry && (lifecycle.isParking(message.to) || lifecycle.has(message.to)));
+			!opts?.activeOnly &&
+			(ref.status === "parked" ||
+				(lifecycleOwnsRegistry && (lifecycle.isParking(message.to) || lifecycle.has(message.to))));
 
 		const priorSession = ref.session;
 		let revived = false;
@@ -165,6 +175,14 @@ export class IrcBus {
 					error: error instanceof Error ? error.message : String(error),
 				};
 			}
+		}
+
+		if (opts?.activeOnly && !this.#registry.get(message.to)?.session?.isStreaming) {
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: "Worker turn has ended; explicitly approve a follow-up before sending more work.",
+			};
 		}
 
 		// A pending `wait` from the recipient consumes the message directly —
@@ -191,7 +209,7 @@ export class IrcBus {
 			// the message so a later `wait`/`inbox` from the recipient can still
 			// pick it up. The receipt stays "failed" — the recipient has not
 			// seen it.
-			this.#enqueue(message);
+			if (!opts?.activeOnly) this.#enqueue(message);
 			return {
 				to: message.to,
 				outcome: "failed",

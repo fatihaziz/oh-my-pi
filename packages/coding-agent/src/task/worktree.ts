@@ -529,33 +529,40 @@ function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
 
-function getTaskIsolationSegment(repoRoot: string, id: string): string {
+/** Let an external owner reserve the exact namespace before materialization. */
+export function getTaskIsolationPath(repoRoot: string, id: string): string {
 	const key = `${path.resolve(repoRoot)}\0${id}`;
 	const digest = Bun.hash(key).toString(16).padStart(16, "0").slice(-TASK_ISOLATION_DIR_DIGEST_CHARS);
-	return `${TASK_ISOLATION_DIR_PREFIX}${digest}`;
+	return path.join(getWorktreeDir(`${TASK_ISOLATION_DIR_PREFIX}${digest}`), TASK_ISOLATION_MOUNT_DIR);
 }
 
 export async function ensureIsolation(
 	baseCwd: string,
 	id: string,
 	preferred?: IsoBackendKind,
+	exclusive = false,
 ): Promise<IsolationHandle> {
 	const repoRoot = await getRepoRoot(baseCwd);
 	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
-	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
-	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
+	const mergedDir = getTaskIsolationPath(repoRoot, id);
+	const baseDir = path.dirname(mergedDir);
 	const resolution = natives.isoResolve(preferred ?? null);
 	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
 	let fallbackReason = resolution.reason ?? null;
 
 	for (const candidate of candidates) {
-		await fs.rm(baseDir, { recursive: true, force: true });
+		if (exclusive) {
+			await fs.mkdir(path.dirname(baseDir), { recursive: true });
+			await fs.mkdir(baseDir);
+		} else {
+			await fs.rm(baseDir, { recursive: true, force: true });
+			await fs.mkdir(baseDir, { recursive: true });
+		}
 		// Claim ownership before the backend materialises `m`. Backends only
 		// create/replace `mergedDir` (and overlay upper/work), never the base
 		// dir, so the marker survives `isoStart` — and a concurrent
 		// `omp worktree clear` never sees this sandbox without a live owner,
 		// even while a large clone is still in progress.
-		await fs.mkdir(baseDir, { recursive: true });
 		await writeIsolationOwner(baseDir, id);
 		try {
 			await natives.isoStart(candidate, repoRoot, mergedDir);
@@ -588,21 +595,8 @@ export async function ensureIsolation(
 
 /** Tear down a handle returned by {@link ensureIsolation}. */
 export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
-	try {
-		try {
-			await natives.isoStop(handle.backend, handle.mergedDir);
-		} catch (err) {
-			logger.warn("isolation backend stop failed during cleanup", {
-				backend: handle.backend,
-				mergedDir: handle.mergedDir,
-				error: err instanceof Error ? err.message : String(err),
-			});
-		}
-	} finally {
-		// baseDir is the parent of the merged directory
-		const baseDir = path.dirname(handle.mergedDir);
-		await fs.rm(baseDir, { recursive: true, force: true });
-	}
+	await natives.isoStop(handle.backend, handle.mergedDir);
+	await fs.rm(path.dirname(handle.mergedDir), { recursive: true, force: true });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

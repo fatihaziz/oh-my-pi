@@ -3201,6 +3201,8 @@ export interface FollowUpTurnOptions {
 	description?: string;
 	/** Explicit pre-expansion model role alias retained from the original run. */
 	modelRole?: string;
+	/** An explicitly approved session-only model selection for this follow-up. */
+	modelSelection?: { provider: string; id: string; thinkingLevel?: ConfiguredThinkingLevel };
 	/** Structured-output state retained from the original invocation. */
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
@@ -3272,6 +3274,17 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	// already be streaming a wake, so ownership is reacquired every round.
 	for (let acquireAttempts = 0; ; acquireAttempts++) {
 		await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
+		if (options.modelSelection) {
+			const selection = options.modelSelection;
+			const model = session.modelRegistry
+				.getAvailable()
+				.find(candidate => candidate.provider === selection.provider && candidate.id === selection.id);
+			if (!model) throw new Error("The selected follow-up model is unavailable");
+			if (session.isStreaming) throw new Error("The worker became busy before model selection");
+			await session.setModelTemporary(model, selection.thinkingLevel);
+			if (selection.thinkingLevel !== undefined && session.thinkingLevel !== selection.thinkingLevel)
+				throw new Error("The selected thinking level exceeds the worker's effective policy");
+		}
 		const live = await AgentLifecycleManager.global().ensureLive(id);
 		if (live === session) break;
 		if (acquireAttempts >= 2) {
@@ -3820,10 +3833,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// live peer rows scoped to it, so a session switch hides stale parked trees.
 			let ircRootSessionFile: string | undefined;
 
-			// Captured by the lifecycle reviver: rebuilding an equivalent session from
-			// the same JSONL file re-invokes createAgentSession with the exact options
-			// of the original run (same agent id, tools, model, system prompt,
-			// artifacts dir) — only the SessionManager differs.
+			// Revival restores the session's model and thinking history, including
+			// operator-approved changes made after the initial launch.
 			const buildSubagentSessionOptions = (
 				sessionManagerForRun: SessionManager,
 				expectedAgentRef: CreateAgentSessionOptions["expectedAgentRef"],
@@ -3841,15 +3852,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				getApiKey: options.getApiKey,
 				credentialSourceSessionId: options.credentialSourceSessionId,
 				settings: subagentSettings,
-				model,
-				modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
+				model: forRevive ? undefined : model,
+				modelPattern: forRevive || model || modelOverride === undefined ? undefined : modelPatterns,
 				modelPatternAuthFallback:
-					model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
+					forRevive || model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
 				modelPatternFallbackRole:
-					model || modelOverride === undefined ? undefined : `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`,
+					forRevive || model || modelOverride === undefined
+						? undefined
+						: `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`,
 				modelPatternDefaultFallbackChain:
-					model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
-				thinkingLevel: effectiveThinkingLevel,
+					forRevive || model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
+				thinkingLevel: forRevive ? undefined : effectiveThinkingLevel,
 				thinkingLevelCeiling: spawnEffortCeiling,
 				// A revived session restores the tier history it persisted (including
 				// tiers a provider rejected or an extension changed since spawn); only

@@ -372,6 +372,129 @@ These are optional for normal single-agent embedding.
 
 Process-wide state that follows one settings instance — setting effects (theme, request limits, the fallback credential-redaction switch) and discovery provider toggles — is held by every top-level session on its own `settings` until it is disposed. With several live sessions the newest holder drives it, and disposing a session hands it back to the previous holder. Sessions with `parentTaskPrefix`/`taskDepth` or `bindProcessState: false` never take it. Independently of the holder, each session's own provider requests redact credential-shaped tokens per that session's `secrets.enabled`.
 
+### Foyer external executor (fork-specific)
+
+This fork exposes `registerExternalSubagentExecutor` and
+`createExternalSubagentExecutor` for an external process owner. This is not an
+upstream-supported plugin contract. The adapter retains native task policy,
+parent callbacks, shared Eval and memory services, registry events and telemetry.
+It refuses unsupported service configurations before dispatch. An unavailable
+owner is an error, not permission to run a local substitute.
+
+The owner launches `omp __omp_worker_subagent` and keeps its stdin open. One host
+owns one native child identity. Its readiness frame has protocol
+`omp-native-executor`, version `1`, and the capabilities `workspace_v1`,
+`parent_relay_v1`, `peer_registry_v1`, `operator_controls_v1` and `terminal_v1`. Require the
+applicable capability before using its commands.
+Input commands are plain JSONL bounded by the native 64 MiB logical-frame limit. Output uses the
+native RPC v2 encoder, including chunked frames; input is not an `rpc_chunk`
+reassembly channel.
+
+`parent_relay_v1` adds `executor_models`, `executor_event` and
+`executor_progress` for a native child bound in the receiving parent.
+`executor_models` returns available chat models and supported efforts at or
+below the parent's configured ceiling. It does not export credentials.
+The owner relays nested events/progress to that native parent, not directly to
+the root registry. `executor_registry` mirrors a direct child without echoing
+the same registry update upstream. Custom-tool updates retain their command
+ID; `executor_tool_cancel` acknowledges the cancellation request, not the
+completion of the underlying callback. A cancelled native owner request keeps
+its bounded response slot until the owner settles it.
+
+`peer_registry_v1` keeps remote peers addressable without assigning their
+lifecycle to the worker. Before `start` or `workspace_prepare`, send
+`executor_peers` with `{agentId, sessionFile, peerRoot, peers}`. `sessionFile`
+is the exact child transcript; `peerRoot` is the root parent transcript.
+Each peer is `{generation, ref}` with native registry identity, display name,
+kind, parent ID, status and transcript. Subsequent `executor_peer` commands
+carry `{change, peer}` for native registration, status, metadata or removal.
+The host rejects foreign roots and changed generations, and never replaces
+its local session or owned-child mirrors.
+
+Worker mailbox sends emit `peer_send` owner requests with the authenticated
+worker ID, target ID/generation/transcript, native message and delivery options.
+The owner must verify both identities against the same live root and return
+the target's native delivery receipt. It must use `IrcBus.deliver` at the root
+or the target host's `send` command, not a fabricated transcript or a parent
+prompt forwarding the message. Peer refs cannot be parked, revived or released
+by the sending worker's lifecycle manager. Owner EOF removes the peer routes.
+
+`operator_controls_v1` adds two bounded operator actions:
+
+- `send` accepts `options.activeOnly: true`. Delivery requires a currently
+  streaming native session. It never revives an idle worker or buffers a failed
+  delivery for a later turn. Check the native receipt; only `injected` confirms
+  delivery to the current turn.
+- `follow_up` accepts `modelSelection: {provider, id, thinkingLevel?}` after
+  explicit operator approval. The host validates the exact available model and
+  supported effort against its native policy. It updates only that session's
+  model and thinking history, not global routing. Parking and revival preserve
+  the approved selection. Unavailable models and clamped efforts fail before
+  prompting; a replaced session must receive the selection again.
+
+The external owner must fence the parent generation, reject overlapping
+operations, and keep Stop available. A failed isolated turn must record its
+native integration skip before a follow-up. A rejected integration is not
+fixed by changing models: expose retained work and an escape instead of
+offering a follow-up that repeats the same blocked inputs.
+An exception from the native follow-up operation is captured as a failed turn,
+using the same artifact capture as the initial turn. Its partial work remains
+in the isolated checkout and is not applied to the parent. After the recorded
+integration skip, a corrected follow-up can reuse that work.
+
+`terminal_v1` attaches a real `InteractiveMode` to the worker's existing
+`AgentSession`. It does not spawn, resume a second session, replay `session_start`,
+or start a provider turn. The owner sends `terminal_attach` with `agentId`,
+an alphanumeric/hyphen `viewId` (1-80 characters), `cols` (2-500) and `rows`
+(2-300). The response reports the native agent, session ID, transcript and PID.
+ANSI arrives as `terminal_output` frames carrying `agentId`, `viewId` and `data`.
+`terminal_input` accepts at most 64 KiB of UTF-8 per frame. `terminal_resize`,
+`terminal_visible` and `terminal_detach` retain the same identity fence.
+Hidden views stop rendering; detach releases only the TUI, not the worker.
+
+Text submission emits an owner `terminal_submit` callback with the view ID,
+agent ID, text and `streamingBehavior` (`steer` or `followUp`). The owner applies
+its existing approval, usage, lease and workspace checks. For an active turn,
+`terminal_message` preserves the selected queue behavior and rejects an idle
+session. For an idle worker, use the existing approved `follow_up` operation.
+The hosted UI follows focused-agent command policy; model/effort changes stay
+with the owner. Image submissions currently return an explicit unsupported
+error and preserve the editor draft. Completion/error notifications use the
+injected terminal transport and cannot write control bytes into executor JSONL.
+
+
+For isolated execution, use this sequence:
+
+| Command | Required data | Result and boundary |
+|---|---|---|
+| `workspace_plan` | `plan: {agentId, leaseId, cwd, sessionFile, merge, apply}` | Returns the source repository, planned `cwd`/`worktree`, and native checkpoint path. `leaseId` is a fresh UUID; `merge` is `patch` or `branch`. Planning does not materialize a workspace. |
+| Owner admission | Owner-controlled metadata | Canonicalize and reserve the returned path before preparation. Return that path to the parent adapter so shared Eval binds to the worker directory. The native host is not a scheduler or lease database. |
+| `workspace_prepare` | The normal `start` payload, including resolved options, settings and authorized model | Validates the child, transcript and reserved directory; materializes native isolation and waits at a start barrier. No agent turn runs yet. Existing workspace or checkpoint namespaces are refused. |
+| `workspace_run` | `agentId` | Releases the barrier, runs the native executor, waits for owned cleanup, captures changes and returns the native result. One-shot workspaces are removed only after capture. |
+| `workspace_integrate` | `agentId` | Integrates the host's captured result under the reserved policy. The caller cannot supply a replacement result. The owner must serialize integrations into the same repository. Replays return the recorded outcome within this host. |
+| `follow_up` | The normal follow-up payload and `agentId` | Requires the preceding integration to be settled and the native child to remain live. Captures a separate turn artifact set. Failed integration must be resolved or the workspace released before reuse. |
+| `workspace_release`, `release`, `cancel`, or owner EOF | `agentId` for explicit controls | Cancels a prepared/running turn, drains the native lifecycle, captures final changes and releases the workspace. Failed capture or uncertain teardown retains the workspace and reports its path. The external owner still fences the process tree and confirms exit. |
+
+`inspect` includes the workspace phase, turn, cause, retained path and integration
+outcome. `park` preserves native parked-session behavior; it does not exit the
+host process. A 3D/2D presentation change must not send lifecycle commands.
+
+Checkpoints and per-turn patches live below the native parent artifact directory
+at `.workspaces/<leaseId>/`. They contain isolation baselines, artifact references
+and operation outcomes, not a second conversation store. Final release artifacts
+remain referenced after registry removal. A checkpoint interrupted during
+integration is uncertain: inspect the repository and captured artifacts rather
+than automatically replaying it in a new host.
+
+Capture includes failed and cancelled work, but such a result is not
+automatically applied. Partial root/nested integration and failed parent-WIP
+restoration report failure. `changesApplied` describes native integration; it
+does not accept an Office task or replace the operator's review gate.
+
+On Windows, ownership uses the native host PID without a POSIX `ps` probe.
+The external owner must retain its OS process handle and containment boundary;
+the marker alone is not a generation or PID-reuse guard.
+
 ## `createAgentSession()` return value
 
 ```ts

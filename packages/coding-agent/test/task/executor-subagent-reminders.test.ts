@@ -442,6 +442,72 @@ describe("runSubprocess yield reminders", () => {
 			AgentRegistry.global().unregister("subagent-revive");
 		}
 	});
+	it("applies operator model approval to the replacement session before its follow-up", async () => {
+		const choice = { provider: "approved", id: "repair-model" };
+		let prompted: { provider: string; id: string; thinking: string | undefined } | undefined;
+		const stale = createMockSession(() => {
+			throw new Error("Detached session must not receive work");
+		});
+		const revived = createMockSession(({ emit }) => {
+			prompted = { provider: revived.model!.provider, id: revived.model!.id, thinking: revived.thinkingLevel };
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "approved-result",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: "repaired" },
+				},
+				isError: false,
+			});
+		});
+		for (const session of [stale, revived]) {
+			Object.assign(session, {
+				modelRegistry: { getAvailable: () => [choice] },
+				thinkingLevel: Effort.High,
+				setWorkPoolYieldItems: async () => {},
+				setModelTemporary: async (model: unknown, thinking: string) => {
+					Object.assign(session, { model, thinkingLevel: thinking });
+				},
+			});
+		}
+		vi.spyOn(AgentLifecycleManager.global(), "ensureLive").mockResolvedValueOnce(stale).mockResolvedValue(revived);
+		const result = await runSubagentFollowUpTurn({
+			...baseOptions,
+			id: "approved-replacement",
+			message: "repair",
+			modelSelection: { ...choice, thinkingLevel: Effort.Low },
+		});
+		expect(result.exitCode).toBe(0);
+		expect(prompted).toEqual({ ...choice, thinking: Effort.Low });
+	});
+	it("refuses an unavailable model or clamped effort before dispatching work", async () => {
+		let prompts = 0;
+		const session = createMockSession(() => {
+			prompts++;
+		});
+		Object.assign(session, {
+			modelRegistry: { getAvailable: () => [{ provider: "approved", id: "repair-model" }] },
+			thinkingLevel: Effort.Low,
+			setWorkPoolYieldItems: async () => {},
+			setModelTemporary: async () => {},
+		});
+		vi.spyOn(AgentLifecycleManager.global(), "ensureLive").mockResolvedValue(session);
+		for (const [id, thinkingLevel, error] of [
+			["missing", Effort.Low, "unavailable"],
+			["repair-model", Effort.High, "effective policy"],
+		] as const) {
+			await expect(
+				runSubagentFollowUpTurn({
+					...baseOptions,
+					id: "rejected-approval",
+					message: "must not run",
+					modelSelection: { provider: "approved", id, thinkingLevel },
+				}),
+			).rejects.toThrow(error);
+		}
+		expect(prompts).toBe(0);
+	});
 	it("fails fast when parking replaces the worker on every install", async () => {
 		const sessions = [
 			createMockSession(() => {}),

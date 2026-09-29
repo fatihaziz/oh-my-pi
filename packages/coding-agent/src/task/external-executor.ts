@@ -20,7 +20,7 @@ export interface ExternalSubagentExecutor {
 	deliver(
 		ref: AgentRef,
 		message: IrcMessage,
-		options?: { expectsReply?: boolean; suppressRelay?: boolean },
+		options?: { expectsReply?: boolean; suppressRelay?: boolean; activeOnly?: boolean },
 	): Promise<IrcDeliveryReceipt>;
 	park(ref: AgentRef): Promise<void>;
 	release(ref: AgentRef, options?: { tombstone?: boolean }): Promise<void>;

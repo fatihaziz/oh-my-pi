@@ -1351,9 +1351,14 @@ export class InputController {
 		this.ctx.editor.clearDraft(text);
 		try {
 			// prompt() handles idle (new turn) and streaming (queues per streamingBehavior).
-			await this.ctx.withLocalSubmission(text, () => target.prompt(text, { streamingBehavior, images }), {
-				imageCount: images?.length ?? 0,
-			});
+			await this.ctx.withLocalSubmission(
+				text,
+				() =>
+					this.ctx.hostedInput
+						? this.ctx.hostedInput.submit(text, { streamingBehavior, images })
+						: target.prompt(text, { streamingBehavior, images }),
+				{ imageCount: images?.length ?? 0 },
+			);
 		} catch (error) {
 			// Hand the message back, mirroring the main submit error path: restore
 			// pasted images so the user can retry an image-only or text+image draft.

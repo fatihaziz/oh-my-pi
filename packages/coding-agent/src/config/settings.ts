@@ -672,6 +672,17 @@ export class Settings {
 		);
 	}
 
+	/** Initialize a worker process from its parent's validated snapshot, without disk discovery or persistence. */
+	static initFromSnapshot(overrides: Readonly<Record<string, unknown>>): Settings {
+		if (globalInstancePromise) throw new Error("Settings are already initialized");
+		const instance = Settings.isolated(overrides);
+		globalInstance = instance;
+		globalInstancePromise = Promise.resolve(instance);
+		clearBoundSettingsMethods();
+		bindEffects(instance);
+		return instance;
+	}
+
 	/**
 	 * Load effective settings from config.yml and project providers without
 	 * opening agent.db, migrating legacy settings, or writing marker files.

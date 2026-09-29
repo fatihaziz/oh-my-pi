@@ -2,6 +2,7 @@ import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Loader, TERMINAL } from "@oh-my-pi/pi-tui";
+import { isNotificationSuppressed } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { formatDuration, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { extractTextContent } from "../../commit/utils";
@@ -2538,6 +2539,12 @@ export class EventController {
 		return this.ctx.viewSession.getContextUsage()?.tokens ?? 0;
 	}
 
+	#sendNotification(message: Parameters<typeof TERMINAL.sendNotification>[0]): void {
+		if (this.ctx.hostedInput) {
+			if (!isNotificationSuppressed()) this.ctx.ui.terminal.write(TERMINAL.formatNotification(message));
+		} else TERMINAL.sendNotification(message);
+	}
+
 	sendErrorNotification(event: Extract<AgentSessionEvent, { type: "agent_end" }>): void {
 		// A running async job or queued delivery will wake the session again, so
 		// its current agent_end is a scheduling pause rather than a user-visible
@@ -2574,7 +2581,7 @@ export class EventController {
 		if (last?.stopReason !== "error") return;
 
 		const sessionName = this.ctx.sessionManager.getSessionName();
-		TERMINAL.sendNotification({
+		this.#sendNotification({
 			title: sessionName || "omp",
 			body: "Stopped with error",
 			type: "error",
@@ -2599,7 +2606,7 @@ export class EventController {
 		if (last?.stopReason === "aborted" || last?.stopReason === "error") return;
 
 		const sessionName = this.ctx.sessionManager.getSessionName();
-		TERMINAL.sendNotification({
+		this.#sendNotification({
 			title: sessionName || "omp",
 			body: "Complete",
 			type: "completion",

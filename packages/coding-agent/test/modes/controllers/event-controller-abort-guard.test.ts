@@ -125,6 +125,24 @@ describe("EventController.sendCompletionNotification — abort guard", () => {
 		expect(spy).toHaveBeenCalledTimes(1);
 	});
 
+	it("keeps hosted completion and error notifications out of the executor stdout stream", () => {
+		const stdout = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+		cfgCompletionNotify.override(settings, "on");
+		cfgErrorNotify.override(settings, "on");
+		const ctx = makeContext();
+		ctx.hostedInput = { agentId: "Worker", submit: async () => true };
+		const output = vi.fn();
+		ctx.ui.terminal.write = output;
+		const controller = new EventController(ctx);
+		controller.sendCompletionNotification(makeAgentEndEvent([makeAssistantMessage("stop")]));
+		controller.sendErrorNotification(makeAgentEndEvent([makeAssistantMessage("error")]));
+		expect(stdout).not.toHaveBeenCalled();
+		expect(output).toHaveBeenCalledTimes(2);
+		cfgCompletionNotify.override(settings, "off");
+		controller.sendCompletionNotification(makeAgentEndEvent([makeAssistantMessage("stop")]));
+		expect(output).toHaveBeenCalledTimes(2);
+	});
+
 	it("honors the existing completion.notify=off gate", () => {
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
 		cfgCompletionNotify.override(settings, "off");

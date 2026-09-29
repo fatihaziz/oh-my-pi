@@ -135,6 +135,14 @@ export interface InteractiveModeContext {
 	readonly sessionName: string | undefined;
 	/** Session the transcript/editor/status are attached to: the focused agent's, else `session`. */
 	readonly viewSession: AgentSession;
+	/** Embedded worker UI: the executor remains the only owner of paid turns. */
+	hostedInput?: {
+		agentId: string;
+		submit(
+			text: string,
+			options: { streamingBehavior: "steer" | "followUp"; images?: ImageContent[] },
+		): Promise<boolean>;
+	};
 	/** Id of the focused agent, undefined when the main session is attached. */
 	readonly focusedAgentId: string | undefined;
 	/** Focus the main view on an agent's live session (delegates to SessionFocusController.focusAgent). */

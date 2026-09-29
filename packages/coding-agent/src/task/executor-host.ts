@@ -15,11 +15,12 @@ import { RpcOutputWriter } from "../modes/rpc/rpc-output";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { EventBus } from "../utils/event-bus";
-import { runSubprocess, runSubagentFollowUpTurn, type ExecutorOptions } from "./executor";
+import { runSubprocess, runSubagentFollowUpTurn, type ExecutorOptions, type FollowUpTurnOptions } from "./executor";
 import { TASK_SUBAGENT_EVENT_CHANNEL, TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "./types";
 import { createExternalSubagentExecutor } from "./external-executor-client";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import { mirrorHostedRegistryChange, registerExternalSubagentExecutor } from "./external-executor";
+import { HostedPeerRegistry } from "./hosted-peers";
 import { ArtifactManager } from "../session/artifacts";
 import { toolWireSchema, validateJsonSchemaValue } from "@oh-my-pi/pi-ai/utils/schema";
 import { type as schema } from "@oh-my-pi/omptype";
@@ -33,9 +34,12 @@ import {
 	serveWorkerEvalRelease,
 	serveWorkerMemory,
 	type WorkerServiceClients,
+	workerModelChoices,
 } from "./worker-services";
 import type { EvalStateSnapshot } from "../eval/state";
 
+import { ExecutorTerminal } from "./executor-terminal";
+import { ExecutorWorkspace } from "./executor-workspace";
 /** Resolved data only. Live parent services must be supplied by the host adapter. */
 export type HostedExecutorOptions = Pick<
 	ExecutorOptions,
@@ -192,6 +196,7 @@ export async function runExecutorHost(): Promise<void> {
 	const hostTools = new RpcHostToolBridge(emit);
 	const registry = AgentRegistry.global();
 	const events = new EventBus();
+	let relayingRegistry = false;
 	for (const channel of [
 		TASK_SUBAGENT_EVENT_CHANNEL,
 		TASK_SUBAGENT_LIFECYCLE_CHANNEL,
@@ -200,14 +205,22 @@ export async function runExecutorHost(): Promise<void> {
 		events.on(channel, payload => emit({ type: "subagent_frame", channel, payload }));
 	}
 	const unsubscribe = registry.onChange(({ type, ref }) => {
+		if (relayingRegistry) return;
 		const { session: _session, ...snapshot } = ref;
 		emit({ type: "subagent_registry", change: type, ref: snapshot });
 	});
 	let launch: HostedExecutorOptions | undefined;
+	let modelOwner: ExecutorOptions | undefined;
+	let authorizedModel: { provider: string; id: string } | undefined;
+	let modelSelection: FollowUpTurnOptions["modelSelection"];
 	let turn: AbortController | undefined;
 	let running: Promise<unknown> | undefined;
 	let closing = false;
 	let admitting = false;
+	let workspace: ExecutorWorkspace | undefined;
+	let terminal: ExecutorTerminal | undefined;
+	let terminalView = "";
+	let terminalReady = false;
 	// A child's requests to its owner belong to the turn that made them; cancelling the turn cancels them.
 	const turnSignal = (): AbortSignal => (turn ? AbortSignal.any([turn.signal, lifetime.signal]) : lifetime.signal);
 	const respond = (id: string, command: string, data: unknown) =>
@@ -227,6 +240,7 @@ export async function runExecutorHost(): Promise<void> {
 	const callbackRuns = new Map<string, AbortController>();
 	let disconnectOwner: (() => void) | undefined;
 	let serviceClients: WorkerServiceClients | undefined;
+	let peers: HostedPeerRegistry | undefined;
 	const ownerTransport = {
 		bind(options: ExecutorOptions) {
 			callbackOwners.set(options.id, options);
@@ -236,11 +250,11 @@ export async function runExecutorHost(): Promise<void> {
 			const teardown = command === "release_resources" || command === "eval_release" || command === "release";
 			if (lifetime.signal.aborted || (closing && !teardown))
 				return Promise.reject(new Error("Native executor owner disconnected"));
+			if (ownerRequests.size >= 128) return Promise.reject(new Error("Native owner request capacity reached"));
 			if (signal?.aborted) return Promise.reject(signal.reason);
 			const id = `owner-${++nextRequest}`;
 			const pending = Promise.withResolvers<T>();
 			const abort = () => {
-				ownerRequests.delete(id);
 				emit({ type: "executor_cancel", targetId: id });
 				pending.reject(signal?.reason ?? new Error("External execution aborted"));
 			};
@@ -248,7 +262,6 @@ export async function runExecutorHost(): Promise<void> {
 			signal?.addEventListener("abort", abort, { once: true });
 			emit({ type: "executor_request", id, command, data });
 			return pending.promise.finally(() => {
-				ownerRequests.delete(id);
 				signal?.removeEventListener("abort", abort);
 			});
 		},
@@ -267,21 +280,129 @@ export async function runExecutorHost(): Promise<void> {
 			return;
 		}
 		const { id, type } = frame;
+		if (type === "executor_peers") {
+			if (
+				closing ||
+				launch ||
+				peers ||
+				typeof frame.agentId !== "string" ||
+				typeof frame.sessionFile !== "string" ||
+				typeof frame.peerRoot !== "string" ||
+				!Array.isArray(frame.peers) ||
+				frame.peers.length > 1024
+			)
+				throw new Error("Invalid initial native peer snapshot");
+			const localId = frame.agentId;
+			peers = new HostedPeerRegistry(
+				registry,
+				localId,
+				frame.sessionFile,
+				frame.peerRoot,
+				(peer, message, deliveryOptions) =>
+					ownerTransport.request(
+						"peer_send",
+						{
+							agentId: localId,
+							target: peer.ref.id,
+							targetGeneration: peer.generation,
+							sessionFile: peer.ref.sessionFile,
+							message,
+							options: deliveryOptions,
+						},
+						turnSignal(),
+					),
+			);
+			relayingRegistry = true;
+			try {
+				for (const peer of frame.peers) peers.apply("registered", peer);
+			} catch (error) {
+				peers.close();
+				peers = undefined;
+				throw error;
+			} finally {
+				relayingRegistry = false;
+			}
+			respond(id, type, null);
+			return;
+		}
+		if (type === "executor_peer") {
+			relayingRegistry = true;
+			try {
+				// Before initialization, executor_peers supplies a fresh snapshot.
+				if (peers) peers.apply(String(frame.change), frame.peer);
+			} finally {
+				relayingRegistry = false;
+			}
+			respond(id, type, null);
+			return;
+		}
 		if (type === "executor_registry") {
 			// Owner relays a hosted child's registry change to the process that owns its session; allowed while closing.
-			if (typeof frame.change !== "string" || !mirrorHostedRegistryChange(frame.change, frame.ref))
-				throw new Error("Registry change does not belong to a child of this worker");
+			relayingRegistry = true;
+			try {
+				if (typeof frame.change !== "string" || !mirrorHostedRegistryChange(frame.change, frame.ref))
+					throw new Error("Registry change does not belong to a child of this worker");
+			} finally {
+				relayingRegistry = false;
+			}
 			respond(id, type, null);
 			return;
 		}
 		if (type === "executor_response") {
 			const pending = ownerRequests.get(id);
 			if (!pending || typeof frame.success !== "boolean") throw new Error("Unknown external executor response");
+			ownerRequests.delete(id);
 			if (frame.success) pending.resolve(frame.data);
 			else pending.reject(new Error(typeof frame.error === "string" ? frame.error : "External executor failed"));
 			return;
 		}
+		if (type === "executor_models" || type === "executor_event" || type === "executor_progress") {
+			const owner = typeof frame.agentId === "string" ? callbackOwners.get(frame.agentId) : undefined;
+			if (!owner) throw new Error("Native parent callback ownership changed");
+			if (type === "executor_models") {
+				respond(id, type, workerModelChoices(owner));
+			} else if (type === "executor_progress") {
+				if (!isRecord(frame.progress) || frame.progress.id !== owner.id)
+					throw new Error("Invalid child progress identity");
+				owner.onProgress?.(frame.progress as unknown as Parameters<NonNullable<ExecutorOptions["onProgress"]>>[0]);
+				respond(id, type, null);
+			} else {
+				if (
+					![TASK_SUBAGENT_EVENT_CHANNEL, TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL].includes(
+						frame.channel as string,
+					)
+				)
+					throw new Error("Invalid child event channel");
+				owner.eventBus?.emit(frame.channel as string, frame.payload);
+				if (owner.subagentEventBus !== owner.eventBus)
+					owner.subagentEventBus?.emit(frame.channel as string, frame.payload);
+				respond(id, type, null);
+			}
+			return;
+		}
 		if (closing) throw new Error("Native worker is closing");
+		if (type === "workspace_plan") {
+			if (launch || admitting || workspace) throw new Error("This native worker already owns a child or workspace");
+			admitting = true;
+			try {
+				workspace = await ExecutorWorkspace.plan(frame.plan);
+				lifetime.signal.throwIfAborted();
+				respond(id, type, workspace.snapshot());
+			} finally {
+				admitting = false;
+			}
+			return;
+		}
+		if (type === "workspace_release" && workspace) {
+			if (frame.agentId !== workspace.plan.agentId) throw new Error("Workspace target does not match this worker");
+			closing = true;
+			turn?.abort();
+			await running?.catch(() => {});
+			await workspace.release();
+			await AgentLifecycleManager.global().dispose();
+			respond(id, type, workspace.snapshot());
+			return;
+		}
 		// Worker role: the parent streams output and bridge calls back into a running Eval cell.
 		const serviced = serviceClients?.handle(type, frame, lifetime.signal);
 		if (serviced) {
@@ -311,6 +432,7 @@ export async function runExecutorHost(): Promise<void> {
 		if (type === "executor_tool_cancel") {
 			if (typeof frame.targetId !== "string") throw new Error("Missing callback cancellation target");
 			callbackRuns.get(frame.targetId)?.abort();
+			respond(id, type, null);
 			return;
 		}
 		if (type === "executor_tool_call") {
@@ -384,7 +506,7 @@ export async function runExecutorHost(): Promise<void> {
 			respond(id, type, null);
 			return;
 		}
-		if (type === "start") {
+		if (type === "start" || type === "workspace_prepare") {
 			if (launch || admitting) throw new Error("This native worker already owns a child");
 			if (!isRecord(frame.options) || !isRecord(frame.options.agent))
 				throw new Error("Missing resolved launch options");
@@ -404,9 +526,13 @@ export async function runExecutorHost(): Promise<void> {
 				throw new Error("A native parent transcript is required");
 			if (options.artifactsDir !== options.sessionFile.slice(0, -6))
 				throw new Error("Child artifacts must belong to the parent transcript");
+			if (type === "workspace_prepare") {
+				if (!workspace) throw new Error("Reserve a native workspace before preparing it");
+				workspace.validateLaunch(options);
+			} else if (workspace) {
+				throw new Error("Use workspace_prepare and workspace_run for the reserved workspace");
+			}
 			if (!isRecord(frame.settings)) throw new Error("Parent settings snapshot is required");
-			// Construct before claiming the worker so an invalid snapshot never allocates a child.
-			const childSettings = Settings.isolated(frame.settings);
 			if (
 				!isRecord(frame.authorizedModel) ||
 				typeof frame.authorizedModel.provider !== "string" ||
@@ -414,7 +540,7 @@ export async function runExecutorHost(): Promise<void> {
 			) {
 				throw new Error("An authorized provider and model are required");
 			}
-			const authorizedModel = frame.authorizedModel;
+			authorizedModel = { provider: frame.authorizedModel.provider, id: frame.authorizedModel.id };
 			const definitions = frame.tools ?? [];
 			if (
 				!Array.isArray(definitions) ||
@@ -489,6 +615,13 @@ export async function runExecutorHost(): Promise<void> {
 				}
 				lifetime.signal.throwIfAborted();
 			}
+			if (
+				peers &&
+				(peers.localId !== options.id ||
+					peers.localSessionFile !== path.join(options.artifactsDir!, `${options.id}.jsonl`))
+			)
+				throw new Error("Launch does not match the native peer identity");
+			const childSettings = Settings.initFromSnapshot(frame.settings);
 			launch = options;
 			if (shared && (shared.memory || shared.eval)) {
 				serviceClients = createWorkerServiceClients(ownerTransport, options.id, {
@@ -526,14 +659,18 @@ export async function runExecutorHost(): Promise<void> {
 					};
 				}
 				let cleanup: Promise<void> | undefined;
-				const result = await runSubprocess({
+				const nativeOptions: ExecutorOptions = {
 					...options,
 					parentTelemetry: telemetry?.config,
 					parentServices: serviceClients?.services,
 					settings: childSettings,
 					modelRegistry,
 					getApiKey: model => {
-						if (model.provider !== authorizedModel.provider || model.id !== authorizedModel.id)
+						if (
+							!authorizedModel ||
+							model.provider !== authorizedModel.provider ||
+							model.id !== authorizedModel.id
+						)
 							throw new Error("Resolved model differs from the authorized native worker model");
 						if (isRecord(frame.callbacks) && frame.callbacks.credentials === true) {
 							return ownerTransport.request<string | undefined>(
@@ -565,7 +702,13 @@ export async function runExecutorHost(): Promise<void> {
 					eventBus: events,
 					subagentEventBus: events,
 					onProgress: progress => emit({ type: "progress", progress }),
-				});
+				};
+				modelOwner = nativeOptions;
+				if (type === "workspace_prepare") {
+					await workspace!.prepare(nativeOptions);
+					return workspace!.snapshot();
+				}
+				const result = await runSubprocess(nativeOptions);
 				await cleanup;
 				await flushTelemetryExport();
 				return result;
@@ -574,17 +717,143 @@ export async function runExecutorHost(): Promise<void> {
 				respond(id, type, await running);
 			} finally {
 				running = undefined;
-				turn = undefined;
+				if (type === "start") turn = undefined;
 			}
 			return;
 		}
 		if (type === "inspect") {
-			respond(id, type, { pid: process.pid, agentId: launch?.id, busy: running !== undefined });
+			respond(id, type, {
+				pid: process.pid,
+				agentId: launch?.id,
+				busy: running !== undefined,
+				workspace: workspace?.snapshot(),
+			});
 			return;
 		}
 		if (!launch) throw new Error("Start a native child before sending controls");
 		if (frame.agentId !== launch.id) throw new Error("Control target does not match this worker");
+		if (type.startsWith("terminal_")) {
+			if (typeof frame.viewId !== "string" || !/^[A-Za-z0-9-]{1,80}$/.test(frame.viewId))
+				throw new Error("Invalid worker terminal identity");
+			if (type === "terminal_attach") {
+				if (terminal && terminalView !== frame.viewId) throw new Error("Worker terminal already has an owner");
+				if (terminal && !terminalReady) throw new Error("Worker terminal is still attaching");
+				if (
+					!Number.isInteger(frame.cols) ||
+					!Number.isInteger(frame.rows) ||
+					Number(frame.cols) < 2 ||
+					Number(frame.cols) > 500 ||
+					Number(frame.rows) < 2 ||
+					Number(frame.rows) > 300
+				)
+					throw new Error("Invalid worker terminal dimensions");
+				if (!terminal) {
+					const session = await AgentLifecycleManager.global().ensureLive(launch.id);
+					if (closing || terminal) throw new Error("Worker terminal attachment is no longer available");
+					terminalView = frame.viewId;
+					const viewId = terminalView;
+					terminal = new ExecutorTerminal(Number(frame.cols), Number(frame.rows), data =>
+						emit({ type: "terminal_output", viewId, agentId: launch!.id, data }),
+					);
+					try {
+						await terminal.attach(session, {
+							agentId: launch.id,
+							submit: async (text, options) => {
+								if (options.images?.length) throw new Error("Image input is not supported by the worker owner");
+								await ownerTransport.request(
+									"terminal_submit",
+									{ agentId: launch!.id, viewId, text, streamingBehavior: options.streamingBehavior },
+									lifetime.signal,
+								);
+								return true;
+							},
+						});
+						terminalReady = true;
+					} catch (error) {
+						terminal.dispose();
+						terminal = undefined;
+						terminalView = "";
+						throw error;
+					}
+				} else {
+					terminal.resize(Number(frame.cols), Number(frame.rows));
+					terminal.setVisible(true);
+				}
+				respond(id, type, {
+					agentId: launch.id,
+					sessionId: terminal.mode!.session.sessionId,
+					sessionFile: terminal.mode!.session.sessionFile,
+					pid: process.pid,
+				});
+				return;
+			}
+			if (!terminal || !terminalReady || frame.viewId !== terminalView)
+				throw new Error("Worker terminal attachment changed");
+			switch (type) {
+				case "terminal_message": {
+					if (
+						typeof frame.text !== "string" ||
+						Buffer.byteLength(frame.text) > 8192 ||
+						(frame.streamingBehavior !== "steer" && frame.streamingBehavior !== "followUp")
+					)
+						throw new Error("Invalid worker terminal submission");
+					const session = terminal.mode!.session;
+					if (!running || !session.isStreaming)
+						throw new Error("Worker has no active turn; approve a follow-up to continue");
+					if (frame.streamingBehavior === "followUp") await session.followUp(frame.text);
+					else await session.steer(frame.text);
+					respond(id, type, { to: launch.id, outcome: "injected" });
+					return;
+				}
+				case "terminal_input":
+					if (typeof frame.data !== "string" || Buffer.byteLength(frame.data) > 65536)
+						throw new Error("Invalid worker terminal input");
+					terminal.input(frame.data);
+					break;
+				case "terminal_resize":
+					if (
+						!Number.isInteger(frame.cols) ||
+						!Number.isInteger(frame.rows) ||
+						Number(frame.cols) < 2 ||
+						Number(frame.cols) > 500 ||
+						Number(frame.rows) < 2 ||
+						Number(frame.rows) > 300
+					)
+						throw new Error("Invalid worker terminal dimensions");
+					terminal.resize(Number(frame.cols), Number(frame.rows));
+					break;
+				case "terminal_visible":
+					if (typeof frame.visible !== "boolean") throw new Error("Invalid terminal visibility");
+					terminal.setVisible(frame.visible);
+					break;
+				case "terminal_detach":
+					terminal.dispose();
+					terminal = undefined;
+					terminalReady = false;
+					terminalView = "";
+					break;
+				default:
+					throw new Error("Unsupported worker terminal command");
+			}
+			respond(id, type, null);
+			return;
+		}
 		switch (type) {
+			case "workspace_run":
+			case "workspace_integrate": {
+				if (!workspace) throw new Error("This worker has no reserved workspace");
+				if (running) throw new Error("The native child already has an active operation");
+				running = type === "workspace_run" ? workspace.run() : workspace.integrate();
+				try {
+					const data = await running;
+					if (type === "workspace_run") await flushTelemetryExport();
+					respond(id, type, data);
+				} finally {
+					running = undefined;
+					if (type === "workspace_run") turn = undefined;
+				}
+				return;
+			}
 			case "follow_up": {
 				if (running) throw new Error("The native child already has an active turn");
 				if (
@@ -608,6 +877,22 @@ export async function runExecutorHost(): Promise<void> {
 						frame.maxRuntimeMs < 0)
 				)
 					throw new Error("Invalid follow-up runtime limit");
+				if (frame.modelSelection !== undefined) {
+					const selection = frame.modelSelection;
+					if (!isRecord(selection) || !modelOwner || !registry.get(launch.id))
+						throw new Error("Native follow-up model selection is unavailable");
+					const choice = workerModelChoices(modelOwner).find(
+						candidate => candidate.provider === selection.provider && candidate.id === selection.id,
+					);
+					const thinkingLevel = choice?.efforts.find(effort => effort === selection.thinkingLevel);
+					if (
+						!choice ||
+						(choice.efforts.length > 0 ? thinkingLevel === undefined : selection.thinkingLevel !== undefined)
+					)
+						throw new Error("Select an available native model and an allowed thinking level");
+					modelSelection = { provider: choice.provider, id: choice.id, thinkingLevel };
+					authorizedModel = { provider: choice.provider, id: choice.id };
+				}
 				turn = new AbortController();
 				const followUpSignal = AbortSignal.any([turn.signal, lifetime.signal]);
 				const workPoolYieldItems = Array.isArray(frame.workPoolYieldItems)
@@ -618,16 +903,19 @@ export async function runExecutorHost(): Promise<void> {
 				running = context.with(
 					isRecord(frame.trace) ? propagation.extract(ROOT_CONTEXT, frame.trace) : context.active(),
 					async () => {
-						const result = await runSubagentFollowUpTurn({
-							...followUpLaunch,
-							message: String(frame.message),
-							workPoolYieldItems,
-							maxRuntimeMs,
-							signal: followUpSignal,
-							eventBus: events,
-							subagentEventBus: events,
-							onProgress: progress => emit({ type: "progress", progress }),
-						});
+						const execute = () =>
+							runSubagentFollowUpTurn({
+								...followUpLaunch,
+								message: String(frame.message),
+								modelSelection,
+								workPoolYieldItems,
+								maxRuntimeMs,
+								signal: followUpSignal,
+								eventBus: events,
+								subagentEventBus: events,
+								onProgress: progress => emit({ type: "progress", progress }),
+							});
+						const result = workspace ? await workspace.followUp(execute) : await execute();
 						await flushTelemetryExport();
 						return result;
 					},
@@ -659,6 +947,7 @@ export async function runExecutorHost(): Promise<void> {
 							? {
 									expectsReply: frame.options.expectsReply === true,
 									suppressRelay: frame.options.suppressRelay === true,
+									activeOnly: frame.options.activeOnly === true,
 								}
 							: undefined,
 					),
@@ -667,11 +956,17 @@ export async function runExecutorHost(): Promise<void> {
 			case "cancel":
 			case "release": {
 				closing = true;
+				terminal?.dispose();
+				terminal = undefined;
+				terminalReady = false;
+				terminalView = "";
 				turn?.abort();
 				await running?.catch(() => {});
-				const released = await AgentLifecycleManager.global().release(launch.id, undefined, {
-					tombstone: type === "cancel" || frame.tombstone === true,
-				});
+				const released = workspace
+					? await workspace.release(type === "cancel" || frame.tombstone === true)
+					: await AgentLifecycleManager.global().release(launch.id, undefined, {
+							tombstone: type === "cancel" || frame.tombstone === true,
+						});
 				// This process exists for one child; its descendants go with it, through their owner.
 				await AgentLifecycleManager.global().dispose();
 				respond(id, type, released);
@@ -679,6 +974,10 @@ export async function runExecutorHost(): Promise<void> {
 			}
 			case "park":
 				if (running) throw new Error("Cannot park an active native turn");
+				terminal?.dispose();
+				terminal = undefined;
+				terminalReady = false;
+				terminalView = "";
 				await AgentLifecycleManager.global().park(launch.id);
 				respond(id, type, { status: registry.get(launch.id)?.status });
 				return;
@@ -686,7 +985,13 @@ export async function runExecutorHost(): Promise<void> {
 				throw new Error(`Unsupported native worker command: ${type}`);
 		}
 	};
-	emit({ type: "ready", protocol: "omp-native-executor", version: 1, pid: process.pid });
+	emit({
+		type: "ready",
+		protocol: "omp-native-executor",
+		version: 1,
+		capabilities: ["workspace_v1", "parent_relay_v1", "peer_registry_v1", "operator_controls_v1", "terminal_v1"],
+		pid: process.pid,
+	});
 	try {
 		await readRpcInputFrames(
 			input,
@@ -700,14 +1005,19 @@ export async function runExecutorHost(): Promise<void> {
 			error => fail(undefined, undefined, error),
 		);
 	} finally {
+		terminal?.dispose();
 		closing = true;
 		lifetime.abort(new Error("Native executor owner disconnected"));
+		relayingRegistry = true;
+		peers?.close();
+		relayingRegistry = false;
 		hostTools.close("Native executor owner disconnected");
 		for (const request of ownerRequests.values()) request.reject(new Error("Native executor owner disconnected"));
 		try {
 			await untilAborted(AbortSignal.timeout(5000), () => Promise.allSettled(controls));
 		} finally {
 			try {
+				await workspace?.release();
 				await AgentLifecycleManager.global().dispose();
 			} finally {
 				disconnectOwner?.();

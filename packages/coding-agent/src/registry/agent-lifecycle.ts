@@ -25,6 +25,7 @@ import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { externalExecutorForSession } from "../task/external-executor";
+import { hostedPeerRoute } from "../task/hosted-peers";
 import {
 	type AgentRef,
 	type AgentRefExpectation,
@@ -212,6 +213,7 @@ export class AgentLifecycleManager {
 	async reclaimDeadCorpse(id: string, expected: AgentRef): Promise<boolean> {
 		const ref = this.#registry.get(id);
 		if (ref !== expected || ref.status !== "parked" || ref.session) return false;
+		if (hostedPeerRoute(ref)) return false;
 		if (externalExecutorForSession(ref.sessionFile, false)) return false;
 		if (this.#adopted.has(id) || this.#parks.has(id) || this.#revivals.has(id)) return false;
 
@@ -268,6 +270,7 @@ export class AgentLifecycleManager {
 	 */
 	async park(id: string): Promise<void> {
 		const externalRef = this.#registry.get(id);
+		if (hostedPeerRoute(externalRef)) throw new Error("A remote peer's lifecycle belongs to its owner");
 		const external = externalExecutorForSession(externalRef?.sessionFile, false);
 		if (external && externalRef) return external.park(externalRef);
 		const existing = this.#parks.get(id);
@@ -372,7 +375,7 @@ export class AgentLifecycleManager {
 			);
 		}
 		if (ref.session) return ref.session;
-		if (externalExecutorForSession(ref.sessionFile, false)) {
+		if (hostedPeerRoute(ref) || externalExecutorForSession(ref.sessionFile, false)) {
 			throw new Error(
 				`Agent "${id}" is externally hosted; use its owner's controls rather than a local session revival`,
 			);
@@ -458,6 +461,7 @@ export class AgentLifecycleManager {
 		const ref = currentMatches ? current : adoptedMatches ? adopted.ref : undefined;
 		const onRelease = adopted && adopted.ref === ref ? adopted.onRelease : undefined;
 		if (!ref) return false;
+		if (hostedPeerRoute(ref)) throw new Error("A remote peer's lifecycle belongs to its owner");
 		const external = externalExecutorForSession(ref.sessionFile, false);
 		if (external) {
 			await external.release(ref, options);
@@ -526,6 +530,7 @@ export class AgentLifecycleManager {
 		const externalIds = this.#registry
 			.list()
 			.filter(ref => {
+				if (hostedPeerRoute(ref)) return false;
 				try {
 					return externalExecutorForSession(ref.sessionFile, false) !== undefined;
 				} catch {

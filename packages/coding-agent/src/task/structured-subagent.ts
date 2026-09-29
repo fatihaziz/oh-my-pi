@@ -787,7 +787,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			mergeSummary = outcome.summary;
 			changesApplied = outcome.changesApplied;
 			if (outcome.changesApplied !== false) {
-				const nestedPatchSummary = await applyEligibleNestedPatches({
+				const nested = await applyEligibleNestedPatches({
 					result,
 					repoRoot: isolationContext.repoRoot,
 					mergeMode: policy.mergeMode,
@@ -795,9 +795,9 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 					mergedBranchForNestedPatches: outcome.mergedBranchForNestedPatches,
 					commitMessage: makeIsolationCommitMessage(request.session)(),
 				});
-				mergeSummary += nestedPatchSummary;
-				requiresRecoveryArtifacts ||=
-					nestedPatchSummary.includes("<system-notification>") && (result.nestedPatches?.length ?? 0) > 0;
+				mergeSummary += nested.summary;
+				requiresRecoveryArtifacts ||= nested.failed;
+				if (nested.failed) changesApplied = false;
 			}
 		} else if (policy.isIsolated && isolationContext && result.exitCode === 0 && result.error && !result.aborted) {
 			// The agent finished but the runner could not capture, persist, or

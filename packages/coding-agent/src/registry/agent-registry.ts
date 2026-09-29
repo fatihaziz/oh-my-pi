@@ -13,6 +13,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
 import { externalExecutorForSession } from "../task/external-executor";
+import { hostedPeerRoute } from "../task/hosted-peers";
 
 import { MAIN_AGENT_ID, type AgentStatus, type AgentMetricsSummary } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 export { MAIN_AGENT_ID };
@@ -343,6 +344,8 @@ export class AgentRegistry {
 	isRunning(ref: AgentRef): boolean {
 		if (ref.status !== "running") return false;
 		if (ref.session) return ref.session.isStreaming === true;
+		const peer = hostedPeerRoute(ref);
+		if (peer) return peer.connected;
 		try {
 			return externalExecutorForSession(ref.sessionFile, false) !== undefined;
 		} catch {

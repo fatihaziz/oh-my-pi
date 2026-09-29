@@ -5,6 +5,12 @@
 ### Added
 
 - Added `ctx.companion` to the extension context: an authoritative final-settle snapshot with subscription, one semantic `submit`, a bounded `interrupt`, the resolvable command list, and a validated resolver for an open `ask` dialog, so an external client can observe turn completion and answer a question through supported APIs instead of scraping the TUI.
+- Added local native-executor `terminal_v1`: attach the worker's real interactive TUI to its existing session over bounded owner IPC, preserve draft and identity across resize/hide/show, and route submitted text through owner admission. Hosted completion/error notifications now use the terminal transport instead of corrupting executor JSONL.
+
+### Fixed
+
+- Native executor startup now initializes process-wide settings from the validated parent snapshot without loading or writing disk configuration. Attaching a worker's InteractiveMode no longer fails with `Settings not initialized`. Terminal attachment retains the existing session, model authorization and owner controls.
+
 ## [18.3.2] - 2026-09-25
 
 ### Added

@@ -12,6 +12,7 @@ import {
 	__physicalTargetSegmentsForTesting,
 	resetSettingsForTest,
 	Settings,
+	settings as globalSettings,
 } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 
@@ -150,6 +151,21 @@ describe("Settings", () => {
 	});
 
 	describe("effective values", () => {
+		it("initializes worker settings from the parent snapshot without loading or writing disk settings", async () => {
+			await writeSettings({ setupVersion: 1 });
+			expect(() => Settings.initFromSnapshot({ setupVersion: "invalid" })).toThrow();
+			expect(Settings.current).toBeNull();
+			const instance = Settings.initFromSnapshot({ setupVersion: 7 });
+			expect(cfgSetupVersion.get(globalSettings)).toBe(7);
+			expect(await Settings.init({ cwd: projectDir, agentDir })).toBe(instance);
+			expect(() => Settings.initFromSnapshot({ setupVersion: 9 })).toThrow("already initialized");
+			cfgSetupVersion.override(instance, 8);
+			await instance.flush();
+			expect(cfgSetupVersion.get(Settings.instance)).toBe(8);
+			expect(await readSettings()).toEqual({ setupVersion: 1 });
+			expect(fs.existsSync(getAgentDbPath(agentDir))).toBe(false);
+		});
+
 		it("keeps cloned defaults independent across settings instances", () => {
 			const first = cfgCompaction.get(Settings.isolated());
 			const second = cfgCompaction.get(Settings.isolated());

@@ -845,12 +845,14 @@ describe("detachGitDir", () => {
 		await runGit(clone, ["config", "core.fileMode", "false"]);
 		// Git's fsmonitor/split-index interaction can crash during fixture setup.
 		await runGit(clone, ["config", "core.fsmonitor", "false"]);
+		await runGit(clone, ["config", "index.skipHash", "false"]);
 		await runGit(clone, ["config", "core.splitIndex", "true"]);
 		const wt = path.join(origin, "..", `${path.basename(origin)}-shallow-wt`);
 		tempDirs.push(wt);
 		await runGit(clone, ["worktree", "add", "-q", wt, "-b", "feature/parent", "HEAD"]);
 		// Split the worktree's own index so it references a sharedindex.* file.
 		await runGit(wt, ["-c", "core.fsmonitor=false", "update-index", "--split-index"]);
+		expect(await runGit(wt, ["status", "--porcelain=v1"])).toBe("");
 		const commonDir = path.resolve(
 			(await runGit(clone, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim(),
 		);

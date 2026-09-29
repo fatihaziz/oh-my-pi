@@ -39,6 +39,7 @@ export interface IsolationOwner {
  * neither (e.g. Windows) yield `null`, degrading to a pid-only liveness check.
  */
 async function processStartToken(pid: number): Promise<string | null> {
+	if (process.platform === "win32") return null;
 	if (process.platform === "linux") {
 		let stat: string;
 		try {

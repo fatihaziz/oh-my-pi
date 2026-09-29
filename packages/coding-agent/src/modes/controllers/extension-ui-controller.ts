@@ -314,10 +314,8 @@ export class ExtensionUiController {
 			this.showExtensionError(error.extensionPath, error.error);
 		});
 
-		// Emit session_start event
-		await extensionRunner.emit({
-			type: "session_start",
-		});
+		// Attaching a terminal must not replay startup hooks on an already-running worker.
+		if (!this.ctx.hostedInput) await extensionRunner.emit({ type: "session_start" });
 	}
 
 	/**
