@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Binary-capable VCS diffs encode non-UTF8 content as binary patches even when it contains no NUL bytes. Dirty PDF baselines now round-trip without replacement-character corruption during isolated task preparation.
+
 ## [18.4.4] - 2026-09-29
 
 ### Fixed

@@ -680,6 +680,22 @@ fn render_change(
 	let prepared = cache
 		.prepare_diff()
 		.map_err(|err| Error::backend("git diff", err))?;
+	let operation = if binary_patch
+		&& (prepared
+			.old
+			.data
+			.as_slice()
+			.is_some_and(|bytes| std::str::from_utf8(bytes).is_err())
+			|| prepared
+				.new
+				.data
+				.as_slice()
+				.is_some_and(|bytes| std::str::from_utf8(bytes).is_err()))
+	{
+		gix::diff::blob::platform::prepare_diff::Operation::SourceOrDestinationIsBinary
+	} else {
+		prepared.operation
+	};
 
 	let mut text = String::new();
 	text.push_str("diff --git a/");
@@ -688,7 +704,7 @@ fn render_change(
 	text.push_str(&change.new_path);
 	text.push('\n');
 	let is_binary = matches!(
-		prepared.operation,
+		operation,
 		gix::diff::blob::platform::prepare_diff::Operation::SourceOrDestinationIsBinary
 	);
 	let similarity = if change.similarity == Some(u8::MAX) {
@@ -698,7 +714,7 @@ fn render_change(
 	};
 	append_metadata(&mut text, change, similarity, binary_patch && is_binary);
 
-	match prepared.operation {
+	match operation {
 		gix::diff::blob::platform::prepare_diff::Operation::SourceOrDestinationIsBinary => {
 			if binary_patch {
 				text.push_str("GIT binary patch\n");
@@ -1659,6 +1675,37 @@ mod tests {
 			repo.diff_text(&base_only).expect("base diff"),
 			git(dir.path(), &["diff", "--no-ext-diff", "HEAD^"])
 		);
+	}
+
+	#[test]
+	fn binary_patches_preserve_non_utf8_without_nul_bytes() {
+		let dir = fixture();
+		let file = dir.path().join("wiring.pdf");
+		let before = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\nold drawing\n%%EOF\n";
+		let after = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\nnew drawing\n%%EOF\n";
+		fs::write(&file, before).expect("write original PDF");
+		git(dir.path(), &["add", "wiring.pdf"]);
+		git(dir.path(), &["commit", "-qm", "PDF base"]);
+		fs::write(&file, after).expect("modify PDF");
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let options = DiffOptions { binary: true, ..DiffOptions::default() };
+		let patch = repo.diff_text(&options).expect("diff PDF");
+		fs::write(&file, before).expect("restore fixture before applying");
+		repo
+			.apply_patch(&patch, &crate::types::ApplyOptions::default())
+			.expect("apply PDF patch");
+		assert_eq!(fs::read(&file).expect("read applied PDF"), after);
+		fs::write(dir.path().join("untracked.pdf"), after).expect("write untracked PDF");
+		let patch = repo
+			.diff_no_index(Path::new("NUL"), Path::new("untracked.pdf"), true)
+			.expect("untracked diff");
+		fs::remove_file(dir.path().join("untracked.pdf")).expect("remove fixture before applying");
+		repo
+			.apply_patch(&patch, &crate::types::ApplyOptions::default())
+			.expect("apply untracked PDF patch");
+		assert_eq!(fs::read(dir.path().join("untracked.pdf")).expect("read untracked PDF"), after);
 	}
 
 	#[test]
