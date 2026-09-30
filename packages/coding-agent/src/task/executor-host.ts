@@ -218,7 +218,7 @@ export async function runExecutorHost(): Promise<void> {
 		events.on(channel, payload => emit({ type: "subagent_frame", channel, payload }));
 	}
 	const unsubscribe = registry.onChange(({ type, ref }) => {
-		if (relayingRegistry) return;
+		if (relayingRegistry || ref.id !== launch?.id) return;
 		const { session: _session, ...snapshot } = ref;
 		emit({ type: "subagent_registry", change: type, ref: snapshot });
 	});

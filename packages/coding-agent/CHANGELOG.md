@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Native worker registry notifications now report only the worker's owned identity. Restoring parked sibling transcripts no longer sends them as the current worker and trips Foyer's peer ownership validation; sibling history remains available locally.
 - Native executor startup now initializes process-wide settings from the validated parent snapshot without loading or writing disk configuration. Attaching a worker's InteractiveMode no longer fails with `Settings not initialized`. Terminal attachment retains the existing session, model authorization and owner controls.
 - Foyer-owned native workers now start with inherited agent choices and task open-endedness intact after upstream's task contract changed.
 ## [18.4.4] - 2026-09-29
