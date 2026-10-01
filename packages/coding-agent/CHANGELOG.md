@@ -4,11 +4,14 @@
 
 ### Added
 
+- Added `ctx.judge()` for native extension judgments bound to the caller's judge role, cancellation, shared cache and usage ledger. It rejects chat-model fallback, so a judged Question does not need a separate client or credential path.
 - Added `ctx.companion` to the extension context: an authoritative final-settle snapshot with subscription, one semantic `submit`, a bounded `interrupt`, the resolvable command list, and a validated resolver for an open `ask` dialog, so an external client can observe turn completion and answer a question through supported APIs instead of scraping the TUI.
 - Added local native-executor `terminal_v1`: attach the worker's real interactive TUI to its existing session over bounded owner IPC, preserve draft and identity across resize/hide/show, and route submitted text through owner admission. Hosted completion/error notifications now use the terminal transport instead of corrupting executor JSONL.
 
 ### Fixed
 
+- Dequeue now restores steering that remains visible while a live response is using it. It withdraws that input before interrupting the response, preserves the editor draft, and prevents the withdrawn input from being replayed.
+- Extension model-role resolution now searches all available model kinds, so `ctx.models.resolve("@judge")` can resolve native JEV instead of treating it as unavailable. The ordinary `ctx.models.list()` remains chat-only.
 - Native worker registry notifications now report only the worker's owned identity. Restoring parked sibling transcripts no longer sends them as the current worker and trips Foyer's peer ownership validation; sibling history remains available locally.
 - Native executor startup now initializes process-wide settings from the validated parent snapshot without loading or writing disk configuration. Attaching a worker's InteractiveMode no longer fails with `Settings not initialized`. Terminal attachment retains the existing session, model authorization and owner controls.
 - Foyer-owned native workers now start with inherited agent choices and task open-endedness intact after upstream's task contract changed.

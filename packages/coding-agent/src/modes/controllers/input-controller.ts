@@ -1613,6 +1613,11 @@ export class InputController {
 	handleDequeue(): void {
 		const popped = this.#popLastQueuedMessage();
 		if (!popped) {
+			if (this.ctx.session.getQueuedMessages().steering.length > 0) {
+				// Visible live steering must be withdrawn before its response is interrupted.
+				this.restoreQueuedMessagesToEditor({ abort: true });
+				return;
+			}
 			this.ctx.showStatus("No queued messages to restore");
 			return;
 		}

@@ -55,6 +55,23 @@ describe("createExtensionModelQuery", () => {
 		expect(q.resolve("@slow")).toBe(claude);
 	});
 
+	test("resolve() finds a native judge role while list() remains chat-only", () => {
+		const jev = buildModel({
+			id: "jev-test", name: "JEV Test", provider: "typesafe", api: "typesafe",
+			baseUrl: "https://example.test", reasoning: false, input: ["text"],
+			cost: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000, maxTokens: 8192,
+		});
+		const nativeRegistry = {
+			getAvailable: (kind = "chat") => kind === "all" ? [...available, jev] : available,
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({ modelRoles: { judge: "typesafe/jev-test" } });
+		const q = createExtensionModelQuery(nativeRegistry, settings, () => claude);
+		expect(q.resolve("@judge")?.api).toBe("typesafe");
+		expect(q.resolve("@judge")?.id).toBe("jev-test");
+		expect(q.list()).not.toContain(jev);
+	});
+
 	test("family() groups a vendor's point releases and separates vendors", () => {
 		const q = createExtensionModelQuery(registry(), undefined, () => undefined);
 		expect(q.family(claude)).toBe(q.family(claudePrev));

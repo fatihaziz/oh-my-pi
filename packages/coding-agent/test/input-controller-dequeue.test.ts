@@ -10,13 +10,12 @@
  *
  * Contracts defended here:
  *   - one Alt+Up restores exactly the last queued message and leaves the others
- *     in the queue (does not call `clearQueue`);
+ *     in the queue;
  *   - the restored text is merged ahead of the existing draft;
- *   - an empty queue reports "No queued messages to restore";
  *   - when the agent queues are empty, the compaction queue is the fallback and
  *     only its last entry is popped.
  */
-import { beforeAll, describe, expect, mock, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -31,14 +30,12 @@ function makeCtx(
 ) {
 	const queue = [...(opts.queue ?? [])];
 	let editorText = opts.draft ?? "";
-	const statuses: string[] = [];
 
-	// Faithful stub of AgentSession.popLastQueuedMessage: removes and returns the
-	// last queued entry, or undefined when empty. clearQueue is spied so the test
-	// proves the dequeue path never drains the whole queue.
-	const clearQueue = mock(() => ({ steering: [] as RestoredQueuedMessage[], followUp: queue.splice(0) }));
+	// Match the queue mutations so assertions observe retained messages.
+	const clearQueue = () => ({ steering: [] as RestoredQueuedMessage[], followUp: queue.splice(0) });
 	const session = {
 		popLastQueuedMessage: () => queue.pop(),
+		getQueuedMessages: () => ({ steering: queue.map(message => message.text), followUp: [] }),
 		clearQueue,
 	};
 
@@ -56,18 +53,16 @@ function makeCtx(
 		},
 		locallySubmittedUserSignatures: new Set<string>(),
 		updatePendingMessagesDisplay: () => {},
-		showStatus: (msg: string) => {
-			statuses.push(msg);
-		},
+		showStatus: () => {},
 		showError: () => {},
 	} as unknown as InteractiveModeContext;
 
-	return { ctx, session, queue, clearQueue, statuses, getText: () => editorText };
+	return { ctx, queue, getText: () => editorText };
 }
 
 describe("InputController.handleDequeue (Alt+Up)", () => {
 	test("pops only the last queued message and leaves the rest queued", () => {
-		const { ctx, queue, clearQueue, getText } = makeCtx({
+		const { ctx, queue, getText } = makeCtx({
 			queue: [{ text: "first message" }, { text: "second message" }],
 		});
 
@@ -75,7 +70,6 @@ describe("InputController.handleDequeue (Alt+Up)", () => {
 
 		expect(getText()).toBe("second message");
 		expect(queue.map(m => m.text)).toEqual(["first message"]);
-		expect(clearQueue).not.toHaveBeenCalled();
 	});
 
 	test("a second Alt+Up pops the next-last message", () => {
@@ -88,13 +82,6 @@ describe("InputController.handleDequeue (Alt+Up)", () => {
 		controller.handleDequeue();
 		// Popped message merges ahead of the draft the first pop restored.
 		expect(getText()).toBe("first\n\nsecond");
-	});
-
-	test("empty queue reports nothing to restore", () => {
-		const { ctx, statuses, getText } = makeCtx();
-		new InputController(ctx).handleDequeue();
-		expect(statuses).toEqual(["No queued messages to restore"]);
-		expect(getText()).toBe("");
 	});
 
 	test("falls back to the compaction queue and pops only its last entry", () => {

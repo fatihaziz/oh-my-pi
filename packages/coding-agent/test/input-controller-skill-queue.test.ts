@@ -8,6 +8,8 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import type { StreamFn } from "@oh-my-pi/pi-agent-core/types";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -548,7 +550,7 @@ interface SessionFixture {
 	session: AgentSession;
 }
 
-async function createRealSession(): Promise<SessionFixture> {
+async function createRealSession(streamFn?: StreamFn): Promise<SessionFixture> {
 	const tempDir = TempDir.createSync("@pi-skill-queue-real-");
 	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 	authStorage.keys.setRuntime("anthropic", "test-key");
@@ -557,6 +559,7 @@ async function createRealSession(): Promise<SessionFixture> {
 	if (!model) throw new Error("Expected built-in anthropic model to exist");
 
 	const agent = new Agent({
+		streamFn,
 		initialState: {
 			model,
 			systemPrompt: ["Test"],
@@ -828,6 +831,7 @@ function createStubInteractiveModeContextForUiHelpers(session: AgentSession) {
 			getKeys: (_action: string) => ["alt+up"],
 		},
 		updatePendingMessagesDisplay,
+		showStatus: vi.fn(),
 		locallySubmittedUserSignatures: new Set<string>(),
 	} as unknown as InteractiveModeContext;
 
@@ -851,6 +855,54 @@ describe("UiHelpers / InputController against derived queued custom display", ()
 			fixture = undefined;
 		}
 		vi.restoreAllMocks();
+	});
+
+	it("restores visible live steering through dequeue without replaying it after interruption", async () => {
+		const opened = Promise.withResolvers<void>();
+		const claimed = Promise.withResolvers<void>();
+		fixture = await createRealSession(async (_model, _context, options) => {
+			const live = options?.liveSteering;
+			const signal = options?.signal;
+			if (!live || !signal) throw new Error("Expected live steering");
+			const stream = new AssistantMessageEventStream();
+			signal.addEventListener("abort", () => stream.fail(new Error("aborted")), { once: true });
+			opened.resolve();
+			await live.wait(signal);
+			if (!(await live.claim(signal))) throw new Error("Expected a queued message");
+			claimed.resolve();
+			return stream;
+		});
+		const { session } = fixture;
+		const { ctx, editor, pendingMessagesContainer } = createStubInteractiveModeContextForUiHelpers(session);
+		editor.setText("existing draft");
+		const running = session.agent.prompt("Start the controlled response");
+		try {
+			await opened.promise;
+			const message = {
+				role: "user" as const,
+				content: "pending correction",
+				attribution: "user" as const,
+				timestamp: Date.now(),
+			};
+			session.agent.steer(message);
+			await claimed.promise;
+			new UiHelpers(ctx).updatePendingMessagesDisplay();
+			expect(Bun.stripANSI(pendingMessagesContainer.render(120).join("\n"))).toContain("pending correction");
+			expect(session.agent.peekSteeringQueue()).toEqual([]);
+
+			new InputController(ctx).handleDequeue();
+			expect(editor.getText()).toBe("pending correction\n\nexisting draft");
+			await running;
+			expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: [] });
+			expect(session.agent.peekUndeliveredQueuedMessages()).toEqual([]);
+			expect(session.agent.state.messages).not.toContainEqual(
+				expect.objectContaining({ role: "user", content: message.content }),
+			);
+		} finally {
+			session.clearQueue({ forInterrupt: true });
+			session.agent.abort();
+			await running;
+		}
 	});
 
 	it("renders the compact slash form for queued skills", async () => {

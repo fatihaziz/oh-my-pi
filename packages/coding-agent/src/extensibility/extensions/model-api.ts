@@ -29,7 +29,7 @@ export function createExtensionModelQuery(
 		// fallback model lower in the list still resolves. Plain model strings pass through
 		// as a single pattern.
 		resolve: (spec: string): Model<Api> | undefined =>
-			resolveModelRoleValue(spec, modelRegistry.getAvailable(), {
+			resolveModelRoleValue(spec, modelRegistry.getAvailable("all"), {
 				settings,
 				matchPreferences: getModelMatchPreferences(settings),
 			}).model,

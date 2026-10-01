@@ -43,6 +43,7 @@ import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../s
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
+import { journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../../judgment";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type {
 	AfterProviderResponseEvent,
@@ -1376,6 +1377,21 @@ export class ExtensionRunner {
 				return getModel();
 			},
 			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel),
+			judge: async (request, options = {}) => {
+				if (!this.settings) throw new Error("Native extension judgment requires session settings.");
+				const judge = resolveJudge({
+					settings: this.settings,
+					registry: this.modelRegistry,
+					sessionId: this.sessionManager.getSessionId(),
+					purpose: "extension-judgment",
+					onUsage: journalJudgmentUsage(this.sessionManager),
+					cache: sharedJudgmentCache(),
+				});
+				return judge.withCandidate(async (candidate, kind) => {
+					if (kind !== "native") throw new Error("Native extension judgment cannot use a chat-model fallback.");
+					return candidate.judge(request, options);
+				}, options);
+			},
 			isIdle: () => this.#isIdleFn(),
 			abort: () => this.#abortFn(),
 			hasPendingMessages: () => this.#hasPendingMessagesFn(),

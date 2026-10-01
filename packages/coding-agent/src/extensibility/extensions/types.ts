@@ -44,6 +44,10 @@ import type {
 	AssistantMessageEventStream,
 	Context,
 	ImageContent,
+	JudgeOptions,
+	JudgmentRequest,
+	JudgmentResult,
+	Questions,
 	Model,
 	ModelSpec,
 	ProviderResponseMetadata,
@@ -525,6 +529,8 @@ export interface ExtensionContext {
 	model: Model | undefined;
 	/** Read-only model query facade: list / current / resolve / family. */
 	models: ExtensionModelQuery;
+	/** Native typed judgment using this session's judge role, cancellation, cache and usage ledger. */
+	judge?<Q extends Questions>(request: JudgmentRequest<Q>, options?: JudgeOptions): Promise<JudgmentResult<Q>>;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
 	/** Abort the current agent operation */
