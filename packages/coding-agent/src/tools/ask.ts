@@ -81,6 +81,7 @@ const QuestionItem = arkType({
 
 const askSchema = arkType({
 	questions: QuestionItem.array().atLeastLength(1),
+	"timeout?": arkType("number >= 0").describe("Timeout in seconds for this call; 0 disables it. Omitted uses the session setting."),
 });
 
 const askRecoveryTool = { name: "ask", description: "", parameters: askSchema };
@@ -743,7 +744,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		// Determine timeout based on settings and plan mode
 		const planModeEnabled = this.session.getPlanModeState?.()?.enabled ?? false;
 		// `ask.timeout` is in seconds (0 = disabled); convert to ms
-		const timeoutSeconds = cfgAskTimeout.get(this.session.settings);
+		const timeoutSeconds = params.timeout ?? cfgAskTimeout.get(this.session.settings);
 		const settingsTimeout = timeoutSeconds === 0 ? null : timeoutSeconds * 1000;
 		const timeout = planModeEnabled ? null : settingsTimeout;
 

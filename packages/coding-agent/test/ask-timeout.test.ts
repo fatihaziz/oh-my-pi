@@ -41,6 +41,51 @@ describe("AskTool timeout", () => {
 		vi.restoreAllMocks();
 	});
 
+	it("uses a per-call five-second timeout instead of the session default", async () => {
+		vi.useFakeTimers();
+		const context = {
+			hasUI: true,
+			ui: { select: vi.fn<AskSelect>(() => Promise.withResolvers<string | undefined>().promise), editor: vi.fn() },
+			abort: vi.fn(),
+		} as unknown as AgentToolContext;
+		let result: AskExecutionResult | undefined;
+		const pending = createAskTool().execute("five-seconds", {
+			timeout: 5,
+			questions: [{ id: "format", question: "Which format?", options: [{ label: "JSON" }, { label: "CSV" }], recommended: 1 }],
+		}, undefined, undefined, context).then(value => { result = value; });
+		await drainMicrotasks();
+		vi.advanceTimersByTime(4_999);
+		await drainMicrotasks();
+		expect(result).toBeUndefined();
+		vi.advanceTimersByTime(1);
+		await pending;
+		expect(result?.details?.selectedOptions).toEqual(["CSV"]);
+		expect(result?.details?.timedOut).toBe(true);
+	});
+
+	it("disables the timer per call and waits for an explicit answer", async () => {
+		vi.useFakeTimers();
+		const selection = Promise.withResolvers<string | undefined>();
+		const context = {
+			hasUI: true,
+			ui: { select: vi.fn<AskSelect>(() => selection.promise), editor: vi.fn() },
+			abort: vi.fn(),
+		} as unknown as AgentToolContext;
+		let result: AskExecutionResult | undefined;
+		const pending = createAskTool().execute("approval", {
+			timeout: 0,
+			questions: [{ id: "approval", question: "Approve?", options: [{ label: "Approve" }, { label: "Decline" }], recommended: 0 }],
+		}, undefined, undefined, context).then(value => { result = value; });
+		await drainMicrotasks();
+		vi.advanceTimersByTime(5_001);
+		await drainMicrotasks();
+		expect(result).toBeUndefined();
+		selection.resolve("Decline");
+		await pending;
+		expect(result?.details?.selectedOptions).toEqual(["Decline"]);
+		expect(result?.details?.timedOut).not.toBe(true);
+	});
+
 	it("auto-selects the recommended option when the selector does not settle", async () => {
 		vi.useFakeTimers();
 		const select = vi.fn<AskSelect>(() => Promise.withResolvers<string | undefined>().promise);

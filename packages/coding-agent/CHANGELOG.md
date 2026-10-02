@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added an optional per-call `timeout` in seconds to `ask`. Zero disables automatic selection for approval prompts; omission preserves the session setting. Plan mode continues to disable timeout.
 - Added `ctx.judge()` for native extension judgments bound to the caller's judge role, cancellation, shared cache and usage ledger. It rejects chat-model fallback, so a judged Question does not need a separate client or credential path.
 - Added `ctx.companion` to the extension context: an authoritative final-settle snapshot with subscription, one semantic `submit`, a bounded `interrupt`, the resolvable command list, and a validated resolver for an open `ask` dialog, so an external client can observe turn completion and answer a question through supported APIs instead of scraping the TUI.
 - Added local native-executor `terminal_v1`: attach the worker's real interactive TUI to its existing session over bounded owner IPC, preserve draft and identity across resize/hide/show, and route submitted text through owner admission. Hosted completion/error notifications now use the terminal transport instead of corrupting executor JSONL.
