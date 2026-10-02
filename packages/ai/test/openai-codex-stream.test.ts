@@ -2532,7 +2532,7 @@ describe("openai-codex streaming", () => {
 		},
 	);
 
-	it("retries a pre-response watchdog timeout with a fresh attempt signal", async () => {
+	it("surfaces the first-output deadline instead of restarting a silent attempt", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
 		const token = createCodexTestToken();
@@ -2572,14 +2572,12 @@ describe("openai-codex streaming", () => {
 		vi.advanceTimersByTime(10);
 		const result = await resultPromise;
 
-		expect(requestCount).toBe(2);
-		expect(signals[0]).not.toBe(signals[1]);
+		expect(requestCount).toBe(1);
 		expect(signals[0]?.aborted).toBe(true);
 		expect(signals[0]?.reason).toBeInstanceOf(DOMException);
 		expect(signals[0]?.reason).toHaveProperty("name", "TimeoutError");
-		expect(signals[1]?.aborted).toBe(false);
-		expect(result.stopReason).toBe("stop");
-		expect(result.content.find(block => block.type === "text")?.text).toBe("Recovered after watchdog timeout");
+		expect(result.stopReason).toBe("error");
+		expect(result.content).toEqual([]);
 	});
 
 	it.each([
@@ -5301,6 +5299,35 @@ describe("openai-codex streaming", () => {
 		expect(sendCount).toBeGreaterThanOrEqual(1);
 		expect(result.stopReason).toBe("aborted");
 		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("bounds empty output across provider retries with one first-output deadline", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const caller = new AbortController();
+		let requests = 0;
+		const fetchMock: FetchImpl = async () => {
+			requests++;
+			return new Response(`data: ${JSON.stringify({ type: "response.failed", response: {
+				id: `resp_empty_${requests}`, error: { code: "server_error", message: "temporarily unavailable" },
+			} })}\n\n`, { headers: { "content-type": "text/event-stream" } });
+		};
+		// The scheduler uses native timers; Bun fake timers also fire cleared
+		// watchdogs. Exercise this abort/retry race on the platform clock.
+		const backstop = setTimeout(() => caller.abort(), 1000);
+		try {
+			const result = await streamOpenAICodexResponses(
+				{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+				createCodexTestContext(),
+				{ apiKey: createCodexTestToken(), fetch: fetchMock, signal: caller.signal, streamFirstEventTimeoutMs: 30 },
+			).result();
+			expect(caller.signal.aborted).toBe(false);
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain("first-output deadline");
+			expect(requests).toBe(1);
+		} finally {
+			clearTimeout(backstop);
+		}
 	});
 
 	it("surfaces a websocket idle-timeout error when status events never make semantic progress", async () => {
