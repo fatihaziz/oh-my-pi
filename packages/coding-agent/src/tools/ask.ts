@@ -71,6 +71,9 @@ const QuestionItem = arkType({
 	options: OptionItem.array(),
 	"multi?": arkType("boolean"),
 	"recommended?": arkType("number").describe("0-based default index"),
+	"timeout?": arkType("number >= 0").describe(
+		"Inactivity timeout in seconds for this question; 0 waits for an explicit answer.",
+	),
 }).narrow((question, ctx) => {
 	const reserved = question.options.find(option => RESERVED_OPTION_LABELS[option.label] === true);
 	return (
@@ -81,7 +84,9 @@ const QuestionItem = arkType({
 
 const askSchema = arkType({
 	questions: QuestionItem.array().atLeastLength(1),
-	"timeout?": arkType("number >= 0").describe("Timeout in seconds for this call; 0 disables it. Omitted uses the session setting."),
+	"timeout?": arkType("number >= 0").describe(
+		"Timeout in seconds for this call; 0 disables it. Omitted uses the session setting.",
+	),
 });
 
 const askRecoveryTool = { name: "ask", description: "", parameters: askSchema };
@@ -747,6 +752,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const timeoutSeconds = params.timeout ?? cfgAskTimeout.get(this.session.settings);
 		const settingsTimeout = timeoutSeconds === 0 ? null : timeoutSeconds * 1000;
 		const timeout = planModeEnabled ? null : settingsTimeout;
+		const questionTimeout = (question: AskParams["questions"][number]) =>
+			planModeEnabled ? 0 : (question.timeout ?? timeoutSeconds) * 1000;
 
 		// Send notification if waiting and not suppressed
 		this.#sendAskNotification();
@@ -781,6 +788,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 							})),
 							...(q.multi !== undefined ? { multi: q.multi } : {}),
 							...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
+							...(q.timeout !== undefined ? { timeout: questionTimeout(q) } : {}),
 						})),
 						{ timeout: timeout ?? undefined, signal: dialogSignal, acceptImages: true },
 					);
@@ -895,7 +903,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 					q.multi ?? false,
 					{
 						recommended: q.recommended,
-						timeout: timeout ?? undefined,
+						timeout: questionTimeout(q) || undefined,
 						signal,
 						initialSelection: options?.previous,
 						navigation: options?.navigation,

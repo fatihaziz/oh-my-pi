@@ -32,6 +32,8 @@ export interface ExtensionAskDialogQuestion {
 	options: ExtensionAskDialogOption[];
 	multi?: boolean;
 	recommended?: number;
+	/** Inactivity timeout in milliseconds for this question; 0 disables it. */
+	timeout?: number;
 }
 
 /** Prompt text and the images pasted into it (custom answers and notes). */
@@ -535,6 +537,7 @@ export function normalizeDialogQuestions(questions: ExtensionAskDialogQuestion[]
 			options,
 			...(typeof q.multi === "boolean" ? { multi: q.multi } : {}),
 			...(Number.isInteger(q.recommended) ? { recommended: q.recommended } : {}),
+			...(q.timeout !== undefined ? { timeout: Number.isFinite(q.timeout) && q.timeout >= 0 ? q.timeout : 0 } : {}),
 		});
 	}
 	return out;
@@ -548,6 +551,7 @@ export class AskDialogComponent implements Component {
 	#questionCanPage = false;
 	#remainingSeconds: number | undefined;
 	#countdown: CountdownTimer | undefined;
+	#timerQuestionIndex = -1;
 	#promptActive = false;
 	#timeoutExpired = false;
 	#closed = false;
@@ -595,18 +599,7 @@ export class AskDialogComponent implements Component {
 				timedOut: false,
 			};
 		});
-		if (options.timeout && options.timeout > 0) {
-			this.#countdown = new CountdownTimer(
-				options.timeout,
-				options.tui,
-				seconds => {
-					this.#remainingSeconds = seconds;
-					// Fires on every (re)start: the native ring's deadline.
-					this.#countdownDeadline = Date.now() + seconds * 1000;
-				},
-				() => this.#handleTimeout(),
-			);
-		}
+		this.#syncCountdown();
 		this.#panel = new OverlayPanel("Ask");
 		this.#headerRegion = new PanelRows();
 		this.#bodyRegion = new PanelRows();
@@ -772,7 +765,7 @@ export class AskDialogComponent implements Component {
 		if (this.#countdown) {
 			children.push(node("spacer", { grow: 1 }));
 			if (ring) {
-				const total = Math.max(1, this.options.timeout ?? 1);
+				const total = Math.max(1, this.#activeTimeout() ?? 1);
 				const left = Math.max(0, this.#countdownDeadline - Date.now());
 				children.push(
 					node(
@@ -1088,6 +1081,7 @@ export class AskDialogComponent implements Component {
 	}
 
 	#requestRender(): void {
+		if (this.#questions.some(question => question.timeout !== undefined)) this.#syncCountdown();
 		this.#native = undefined;
 		this.options.tui?.requestRender();
 	}
@@ -1233,6 +1227,7 @@ export class AskDialogComponent implements Component {
 		}
 		const option = question.options[rowItem.optionIndex ?? -1];
 		if (!option) return;
+		state.timedOut = false;
 		if (question.multi) {
 			if (isEnter) {
 				// Enter confirms the current selection without toggling the
@@ -1326,6 +1321,7 @@ export class AskDialogComponent implements Component {
 			}
 			state.customInput = input.text;
 			state.customInputImages = input.images;
+			state.timedOut = false;
 			if (!question.multi) {
 				state.selectedOptions.clear();
 				clearNoteUnlessRow(state, rowItem.key);
@@ -1532,6 +1528,32 @@ export class AskDialogComponent implements Component {
 		return count;
 	}
 
+	#activeTimeout(): number | undefined {
+		if (!this.#questions.some(question => question.timeout !== undefined)) return this.options.timeout;
+		return this.#isSubmitTab() ? 0 : (this.#questions[this.#activeTabIndex]?.timeout ?? this.options.timeout);
+	}
+
+	#syncCountdown(): void {
+		if (this.#timerQuestionIndex === this.#activeTabIndex || this.#closed) return;
+		this.#timerQuestionIndex = this.#activeTabIndex;
+		this.#countdown?.dispose();
+		this.#countdown = undefined;
+		this.#remainingSeconds = undefined;
+		this.#stopRingTick();
+		const timeout = this.#activeTimeout();
+		if (timeout && timeout > 0) {
+			this.#countdown = new CountdownTimer(
+				timeout,
+				this.options.tui,
+				seconds => {
+					this.#remainingSeconds = seconds;
+					this.#countdownDeadline = Date.now() + seconds * 1000;
+				},
+				() => this.#handleTimeout(),
+			);
+		}
+	}
+
 	#handleTimeout(): void {
 		if (this.#closed) return;
 		if (this.#promptActive) {
@@ -1539,7 +1561,9 @@ export class AskDialogComponent implements Component {
 			return;
 		}
 		this.options.onTimeout?.();
+		const perQuestion = this.#questions.some(question => question.timeout !== undefined);
 		for (let index = 0; index < this.#questions.length; index++) {
+			if (perQuestion && index !== this.#activeTabIndex) continue;
 			const question = this.#questions[index];
 			const state = this.#states[index];
 			if (!question || !state) continue;
@@ -1555,10 +1579,28 @@ export class AskDialogComponent implements Component {
 				state.timedOut = true;
 			}
 		}
-		this.#finishSubmit();
+		if (!perQuestion || this.#unansweredCount() === 0) {
+			this.#finishSubmit();
+		} else {
+			const next = this.#states.findIndex(
+				(state, index) =>
+					index > this.#activeTabIndex && state.selectedOptions.size === 0 && state.customInput === undefined,
+			);
+			this.#activeTabIndex =
+				next >= 0
+					? next
+					: this.#states.findIndex(state => state.selectedOptions.size === 0 && state.customInput === undefined);
+			this.#requestRender();
+		}
 	}
 
 	#runDeferredTimeout(): void {
+		if (this.#questions.some(question => question.timeout !== undefined)) {
+			this.#timeoutExpired = false;
+			this.#timerQuestionIndex = -1;
+			this.#syncCountdown();
+			return;
+		}
 		if (!this.#timeoutExpired) return;
 		this.#timeoutExpired = false;
 		this.#handleTimeout();

@@ -995,6 +995,95 @@ describe("AskDialogComponent", () => {
 		expect(result.timedOut).toBe(true);
 	});
 
+	it("times out ordinary questions independently and waits on the approval between them", () => {
+		vi.useFakeTimers();
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "first",
+					question: "Format?",
+					options: [{ label: "JSON" }, { label: "CSV" }],
+					recommended: 1,
+					timeout: 5000,
+				},
+				{
+					id: "approval",
+					question: "Approve launch?",
+					options: [{ label: "Approve" }, { label: "Decline" }],
+					timeout: 0,
+				},
+				{ id: "last", question: "Order?", options: [{ label: "Name first" }], timeout: 5000 },
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn() },
+			{ timeout: 100 },
+		);
+		try {
+			expect(render(component)).toContain("Ask (5s)");
+			vi.advanceTimersByTime(5000);
+			expect(render(component)).toContain("Approve launch?");
+			expect(render(component)).not.toContain("Ask (");
+			vi.advanceTimersByTime(10000);
+			expect(onSubmit).not.toHaveBeenCalled();
+			component.handleInput(DOWN);
+			component.handleInput(ENTER);
+			expect(render(component)).toContain("Ask (5s)");
+			vi.advanceTimersByTime(4000);
+			component.handleInput(UP);
+			vi.advanceTimersByTime(2000);
+			expect(onSubmit).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(3000);
+			const results = onSubmit.mock.calls[0][0].results;
+			expect(results.map((result: { selectedOptions: string[] }) => result.selectedOptions)).toEqual([
+				["CSV"],
+				["Decline"],
+				["Name first"],
+			]);
+			expect(results.map((result: { timedOut?: boolean }) => result.timedOut)).toEqual([true, undefined, true]);
+		} finally {
+			component.dispose();
+		}
+	});
+
+	it("does not carry an expired custom-answer timer into the next approval", async () => {
+		vi.useFakeTimers();
+		const pending = Promise.withResolvers<string | undefined>();
+		const onSubmit = vi.fn();
+		const onCancel = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{ id: "first", question: "Format?", options: [{ label: "JSON" }], timeout: 5000 },
+				{
+					id: "approval",
+					question: "Approve launch?",
+					options: [{ label: "Approve" }, { label: "Decline" }],
+					timeout: 0,
+				},
+			],
+			{ onSubmit, onCancel, onPrompt: () => pending.promise },
+		);
+		try {
+			component.handleInput(DOWN);
+			component.handleInput(ENTER);
+			vi.advanceTimersByTime(6000);
+			pending.resolve("Custom format");
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(render(component)).toContain("Approve launch?");
+			vi.advanceTimersByTime(10000);
+			expect(onSubmit).not.toHaveBeenCalled();
+			component.handleInput(SHIFT_TAB);
+			expect(render(component)).toContain("Ask (5s)");
+			component.handleInput(TAB);
+			expect(render(component)).not.toContain("Ask (");
+			component.handleInput(CANCEL);
+			expect(onCancel).toHaveBeenCalledTimes(1);
+			expect(onSubmit).not.toHaveBeenCalled();
+		} finally {
+			component.dispose();
+		}
+	});
+
 	it("resets the inactivity countdown on user input after the closed/prompt guard", () => {
 		vi.useFakeTimers();
 		const onTimeout = vi.fn();
