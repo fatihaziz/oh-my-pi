@@ -49,6 +49,9 @@ export interface AsyncResultEntry {
 
 type AsyncResultJobDetails = {
 	jobId: string;
+	result: string;
+	status?: AsyncJob["status"];
+	exitCode?: number;
 	type?: AsyncJobType;
 	label?: string;
 	durationMs?: number;
@@ -106,6 +109,8 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			// at an id with no backing `<id>.md`/`.json` on disk.
 			agentUrlId: entry.job?.agentId ?? entry.jobId,
 			result: entry.result,
+			status: entry.job?.status,
+			exitCode: typeof entry.job?.latestDetails?.exitCode === "number" ? entry.job.latestDetails.exitCode : undefined,
 			type: entry.job?.type,
 			label: entry.job?.label,
 			durationMs: entry.durationMs,
@@ -123,6 +128,9 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 		meta: { source: { type: "report", value: "background job delivery" } },
 		jobs: jobs.map(job => ({
 			jobId: job.jobId,
+			result: job.result,
+			status: job.status,
+			...(job.exitCode !== undefined ? { exitCode: job.exitCode } : {}),
 			type: job.type,
 			label: job.label,
 			durationMs: job.durationMs,

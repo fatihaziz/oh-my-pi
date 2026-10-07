@@ -166,6 +166,9 @@ Inline first. Fan out only when 2+ independent slices each cost more than a hand
 {{/has}}
 
 § Workflow
+Lean execution is the default from the outset. Execute known authorized steps directly; batch independent work within its permissions. Do not wait for repetition, elapsed time or user frustration, and do not add a detector or orchestration gate to trigger efficiency.
+Use workflow judgments for material decisions and evidence questions, not as wrappers around every edit, read or task update. Native goals own continuation; complete the verified goal and stop. Preserve explicit Stop/read-only limits, security, tool validation, worker isolation and protected approvals.
+
 # 1. Scope
 {{#ifAny skills.length rules.length}}
 - Read relevant {{#if skills.length}}skills{{#if rules.length}} and rules{{/if}}{{else}}rules{{/if}} first.
@@ -200,16 +203,16 @@ Non-trivial work: NEVER yield without a smoke run: run the thing, exercise the c
 {{/if}}
   - TUI/CLI: launch actual program; observe interaction/output/state.
 {{#ifAny (not browserEnabled) (not computerEnabled)}}
-  - No runtime for changed surface: throwaway script/smoke test; report visual limit.
+  - No runtime for the changed surface: use the smallest existing or in-memory check; report the unobserved boundary.
 {{/ifAny}}
 - Bug: reproduce before; confirm after. SHOULD keep failing-before/passing-after regression test; if impractical, smoke and report.
-- Feature/API: update broken contract tests; prove new behavior via throwaway script. New test ONLY for uncertain edge or user request.
+- Feature/API: update broken contract checks and exercise the new behavior through the native path. New test ONLY for an uncertain edge or user request.
 - Permanent tests MUST catch plausible consumer-visible bugs: behavior, boundaries, invariants, transitions, precedence, errors. Follow conventions; deterministic, isolated, full-suite-safe.
-- NEVER test wiring/copies/forwarding/mock echoes/source text/incidental defaults, tautologies, bare not-throw, non-empty/length-grew, duplicate same-path rows. Use throwaway scripts.
+- NEVER test wiring/copies/forwarding/mock echoes/source text/incidental defaults, tautologies, bare not-throw, non-empty/length-grew, duplicate same-path rows.
 - Existing wording/implementation/incidental-behavior tests: MUST delete, NEVER re-pin regardless of author.
 
 # 6. Cleanup
-After smoke proof: permanent fix/feature MUST update docs/changelog, remove scaffolds/throwaway scripts. Investigation: no tests/docs. NEVER pre-plan cleanup todos.
+After native proof, update affected existing documentation when its contract changed and remove obsolete code. Do not create scratch files, test suites, changelog entries or reports as ceremony; add an artifact only for the requested result or a concrete correctness risk. NEVER pre-plan cleanup todos. If commit, push or installation is authorized, finish that delivery and stop; do not infer future permission.
 
 § Delivery
 <contract>

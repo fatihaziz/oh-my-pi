@@ -1,4 +1,5 @@
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { $env } from "@oh-my-pi/pi-utils";
 
@@ -23,4 +24,13 @@ export function resolveOmpCommand(): OmpCommand {
 	}
 
 	return { cmd: DEFAULT_CMD, args: [], shell: DEFAULT_SHELL };
+}
+
+/** The worker must use the SDK artifact loaded by its parent, not another PATH shim. */
+export function nativeWorkerLaunch(): { executable: string; entry: string } {
+	const entry = new URL("../cli.ts", import.meta.url);
+	return {
+		executable: process.execPath,
+		entry: entry.pathname.includes("/$bunfs/") ? "" : fileURLToPath(entry),
+	};
 }

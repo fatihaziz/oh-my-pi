@@ -111,22 +111,28 @@ async function installBinary(src: string, dest: string): Promise<void> {
 		// Atomic rename - works even if dest is loaded on Linux/macOS (old inode stays valid)
 		await fs.rename(tempPath, dest);
 	} catch {
-		// On Windows, loaded DLLs cannot be overwritten via rename
-		// Try delete-then-rename as fallback
+		// A loaded Windows DLL can be renamed, but not deleted or overwritten.
+		const backupPath = `${dest}.old.${process.pid}`;
+		let backedUp = false;
 		try {
-			await fs.unlink(dest);
-		} catch (unlinkErr) {
-			if ((unlinkErr as NodeJS.ErrnoException).code !== "ENOENT") {
+			await fs.rename(dest, backupPath);
+			backedUp = true;
+		} catch (renameErr) {
+			if ((renameErr as NodeJS.ErrnoException).code !== "ENOENT") {
 				await fs.unlink(tempPath).catch(() => {});
-				const isWindows = process.platform === "win32";
-				throw new Error(
-					`Cannot replace ${path.basename(dest)}${isWindows ? " (file may be in use - close any running processes)" : ""}: ${(unlinkErr as Error).message}`,
-				);
+				throw new Error(`Cannot preserve ${path.basename(dest)} before replacement: ${(renameErr as Error).message}`);
 			}
 		}
 		try {
 			await fs.rename(tempPath, dest);
 		} catch (finalErr) {
+			if (backedUp) {
+				try {
+					await fs.rename(backupPath, dest);
+				} catch (rollbackErr) {
+					throw new AggregateError([finalErr, rollbackErr], `Install failed; previous addon remains at ${backupPath}`);
+				}
+			}
 			await fs.unlink(tempPath).catch(() => {});
 			throw new Error(`Failed to install ${path.basename(dest)}: ${(finalErr as Error).message}`);
 		}

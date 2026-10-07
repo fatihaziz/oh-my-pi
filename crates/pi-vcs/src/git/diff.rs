@@ -471,6 +471,32 @@ fn worktree_changes(repo: &gix::Repository, files: &[String]) -> Result<Vec<File
 		let mut old_mode = index_mode(entry.mode)?;
 		let mut new_id = null;
 		let mut new_mode = None;
+		// Git treats a directory junction to a checked-out submodule as a gitlink,
+		// not as a replacement symlink blob. Its objects belong to the child repo.
+		if entry.mode == gix::index::entry::Mode::COMMIT
+			&& let Some(workdir) = repo.workdir()
+			&& let nested_path = workdir.join(path_string(path.as_ref()))
+			&& nested_path.is_dir()
+			&& nested_path.join(".git").exists()
+			&& let Ok(nested) = gix::discover(&nested_path)
+			&& let Ok(head) = nested.head_id()
+		{
+			new_id = head.detach();
+			if old_id != new_id {
+				let path = path_string(path.as_ref());
+				out.push(FileChange {
+					old_path: path.clone(),
+					new_path: path,
+					old_id,
+					new_id,
+					old_mode,
+					new_mode: old_mode,
+					similarity: None,
+					worktree_new: false,
+				});
+			}
+			continue;
+		}
 		match status {
 			EntryStatus::Change(Change::Removed) => {},
 			EntryStatus::Change(Change::Type { .. } | Change::Modification { .. }) => {
@@ -620,7 +646,10 @@ fn render_changes(
 /// there. Best effort — a side that cannot be sized counts as zero and is left
 /// to the post-render check.
 fn change_input_bytes(repo: &gix::Repository, change: &FileChange) -> usize {
-	let blob_bytes = |id: gix::ObjectId| -> usize {
+	let blob_bytes = |id: gix::ObjectId, mode: Option<gix::objs::tree::EntryMode>| -> usize {
+		if mode.is_some_and(|mode| mode.kind() == gix::objs::tree::EntryKind::Commit) {
+			return b"Subproject commit ".len() + id.kind().len_in_hex() + 1;
+		}
 		if id.is_null() {
 			return 0;
 		}
@@ -630,15 +659,20 @@ fn change_input_bytes(repo: &gix::Repository, change: &FileChange) -> usize {
 			.flatten()
 			.map_or(0, |header| usize::try_from(header.size()).unwrap_or(usize::MAX))
 	};
-	let new_bytes = if change.worktree_new {
+	let new_bytes = if change
+		.new_mode
+		.is_some_and(|mode| mode.kind() == gix::objs::tree::EntryKind::Commit)
+	{
+		blob_bytes(change.new_id, change.new_mode)
+	} else if change.worktree_new {
 		repo
 			.workdir()
 			.and_then(|dir| std::fs::symlink_metadata(dir.join(&change.new_path)).ok())
 			.map_or(0, |meta| usize::try_from(meta.len()).unwrap_or(usize::MAX))
 	} else {
-		blob_bytes(change.new_id)
+		blob_bytes(change.new_id, change.new_mode)
 	};
-	blob_bytes(change.old_id).saturating_add(new_bytes)
+	blob_bytes(change.old_id, change.old_mode).saturating_add(new_bytes)
 }
 
 fn render_change(
@@ -659,6 +693,48 @@ fn render_change(
 		.or(change.old_mode)
 		.ok_or_else(|| Error::backend("git diff", "change has no file mode"))?
 		.kind();
+	let commit = gix::objs::tree::EntryKind::Commit;
+	if old_kind == commit || new_kind == commit {
+		if old_kind != new_kind {
+			// Type changes are a deletion and addition, as in Git's patch format.
+			let null = repo.object_hash().null();
+			let removed = FileChange {
+				old_path:     change.old_path.clone(),
+				new_path:     change.old_path.clone(),
+				old_id:       change.old_id,
+				new_id:       null,
+				old_mode:     change.old_mode,
+				new_mode:     None,
+				similarity:   None,
+				worktree_new: false,
+			};
+			let added = FileChange {
+				old_path:     change.new_path.clone(),
+				new_path:     change.new_path.clone(),
+				old_id:       null,
+				new_id:       change.new_id,
+				old_mode:     None,
+				new_mode:     change.new_mode,
+				similarity:   None,
+				worktree_new: change.worktree_new,
+			};
+			let mut old_cache = repo
+				.diff_resource_cache_for_tree_diff()
+				.map_err(|err| Error::backend("git diff", err))?;
+			let mut first =
+				render_change(repo, &mut old_cache, &removed, context, binary_patch, budget)?;
+			let remaining = budget.map(|limit| RenderBudget {
+				already: limit.already.saturating_add(first.text.len()),
+				..limit
+			});
+			let second = render_change(repo, cache, &added, context, binary_patch, remaining)?;
+			first.text.push_str(&second.text);
+			first.added = first.added.zip(second.added).map(|(a, b)| a + b);
+			first.removed = first.removed.zip(second.removed).map(|(a, b)| a + b);
+			return Ok(first);
+		}
+		return Ok(render_gitlink(change));
+	}
 	cache
 		.set_resource(
 			change.old_id,
@@ -768,6 +844,34 @@ fn render_change(
 			Err(Error::backend("git diff", "external diff drivers cannot be rendered in-process"))
 		},
 	}
+}
+
+fn render_gitlink(change: &FileChange) -> Rendered {
+	// A gitlink names a commit in another repository, not a local blob.
+	let mut text = format!("diff --git a/{} b/{}\n", change.old_path, change.new_path);
+	append_metadata(&mut text, change, change.similarity, false);
+	let changed = change.old_id != change.new_id || change.old_mode != change.new_mode;
+	let removed = u32::from(changed && change.old_mode.is_some());
+	let added = u32::from(changed && change.new_mode.is_some());
+	if changed {
+		text.push_str("--- ");
+		push_old_path(&mut text, change);
+		text.push_str("\n+++ ");
+		push_new_path(&mut text, change);
+		let _ = writeln!(
+			text,
+			"\n@@ -{} +{} @@",
+			if removed == 0 { "0,0" } else { "1" },
+			if added == 0 { "0,0" } else { "1" }
+		);
+		if removed != 0 {
+			let _ = writeln!(text, "-Subproject commit {}", change.old_id);
+		}
+		if added != 0 {
+			let _ = writeln!(text, "+Subproject commit {}", change.new_id);
+		}
+	}
+	Rendered { text, added: Some(added), removed: Some(removed) }
 }
 
 fn append_metadata(out: &mut String, change: &FileChange, similarity: Option<u8>, full_ids: bool) {
@@ -1513,12 +1617,78 @@ mod tests {
 		git(dir.path(), &["init", "-q"]);
 		git(dir.path(), &["config", "user.name", "Diff Test"]);
 		git(dir.path(), &["config", "user.email", "diff@example.com"]);
+		git(dir.path(), &["config", "commit.gpgSign", "false"]);
 		fs::write(dir.path().join("file.txt"), "one\ntwo\nthree\nfour\nfive\nsix\nseven\n")
 			.expect("write");
 		fs::write(dir.path().join("delete.txt"), "delete\n").expect("write");
 		git(dir.path(), &["add", "."]);
 		git(dir.path(), &["commit", "-qm", "initial"]);
 		dir
+	}
+
+	#[test]
+	fn gitlink_patches_match_git_without_loading_foreign_commits() {
+		let dir = fixture();
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let first = "1111111111111111111111111111111111111111";
+		let second = "2222222222222222222222222222222222222222";
+		let check = || {
+			let options = DiffOptions { cached: true, binary: true, ..DiffOptions::default() };
+			let expected = git(dir.path(), &[
+				"diff",
+				"--cached",
+				"--no-ext-diff",
+				"--binary",
+				"--submodule=short",
+			]);
+			let actual = repo.diff_text(&options).expect("gitlink patch");
+			assert_eq!(actual, expected);
+			let real_index = fs::read(dir.path().join(".git/index")).expect("read real index");
+			let target_tree = repo.write_tree(None).expect("current staged tree");
+			let alternate_index = dir.path().join("isolation.index");
+			repo
+				.read_tree("HEAD", Some(&alternate_index))
+				.expect("seed isolation index");
+			repo
+				.apply_patch(&actual, &crate::types::ApplyOptions {
+					cached: true,
+					index_path: Some(alternate_index.clone()),
+					..Default::default()
+				})
+				.expect("apply gitlink snapshot without foreign objects");
+			assert_eq!(
+				repo
+					.write_tree(Some(&alternate_index))
+					.expect("snapshot tree"),
+				target_tree
+			);
+			assert_eq!(
+				fs::read(dir.path().join(".git/index")).expect("real index after capture"),
+				real_index
+			);
+		};
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{first},module")]);
+		check();
+		git(dir.path(), &["commit", "-qm", "add gitlink"]);
+		git(dir.path(), &["update-index", "--cacheinfo", &format!("160000,{second},module")]);
+		check();
+		let stats = repo
+			.numstat(&DiffOptions { cached: true, ..DiffOptions::default() })
+			.expect("gitlink numstat");
+		assert_eq!(stats.len(), 1);
+		assert_eq!((stats[0].added, stats[0].removed), (Some(1), Some(1)));
+		git(dir.path(), &["commit", "-qm", "update gitlink"]);
+		fs::write(dir.path().join("module"), "ordinary file\n").expect("replace gitlink with file");
+		git(dir.path(), &["add", "module"]);
+		check();
+		git(dir.path(), &["commit", "-qm", "replace gitlink"]);
+		git(dir.path(), &["update-index", "--cacheinfo", &format!("160000,{first},module")]);
+		check();
+		git(dir.path(), &["commit", "-qm", "restore gitlink"]);
+		git(dir.path(), &["update-index", "--force-remove", "module"]);
+		check();
 	}
 
 	#[test]

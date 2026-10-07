@@ -10,6 +10,7 @@ import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
+import { hasHostedMaintenance } from "./hosted-maintenance";
 
 import { cfgTaskBatch, cfgTaskEager } from "../task/settings";
 import { cfgTodoEager, cfgTodoEnabled, cfgTodoReminders, cfgTodoRemindersMax } from "../tools/settings";
@@ -206,6 +207,7 @@ export class TodoTracker {
 
 	/** Checks a terminal assistant turn and schedules continuation for incomplete todos. */
 	async checkCompletion(message: AssistantMessage): Promise<boolean> {
+		if (hasHostedMaintenance(this.#host.sessionManager.getSessionId())) return false;
 		if (this.#host.consumeLastServedToolChoiceLabel() === "user-force") return false;
 		if (this.#host.planModeEnabled()) return false;
 		if (this.#reminderAwaitingProgress) {

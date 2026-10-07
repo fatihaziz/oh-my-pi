@@ -687,7 +687,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage),
+			modelRegistry: new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true, settings: Settings.isolated() }),
 			agentId: "Main",
 			ownedAsyncJobManager: manager,
 		});
@@ -742,7 +742,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated(),
-			modelRegistry: new ModelRegistry(authStorage),
+			modelRegistry: new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true, settings: Settings.isolated() }),
 			agentId: "Main",
 			ownedAsyncJobManager: manager,
 		});

@@ -1,5 +1,4 @@
 import { type NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
-import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -77,25 +76,26 @@ export function getGitNoIndexNullPath(): string {
 	return GIT_NO_INDEX_NULL_PATH;
 }
 
-/** Find nested git repositories (non-submodule) under the given root. */
+/** Find initialized child repositories, including submodules reached through junctions. */
 async function discoverNestedRepos(repoRoot: string): Promise<string[]> {
-	// Get submodule paths so we can exclude them
-	const submodulePaths = new Set(await vcs.requireGit(repoRoot).submodulePaths());
-
-	// Find all .git dirs/files that aren't the root or known submodules
+	const submodulePaths = new Set((await vcs.requireGit(repoRoot).submodulePaths()).map(value => path.normalize(value)));
 	const result: string[] = [];
-	async function walk(dir: string): Promise<void> {
-		let entries: Dirent[];
+	for (const relativePath of submodulePaths) {
 		try {
-			entries = await fs.readdir(dir, { withFileTypes: true });
-		} catch {
-			return;
+			await fs.access(path.join(repoRoot, relativePath, ".git"));
+			result.push(relativePath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		}
+	}
+	async function walk(dir: string): Promise<void> {
+		const { entries, truncated } = await natives.listWorkspace({ path: dir, maxDepth: 1, hidden: true, gitignore: true });
+		if (truncated) throw new Error(`Nested repository discovery exceeded the workspace scan limit in ${dir}`);
 		for (const entry of entries) {
-			if (entry.name === "node_modules" || entry.name === ".git") continue;
-			if (!entry.isDirectory()) continue;
-			const full = path.join(dir, entry.name);
+			if (entry.fileType !== natives.FileType.Dir || entry.path === "node_modules" || entry.path === ".git") continue;
+			const full = path.join(dir, entry.path);
 			const rel = path.relative(repoRoot, full);
+			if (submodulePaths.has(rel)) continue;
 			// Check if this directory is itself a git repo
 			const gitDir = path.join(full, ".git");
 			let hasGit = false;
@@ -103,7 +103,7 @@ async function discoverNestedRepos(repoRoot: string): Promise<string[]> {
 				await fs.access(gitDir);
 				hasGit = true;
 			} catch {}
-			if (hasGit && !submodulePaths.has(rel)) {
+			if (hasGit) {
 				result.push(rel);
 				// Don't recurse into nested repos — they manage their own tree
 				continue;
@@ -564,6 +564,7 @@ export async function ensureIsolation(
 		// `omp worktree clear` never sees this sandbox without a live owner,
 		// even while a large clone is still in progress.
 		await writeIsolationOwner(baseDir, id);
+		let isolationSource = repoRoot;
 		try {
 			await natives.isoStart(candidate, repoRoot, mergedDir);
 			// Sever the isolation's git metadata from the source checkout. Copy
@@ -574,6 +575,16 @@ export async function ensureIsolation(
 			// parallel task branches. Detaching gives each isolation a private,
 			// frozen repo that still borrows the source object DB via alternates.
 			await vcs.detachGitDir(mergedDir, sourceCommonDir);
+			// Child repositories need their own private Git metadata and file tree.
+			// Copy backends can omit ignored submodules or retain a junction to the source.
+			for (const relativePath of await discoverNestedRepos(repoRoot)) {
+				const source = await fs.realpath(path.join(repoRoot, relativePath));
+				isolationSource = source;
+				const destination = path.join(mergedDir, relativePath);
+				await fs.rm(destination, { recursive: true, force: true });
+				await natives.isoStart(candidate, source, destination);
+				await vcs.detachGitDir(destination, vcs.requireGit(source).info().commonDir);
+			}
 			return {
 				mergedDir,
 				backend: candidate,
@@ -584,7 +595,7 @@ export async function ensureIsolation(
 			await fs.rm(baseDir, { recursive: true, force: true });
 			const message = errorMessage(err);
 			if (!natives.isoIsUnavailableError(message)) {
-				throw err;
+				throw new Error(`Isolation failed for ${isolationSource}: ${message}`, { cause: err });
 			}
 			fallbackReason ??= message;
 		}

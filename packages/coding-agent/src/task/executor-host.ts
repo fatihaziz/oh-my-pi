@@ -41,6 +41,7 @@ import type { EvalStateSnapshot } from "../eval/state";
 
 import { ExecutorTerminal } from "./executor-terminal";
 import { ExecutorWorkspace } from "./executor-workspace";
+import { openCoordinatorRuntime } from "./coordinator-runtime";
 /** Resolved data only. Live parent services must be supplied by the host adapter. */
 export type HostedExecutorOptions = Pick<
 	ExecutorOptions,
@@ -234,6 +235,8 @@ export async function runExecutorHost(): Promise<void> {
 	let terminal: ExecutorTerminal | undefined;
 	let terminalView = "";
 	let terminalReady = false;
+	let coordinator: Awaited<ReturnType<typeof openCoordinatorRuntime>> | undefined;
+	let coordinatorOpening = false;
 	// A child's requests to its owner belong to the turn that made them; cancelling the turn cancels them.
 	const turnSignal = (): AbortSignal => (turn ? AbortSignal.any([turn.signal, lifetime.signal]) : lifetime.signal);
 	const respond = (id: string, command: string, data: unknown) =>
@@ -293,6 +296,45 @@ export async function runExecutorHost(): Promise<void> {
 			return;
 		}
 		const { id, type } = frame;
+		if (type === "coordinator_init") {
+			if (closing || launch || workspace || coordinatorOpening) throw new Error("Native coordinator ownership is unavailable");
+			if (coordinator) {
+				const previous = coordinator.identity;
+				if (previous.paneId !== frame.paneId || previous.sessionId !== frame.sessionId ||
+					previous.model !== frame.model || previous.thinking !== frame.thinking) throw new Error("Coordinator identity or settings changed; close the old runtime first");
+				respond(id, type, coordinator.selection);
+				return;
+			}
+			coordinatorOpening = true;
+			try {
+				coordinator = await openCoordinatorRuntime(process.cwd(), frame, lifetime.signal);
+				respond(id, type, coordinator.selection);
+			} finally {
+				coordinatorOpening = false;
+			}
+			return;
+		}
+		if (type === "coordinator_judge" || type === "coordinator_think") {
+			if (closing || !coordinator) throw new Error("Initialize the pane coordinator first");
+			if (callbackRuns.has(id) || callbackRuns.size >= 128) throw new Error("Duplicate or excess coordinator request");
+			const abort = new AbortController();
+			callbackRuns.set(id, abort);
+			try {
+				const signal = AbortSignal.any([abort.signal, lifetime.signal]);
+				const result = await (type === "coordinator_judge" ? coordinator.judge(frame, signal) : coordinator.think(frame, signal));
+				respond(id, type, { ...result, providerCalls: coordinator.providerCalls });
+			} finally {
+				callbackRuns.delete(id);
+			}
+			return;
+		}
+		if (type === "coordinator_close") {
+			if (!coordinator) throw new Error("No pane coordinator is initialized");
+			closing = true;
+			for (const controller of callbackRuns.values()) controller.abort();
+			respond(id, type, { closed: true, providerCalls: coordinator.providerCalls });
+			return;
+		}
 		if (type === "executor_peers") {
 			if (
 				closing ||
@@ -520,6 +562,7 @@ export async function runExecutorHost(): Promise<void> {
 			return;
 		}
 		if (type === "start" || type === "workspace_prepare") {
+			if (coordinator || coordinatorOpening) throw new Error("A coordinator cannot also own a worker workspace");
 			if (launch || admitting) throw new Error("This native worker already owns a child");
 			if (!isRecord(frame.options) || !isRecord(frame.options.agent))
 				throw new Error("Missing resolved launch options");
@@ -741,6 +784,7 @@ export async function runExecutorHost(): Promise<void> {
 				agentId: launch?.id,
 				busy: running !== undefined,
 				workspace: workspace?.snapshot(),
+				coordinator: coordinator ? { ...coordinator.identity, providerCalls: coordinator.providerCalls, active: callbackRuns.size } : undefined,
 			});
 			return;
 		}
@@ -1003,7 +1047,7 @@ export async function runExecutorHost(): Promise<void> {
 		type: "ready",
 		protocol: "omp-native-executor",
 		version: 1,
-		capabilities: ["workspace_v1", "parent_relay_v1", "peer_registry_v1", "operator_controls_v1", "terminal_v1"],
+		capabilities: ["workspace_v1", "parent_relay_v1", "peer_registry_v1", "operator_controls_v1", "terminal_v1", "coordinator_v1"],
 		pid: process.pid,
 	});
 	try {
@@ -1029,6 +1073,7 @@ export async function runExecutorHost(): Promise<void> {
 		for (const request of ownerRequests.values()) request.reject(new Error("Native executor owner disconnected"));
 		try {
 			await untilAborted(AbortSignal.timeout(5000), () => Promise.allSettled(controls));
+			coordinator?.close();
 		} finally {
 			try {
 				await workspace?.release();

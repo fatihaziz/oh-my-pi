@@ -2638,6 +2638,8 @@ mod tests {
 	#[test]
 	fn mutate_worktree_and_detach() {
 		let (temp, repo) = fixture();
+		git(temp.path(), &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+		git(temp.path(), &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
 		let linked = temp.path().join("../linked-mut");
 		let _ = fs::remove_dir_all(&linked);
 		repo
@@ -2647,10 +2649,11 @@ mod tests {
 				keep_changes: false,
 			})
 			.unwrap();
-		assert!(
-			git(temp.path(), &["worktree", "list", "--porcelain"])
-				.contains(linked.to_string_lossy().as_ref())
-		);
+		assert!(git(temp.path(), &["worktree", "list", "--porcelain"]).lines().any(|line| {
+			line.strip_prefix("worktree ").is_some_and(|path| {
+				normalize_path(Path::new(path)) == normalize_path(&linked)
+			})
+		}));
 		assert!(repo.worktree_remove(&linked, true).unwrap());
 
 		let linked = temp.path().join("../linked-detach");
@@ -2669,10 +2672,12 @@ mod tests {
 		assert!(alternates.contains(common.join("objects").to_string_lossy().as_ref()));
 		assert_eq!(git(&linked, &["rev-parse", "HEAD"]), git(temp.path(), &["rev-parse", "HEAD"]));
 		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), source_head);
-		assert!(
-			!git(temp.path(), &["worktree", "list", "--porcelain"])
-				.contains(linked.to_string_lossy().as_ref())
-		);
+		assert_eq!(git(&linked, &["rev-parse", "origin/HEAD"]), source_head);
+		assert!(!git(temp.path(), &["worktree", "list", "--porcelain"]).lines().any(|line| {
+			line.strip_prefix("worktree ").is_some_and(|path| {
+				normalize_path(Path::new(path)) == normalize_path(&linked)
+			})
+		}));
 		assert!(repo.worktree_prune().is_ok());
 		let _ = fs::remove_dir_all(linked);
 	}

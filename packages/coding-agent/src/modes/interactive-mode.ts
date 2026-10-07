@@ -4,6 +4,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { hasHostedMaintenance } from "../session/hosted-maintenance";
 import {
 	type Agent,
 	AgentBusyError,
@@ -2813,6 +2814,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#scheduleGoalContinuation(): void {
 		this.#cancelGoalContinuation();
+		if (hasHostedMaintenance(this.session.sessionManager.getSessionId())) return;
 		if (this.loopModeEnabled) return;
 		if (!this.onInputCallback) return;
 		if (!cfgGoalContinuationModes.get(this.session.settings).includes("interactive")) return;
@@ -2829,6 +2831,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!prompt) return;
 		this.#goalContinuationTimer = setTimeout(() => {
 			this.#goalContinuationTimer = undefined;
+			if (hasHostedMaintenance(this.session.sessionManager.getSessionId())) return;
 			if (!this.onInputCallback) return;
 			if (!this.goalModeEnabled || this.goalModePaused) return;
 			// The 800ms timer can outlive the idle window that scheduled it: a

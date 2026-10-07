@@ -30,7 +30,8 @@ Captured nested patches preserved at:
 {{#list nestedPatchPaths prefix="- "}}{{this}}{{/list}}{{/if}}</system-notification>
 {{/when}}
 {{#when kind "==" "not-applied"}}
-<system-notification>Patches were not applied and must be handled manually.</system-notification>
+<system-notification>Patch integration failed. Worker changes are retained; the parent must repair the integration.
+{{#if error}}Cause: {{error}}{{/if}}</system-notification>
 
 {{#if rootPatchPath}}
 Patch artifact:

@@ -755,13 +755,21 @@ fn apply_patches_to_map(
 			});
 		}
 		let source_bytes = match source.as_ref() {
+			Some(entry) if entry.mode == Mode::COMMIT => {
+				format!("Subproject commit {}\n", entry.id).into_bytes()
+			},
 			Some(entry) => blob_bytes(repo, entry.id)?,
 			None => Vec::new(),
 		};
 		let direct = apply_file_bytes(patch, &source_bytes, options.reverse);
 		let bytes = match direct {
 			Ok(bytes) => bytes,
-			Err(ApplyFailure::Context(_)) if options.three_way => {
+			Err(ApplyFailure::Context(_))
+				if options.three_way
+					&& source
+						.as_ref()
+						.is_none_or(|entry| entry.mode != Mode::COMMIT) =>
+			{
 				merge_patch_bytes(repo, patch, source.as_ref(), options.reverse)?
 			},
 			Err(err) => return Err(err.into_error()),
@@ -773,14 +781,28 @@ fn apply_patches_to_map(
 		}
 		if let Some(path) = target_path {
 			validate_repo_path(path).map_err(ApplyFailure::into_error)?;
-			let id = repo
-				.write_blob(&bytes)
-				.map_err(|err| Error::backend("git apply write blob", err))?
-				.detach();
 			let mode = target_mode
 				.or_else(|| source.as_ref().map(|entry| entry.mode))
 				.or(source_mode)
 				.unwrap_or(Mode::FILE);
+			let id = if mode == Mode::COMMIT {
+				let value = bytes
+					.strip_prefix(b"Subproject commit ")
+					.and_then(|value| value.strip_suffix(b"\n"))
+					.ok_or_else(|| Error::PatchFailed { message: "invalid gitlink content".into() })?;
+				let id = gix::ObjectId::from_hex(value).map_err(|err| Error::PatchFailed {
+					message: format!("invalid gitlink commit: {err}"),
+				})?;
+				if id.is_null() || id.kind() != repo.object_hash() {
+					return Err(Error::PatchFailed { message: "invalid gitlink object id".into() });
+				}
+				id
+			} else {
+				repo
+					.write_blob(&bytes)
+					.map_err(|err| Error::backend("git apply write blob", err))?
+					.detach()
+			};
 			state.insert(path.to_owned(), FileEntry::new(id, mode));
 		}
 	}

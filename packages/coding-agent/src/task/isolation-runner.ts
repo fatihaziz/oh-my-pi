@@ -754,6 +754,7 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 		// aborted run has nothing to apply and must not block the result.
 		let changesApplied: boolean;
 		let hadAnyChanges: boolean;
+		let patchFailure: string | undefined;
 		const succeeded = result.exitCode === 0 && !result.error && !result.aborted;
 		if (!succeeded) {
 			changesApplied = true;
@@ -761,6 +762,7 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 		} else if (!result.patchPath) {
 			changesApplied = false;
 			hadAnyChanges = false;
+			patchFailure = "The worker result did not contain a captured patch.";
 		} else {
 			const patchText = await Bun.file(result.patchPath).text();
 			if (!patchText.trim()) {
@@ -788,11 +790,13 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 					try {
 						await repo.applyPatch(normalized, {});
 						hadAnyChanges = true;
-					} catch {
+					} catch (error) {
 						changesApplied = false;
+						patchFailure = error instanceof Error ? error.message : String(error);
 					}
 				} else {
 					changesApplied = false;
+					patchFailure = "The patch does not match the current worktree and is not already applied.";
 				}
 			}
 		}
@@ -805,6 +809,7 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 			// persisted nested patches are the parent's only pointer to that work.
 			summary = renderIsolationSummary({
 				kind: "not-applied",
+				error: patchFailure,
 				rootPatchPath: result.patchPath,
 				nestedPatchPaths: result.nestedPatchPaths,
 			});

@@ -69,6 +69,8 @@ import type { Settings } from "../config/settings";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "../extensibility/extensions";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { GoalModeState } from "../goals/state";
+import { hasNativeJudge, journalJudgmentUsage, resolveJudge } from "../judgment";
+import { hasHostedMaintenance, requestHostedMaintenance } from "./hosted-maintenance";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendOperationContext } from "../memory-backend/types";
 import { computeNonMessageTokens, type NonMessageTokenSource } from "@oh-my-pi/pi-tui/status-line/context-usage";
@@ -517,6 +519,8 @@ export class SessionMaintenance {
 	/** Interrupted-turn resume withheld from a compaction `finally` because a claim was open; consumed by `release(false)`, {@link noteTurnStarted}, or the next manual pass. */
 	#deferredResumeGeneration: number | undefined;
 	#autoCompactionAbortController: AbortController | undefined;
+	#earlyShakeAbortController: AbortController | undefined;
+	#earlyShakeKey: string | undefined;
 	/**
 	 * Live tool-loop contexts parked after mid-turn maintenance hit a no-progress
 	 * dead end. Membership suppresses the repeated rescue + warning while no cut
@@ -796,6 +800,15 @@ export class SessionMaintenance {
 	 *
 	 * No-op (zero counts) when nothing is eligible.
 	 */
+	async #checkpointHosted(reason: string, signal?: AbortSignal): Promise<void> {
+		const sessionId = this.#host.sessionId();
+		if (!hasHostedMaintenance(sessionId)) return;
+		const generation = this.#host.promptGeneration();
+		await requestHostedMaintenance({ phase: "checkpoint", sessionId, reason,
+			contextTokens: this.#estimateStoredContextTokens(), contextWindow: this.#model?.contextWindow ?? 0 }, signal);
+		if (this.#host.sessionId() !== sessionId || this.#host.promptGeneration() !== generation) throw new CompactionCancelledError();
+	}
+
 	async shake(
 		mode: ShakeMode,
 		opts: {
@@ -807,11 +820,13 @@ export class SessionMaintenance {
 		} = {},
 	): Promise<ShakeResult> {
 		if (mode === "images") {
+			await this.#checkpointHosted("shake-images", opts.signal);
 			const { removed } = await this.#host.dropImages();
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: removed, tokensFreed: 0 };
 		}
 
 		if (mode === "thinking") {
+			await this.#checkpointHosted("shake-thinking", opts.signal);
 			const branchEntries = this.#host.sessionManager.getBranch();
 			const latestCompaction = getLatestCompactionEntry(branchEntries);
 			const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
@@ -879,6 +894,8 @@ export class SessionMaintenance {
 		if (regions.length === 0) {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
+		await this.#checkpointHosted("shake", opts.signal);
+		assertCurrent();
 
 		let reservedArtifact: { id?: string; path?: string } = {};
 		try {
@@ -1206,6 +1223,7 @@ export class SessionMaintenance {
 					markCommitted,
 				);
 			}
+			await this.#checkpointHosted("manual", compactionAbortController.signal);
 			const pathEntries = this.#host.sessionManager.getBranch();
 			const preparation = prepareCompaction(pathEntries, effectiveSettings, activeModel, this.#tokenizer);
 			if (!preparation) {
@@ -1548,6 +1566,7 @@ export class SessionMaintenance {
 		signalController: AbortController,
 		onCommitted: () => void,
 	): Promise<CompactionResult> {
+		await this.#checkpointHosted("manual", signalController.signal);
 		const entries = this.#host.sessionManager.getBranch();
 		const settings = cfgCompaction.get(this.#host.settings);
 		const preparation = prepareCompaction(entries, settings, model, this.#tokenizer);
@@ -1672,6 +1691,7 @@ export class SessionMaintenance {
 			options.terminalTextAnswer ?? isTerminalTextAssistantAnswer(this.#host.findLastAssistantMessage());
 		const detachPostCommit = options.detachPostCommit === true;
 		try {
+			await this.#checkpointHosted(reason, controller.signal);
 			await this.#emitLifecycleEvent({ type: "auto_compaction_start", reason, action: "context-full" }, false);
 			if (controller.signal.aborted) {
 				await this.#emitLifecycleEvent(
@@ -1882,6 +1902,7 @@ export class SessionMaintenance {
 		const manualCompactionCleanup = this.#manualCompactionCleanup;
 		this.#compactionAbortController?.abort(reason);
 		this.#autoCompactionAbortController?.abort(reason);
+		this.#earlyShakeAbortController?.abort(reason);
 		this.#host.abortHandoff();
 		return manualCompactionCleanup;
 	}
@@ -2040,7 +2061,7 @@ export class SessionMaintenance {
 		if (this.isCompacting || this.#host.isGeneratingHandoff()) return;
 		// Extensions that intercept compaction (cancel/replace) keep exact
 		// blocking semantics; a speculated result would bypass their veto.
-		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return;
+		if (hasHostedMaintenance(this.#host.sessionId()) || this.#host.extensionRunner?.hasHandlers("session_before_compact")) return;
 		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 		if (contextTokens >= thresholdTokens) return; // real maintenance owns it now
 		if (thresholdTokens - contextTokens > resolveSpeculationLeadTokens(thresholdTokens)) return;
@@ -2133,7 +2154,7 @@ export class SessionMaintenance {
 		if (!settings.enabled || settings.asyncEnabled === false || !hasConfiguredCompactionMethod(settings))
 			return false;
 		if (this.isCompacting || this.#host.isGeneratingHandoff()) return false;
-		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return false;
+		if (hasHostedMaintenance(this.#host.sessionId()) || this.#host.extensionRunner?.hasHandlers("session_before_compact")) return false;
 		const model = this.#model;
 		if (!model) return false;
 		const method = resolveSpeculationMethod(model, settings, {
@@ -2346,7 +2367,7 @@ export class SessionMaintenance {
 		}
 		const settings = cfgCompaction.get(this.#host.settings);
 		if (settings.asyncEnabled === false) return undefined;
-		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return undefined;
+		if (hasHostedMaintenance(this.#host.sessionId()) || this.#host.extensionRunner?.hasHandlers("session_before_compact")) return undefined;
 		if (!this.#armedSpeculationValid(run.armed, triggerContextTokens, pendingContextTokens)) {
 			logger.debug("Armed speculative compaction invalidated by branch growth or headroom check", {
 				method: run.armed.method,
@@ -2502,6 +2523,82 @@ export class SessionMaintenance {
 		return tokens;
 	}
 
+	/** Optional early maintenance never replaces the hard threshold or overflow recovery. */
+	async #maybeShakeEarly(
+		contextTokens: number,
+		contextWindow: number,
+		settings: CompactionSettings,
+		signal?: AbortSignal,
+		context?: AgentTurnEndContext,
+	): Promise<boolean> {
+		const threshold = resolveThresholdTokens(contextWindow, settings);
+		const hosted = hasHostedMaintenance(this.#host.sessionId());
+		const sessionAge = Date.now() - Date.parse(this.#host.sessionManager.getHeader()?.timestamp ?? "");
+		const ageReview = hosted && sessionAge >= 60 * 60 * 1000;
+		if (!settings.enabled || !hasConfiguredCompactionMethod(settings) ||
+			(!ageReview && contextTokens < threshold / 2) || threshold <= 0 || this.isCompacting ||
+			this.#earlyShakeAbortController || signal?.aborted || this.#host.isDisposed()) return false;
+		const model = this.#model;
+		if (!model) return false;
+		const branch = this.#host.sessionManager.getBranch();
+		const boundary = getLatestCompactionEntry(branch)?.firstKeptEntryId;
+		const key = `${this.#host.sessionId()}:${model.provider}/${model.id}:${threshold}:${boundary}:${Math.floor(contextTokens / (threshold / 4))}:${ageReview ? Math.floor(sessionAge / (60 * 60 * 1000)) : 0}`;
+		if (key === this.#earlyShakeKey) return false;
+		this.#earlyShakeKey = key;
+		const controller = new AbortController();
+		this.#earlyShakeAbortController = controller;
+		const signals = hosted ? [controller.signal] : [controller.signal, AbortSignal.timeout(2_000)];
+		if (signal) signals.push(signal);
+		const judgmentSignal = AbortSignal.any(signals);
+		const generation = this.#host.promptGeneration();
+		const sessionId = this.#host.sessionId();
+		const isCurrent = () => !controller.signal.aborted && !signal?.aborted &&
+			!this.#host.isDisposed() && !this.isCompacting &&
+			this.#host.promptGeneration() === generation && this.#host.sessionId() === sessionId;
+		try {
+			if (!hosted && !hasNativeJudge(this.#host.settings, this.#host.modelRegistry)) return false;
+			const config = this.#withPlanProtection({
+				...DEFAULT_SHAKE_CONFIG,
+				protectTokens: Math.max(DEFAULT_SHAKE_CONFIG.protectTokens, settings.keepRecentTokens),
+				keepBoundaryId: boundary,
+			});
+			const regions = collectShakeRegions(branch, this.#tokenizer, config)
+				.filter(region => region.kind === "toolResult");
+			if (!regions.length && !hosted) return false;
+			const recoverableTokens = regions.reduce((sum, region) => sum + region.tokens, 0);
+			const hostedDecision = hosted ? await requestHostedMaintenance({ phase: "assess", sessionId,
+				contextTokens, contextWindow, thresholdTokens: threshold, recoverableTokens,
+				reason: ageReview ? "session-age" : "context-pressure" }, judgmentSignal) : undefined;
+			const result = hostedDecision ? undefined : await resolveJudge({
+				settings: this.#host.settings, registry: this.#host.modelRegistry, sessionId,
+				purpose: "early-compaction", onUsage: journalJudgmentUsage(this.#host.sessionManager),
+			}).judge({ state: { contextTokens, thresholdTokens: threshold, contextWindow,
+				recoverableTokens, recoverableRegions: regions.length, protectedRecentTokens: config.protectTokens,
+				method: "Old tool results become retrievable artifact links; recent context and tool-call pairing remain intact." },
+				questions: { maintenance: { type: "choice",
+					instructions: "Choose whether reclaiming archived old tool output now is worthwhile. Use the supplied token counts, not assumptions about latency. Keep when savings are negligible relative to current context. Hard-threshold recovery remains independent.",
+					criteria: { compact: "Reclaim substantial recoverable context while preserving the protected recent tail.",
+						keep: "Retain the current context because early reclamation offers little benefit.",
+						needs_evidence: "The supplied evidence does not establish safe worthwhile reclamation." } } },
+			}, { signal: judgmentSignal });
+			const answer = result?.answers.maintenance;
+			const compact = hostedDecision?.compact ?? (answer?.choice === "compact" && answer.probabilities.compact > 0.5);
+			if (!compact || !regions.length || judgmentSignal.aborted || !isCurrent()) return false;
+			if (context && !(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return false;
+			if (!isCurrent()) return false;
+			const shaken = await this.shake("elide", {
+				config, signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+				requireArtifact: true, toolResultsOnly: true, isCurrent,
+			});
+			return shaken.tokensFreed > 0;
+		} catch (error) {
+			logger.debug("Early compaction kept native threshold recovery", { error: String(error) });
+			return false;
+		} finally {
+			if (this.#earlyShakeAbortController === controller) this.#earlyShakeAbortController = undefined;
+		}
+	}
+
 	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
 		const model = this.#model;
 		if (!model) return;
@@ -2512,6 +2609,7 @@ export class SessionMaintenance {
 		const pendingMidTurnDeadEnd = this.#midTurnDeadEndPendingPrePrompt;
 		this.#midTurnDeadEndPendingPrePrompt = false;
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
+			if (await this.#maybeShakeEarly(contextTokens, contextWindow, compactionSettings)) return;
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
 			return;
 		}
@@ -2644,6 +2742,14 @@ export class SessionMaintenance {
 		const storedContextTokens = this.#estimateStoredContextTokens();
 		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
+			if (await this.#maybeShakeEarly(contextTokens, contextWindow, compactionSettings, signal, context)) {
+				const compactedMessages = this.#host.agent.state.messages;
+				if (compactedMessages !== activeMessages) {
+					activeMessages.splice(0, activeMessages.length, ...compactedMessages);
+					invalidateConvertToLlmArrayCache(activeMessages);
+				}
+				return;
+			}
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
 			return;
 		}
@@ -3255,6 +3361,7 @@ export class SessionMaintenance {
 				model: `${assistantMessage.provider}/${assistantMessage.model}`,
 			});
 		} else {
+			if (await this.#maybeShakeEarly(contextTokens, contextWindow, compactionSettings)) return COMPACTION_CHECK_NONE;
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
 		}
 		return COMPACTION_CHECK_NONE;
@@ -4331,6 +4438,7 @@ export class SessionMaintenance {
 
 		let compactionCommitted = false;
 		try {
+			await this.#checkpointHosted(reason, autoCompactionSignal);
 			// Emit start AFTER the controller is installed so isCompacting is already true
 			// for any listener — and for input routed during this emit's event-loop yield:
 			// a message typed as the compaction loader appears must land in the compaction

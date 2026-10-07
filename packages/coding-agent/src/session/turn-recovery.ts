@@ -73,7 +73,7 @@ import { getLatestCompactionEntry } from "./session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
-import { journalJudgmentUsage } from "../judgment";
+import { hasNativeJudge, journalJudgmentUsage, resolveJudge } from "../judgment";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
 
 import {
@@ -1793,6 +1793,50 @@ export class TurnRecovery {
 		);
 	}
 
+	async #approveRetryFallback(
+		currentSelector: string,
+		selector: RetryFallbackSelector,
+		candidate: Model,
+		reason: string,
+		signal?: AbortSignal,
+		observedHealth?: Pick<ModelUsageHealth, "state" | "accounts">,
+	): Promise<boolean> {
+		signal?.throwIfAborted();
+		const timeout = AbortSignal.timeout(2_000);
+		const boundedSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+		try {
+			const health = observedHealth ?? await this.#host.modelRegistry.authStorage.health.model(candidate.provider, {
+				modelId: candidate.id, baseUrl: candidate.baseUrl, sessionId: this.#host.sessionId(),
+				reserveFraction: cfgRetryUsageReservePct.get(this.#host.settings) / 100, signal: boundedSignal,
+			});
+			if (health.state === "depleted" || health.state === "reserve") return false;
+			// Preserve ordinary configured-chain behavior when native judgment is not configured.
+			if (!hasNativeJudge(this.#host.settings, this.#host.modelRegistry)) return true;
+			const result = await resolveJudge({
+				settings: this.#host.settings, registry: this.#host.modelRegistry,
+				sessionId: this.#host.sessionId(), purpose: "retry-fallback",
+				onUsage: journalJudgmentUsage(this.#host.sessionManager),
+			}).judge({ state: { from: currentSelector, candidate: selector.raw, reason: reason.slice(0, 1200),
+				health: { state: health.state, accounts: health.accounts.map(account => ({
+					state: account.state, remainingFraction: account.remainingFraction ?? null, resetsAt: account.resetsAt ?? null,
+				})) },
+				guards: "Configured fallback chain; native credential, context, effort and replay checks remain enforced." },
+				questions: { recovery: { type: "choice",
+					instructions: "Assess this configured fallback candidate against the observed failure and quota. A native guard already rejected known depleted or reserve routes. Unknown quota is not guaranteed availability. Do not infer a new provider, spending permission, or permission to replay completed tools.",
+					criteria: { fallback: "The configured candidate can recover this request within the existing guards.",
+						keep: "This candidate cannot safely recover the observed failure.",
+						needs_evidence: "The observed failure or candidate suitability is unresolved." } } },
+			}, { signal: boundedSignal });
+			signal?.throwIfAborted();
+			const answer = result.answers.recovery;
+			return !boundedSignal.aborted && answer.choice === "fallback" && answer.probabilities.fallback > 0.5;
+		} catch (error) {
+			signal?.throwIfAborted();
+			logger.debug("Retry fallback candidate was not approved", { selector: selector.raw, error: String(error) });
+			return false;
+		}
+	}
+
 	async #maybeApplyUsageAwareFallback(signal: AbortSignal, confirmer?: UsageFallbackConfirmer): Promise<boolean> {
 		if (!cfgRetryUsageAwareFallback.get(this.#host.settings)) return false;
 		const currentModel = this.#host.model();
@@ -1865,8 +1909,9 @@ export class TurnRecovery {
 				// hold the live context so we never switch onto an oversized request
 				// (issue #8065).
 				if (!this.#host.contextFitsModel(candidateModel)) continue;
+				let candidateHealth: Pick<ModelUsageHealth, "state" | "accounts"> = { state: "unknown", accounts: [] };
 				try {
-					const candidateHealth = await this.#host.modelRegistry.authStorage.health.model(
+					candidateHealth = await this.#host.modelRegistry.authStorage.health.model(
 						candidateModel.provider,
 						{
 							modelId: candidateModel.id,
@@ -1905,12 +1950,19 @@ export class TurnRecovery {
 				}
 				if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
 				if (!apiKey) continue;
+				if (!(await this.#approveRetryFallback(currentSelector, candidate, candidateModel,
+					describeUsageFallback(health, cfgRetryUsageReservePct.get(this.#host.settings)), signal, candidateHealth))) continue;
 				fallback = { role, selector: candidate, apiKey };
 				break;
 			}
 			if (fallback) break;
 		}
-		if (!fallback) return false;
+		if (!fallback) {
+			if (health.state === "depleted") {
+				throw new Error(`${USAGE_PREFLIGHT_BLOCKED_PREFIX} usage depleted for ${currentSelector}; no eligible configured fallback.`);
+			}
+			return false;
+		}
 
 		let shouldFallback = health.state === "depleted" || reservePolicy === "auto" || !confirmer;
 		if (!shouldFallback && health.state === "reserve" && confirmer) {
@@ -2076,6 +2128,7 @@ export class TurnRecovery {
 			pinFallback?: boolean;
 			preserveFailedTurn?: boolean;
 			wrapAround?: boolean;
+			signal?: AbortSignal;
 		},
 	): Promise<boolean> {
 		const ceiling = this.#host.thinkingLevelCeiling();
@@ -2091,6 +2144,7 @@ export class TurnRecovery {
 		const creditTargets = failedModel ? fallbackCreditTargets(failedModel) : [];
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
 			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
+				options?.signal?.throwIfAborted();
 				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
@@ -2141,11 +2195,14 @@ export class TurnRecovery {
 				if (!this.#host.contextFitsModel(candidate, options?.preserveFailedTurn ? undefined : failedMessage)) {
 					continue;
 				}
-				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
+				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal: options?.signal });
 				if (!apiKey) continue;
+				if (!(await this.#approveRetryFallback(currentSelector, selector, candidate,
+					failedMessage.errorMessage ?? "Provider request failed.", options?.signal))) continue;
 				const previousEditMode = this.#host.resolveActiveEditMode();
 				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
 					...options,
+					apiKey,
 					reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
 				});
 				const editModeChanged = this.#host.resolveActiveEditMode() !== previousEditMode;
@@ -2608,12 +2665,24 @@ export class TurnRecovery {
 				if (!classifierRefusal) {
 					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
 				}
-				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
-					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
-					pinFallback: classifierRefusal,
-					preserveFailedTurn,
-					wrapAround: longUsageLimitFallback,
-				});
+				const fallbackAbortController = new AbortController();
+				this.#retryAbortController?.abort();
+				this.#retryAbortController = fallbackAbortController;
+				try {
+					switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
+						excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
+						pinFallback: classifierRefusal,
+						preserveFailedTurn,
+						wrapAround: longUsageLimitFallback,
+						signal: fallbackAbortController.signal,
+					});
+				} catch (error) {
+					if (!fallbackAbortController.signal.aborted) throw error;
+					if (this.#retryAbortController !== fallbackAbortController) return false;
+					return this.#endCancelledRetry();
+				} finally {
+					if (this.#retryAbortController === fallbackAbortController) this.#retryAbortController = undefined;
+				}
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
 			// of the role-fallback setting: it's intrinsic to the Fast contract (speed

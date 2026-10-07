@@ -26,6 +26,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as judgmentModule from "@oh-my-pi/pi-coding-agent/judgment";
 import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
@@ -272,6 +273,7 @@ describe("AgentSession retry fallback", () => {
 		// (default 5-minute suppression) so state never leaks between tests.
 		modelRegistry = sharedRegistry;
 		modelRegistry.clearSuppressedSelectors();
+		vi.spyOn(judgmentModule, "hasNativeJudge").mockReturnValue(false);
 	});
 
 	afterEach(async () => {
@@ -280,6 +282,74 @@ describe("AgentSession retry fallback", () => {
 			session = undefined;
 		}
 		vi.restoreAllMocks();
+	});
+
+	for (const decision of ["fallback", "needs_evidence"] as const) {
+		it(`respects native JEV ${decision} before changing a configured retry model`, async () => {
+			const primary = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const fallback = getBundledModel("openai", "gpt-4o-mini")!;
+			const requested: string[] = [];
+			vi.spyOn(judgmentModule, "hasNativeJudge").mockReturnValue(true);
+			vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue({ state: "healthy", accounts: [] });
+			vi.spyOn(judgmentModule.ChainJudge.prototype, "judge").mockResolvedValue({
+				provider: "typesafe", model: "jev-test", answers: { recovery: {
+					type: "choice", choice: decision, confidence: 1,
+					probabilities: { fallback: decision === "fallback" ? 1 : 0, keep: 0, needs_evidence: decision === "needs_evidence" ? 1 : 0 },
+				} },
+			} as never);
+			const settings = Settings.isolated({ "compaction.enabled": false, "retry.maxRetries": 0,
+				"retry.fallbackChains": { default: [`${fallback.provider}/${fallback.id}`] } });
+			settings.setModelRole("default", `${primary.provider}/${primary.id}`);
+			session = new AgentSession({ agent: createFallbackAgent(primary, requested), settings, modelRegistry,
+				sessionManager: SessionManager.inMemory(tempDir.path()) });
+			await session.prompt("Recover only on an approved configured route");
+			await session.waitForIdle();
+			expect(requested).toEqual(decision === "fallback"
+				? [`${primary.provider}/${primary.id}`, `${fallback.provider}/${fallback.id}`]
+				: [`${primary.provider}/${primary.id}`]);
+			expect(session.model?.id).toBe(decision === "fallback" ? fallback.id : primary.id);
+		});
+	}
+
+	it("cancels a pending native fallback judgment without switching or replaying", async () => {
+		const primary = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const fallback = getBundledModel("openai", "gpt-4o-mini")!;
+		const requested: string[] = [];
+		const entered = Promise.withResolvers<void>();
+		vi.spyOn(judgmentModule, "hasNativeJudge").mockReturnValue(true);
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue({ state: "healthy", accounts: [] });
+		vi.spyOn(judgmentModule.ChainJudge.prototype, "judge").mockImplementation((_request, options) => {
+			const pending = Promise.withResolvers<never>();
+			options?.signal?.addEventListener("abort", () => pending.reject(new Error("aborted")), { once: true });
+			entered.resolve();
+			return pending.promise;
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.maxRetries": 0,
+			"retry.fallbackChains": { default: [`${fallback.provider}/${fallback.id}`] } });
+		settings.setModelRole("default", `${primary.provider}/${primary.id}`);
+		session = new AgentSession({ agent: createFallbackAgent(primary, requested), settings, modelRegistry,
+			sessionManager: SessionManager.inMemory(tempDir.path()) });
+		const running = session.prompt("Recover from a provider failure");
+		await entered.promise;
+		await session.abort();
+		await running;
+		expect(requested).toEqual([`${primary.provider}/${primary.id}`]);
+		expect(session.model?.id).toBe(primary.id);
+	});
+
+	it("does not resend a depleted primary when every configured fallback is depleted", async () => {
+		const primary = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const fallback = getBundledModel("openai", "gpt-4o-mini")!;
+		const requested: string[] = [];
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue({ state: "depleted", accounts: [] });
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.usageAwareFallback": true,
+			"retry.fallbackChains": { default: [`${fallback.provider}/${fallback.id}`] } });
+		settings.setModelRole("default", `${primary.provider}/${primary.id}`);
+		session = new AgentSession({ agent: createFallbackAgent(primary, requested), settings, modelRegistry,
+			sessionManager: SessionManager.inMemory(tempDir.path()) });
+		await expect(session.prompt("Do not retry exhausted quota")).rejects.toThrow("no eligible configured fallback");
+		expect(requested).toEqual([]);
+		expect(session.model?.id).toBe(primary.id);
 	});
 
 	it("advances through a role-keyed fallback chain across retries", async () => {
