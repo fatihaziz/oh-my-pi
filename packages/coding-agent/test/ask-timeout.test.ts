@@ -49,10 +49,27 @@ describe("AskTool timeout", () => {
 			abort: vi.fn(),
 		} as unknown as AgentToolContext;
 		let result: AskExecutionResult | undefined;
-		const pending = createAskTool().execute("five-seconds", {
-			timeout: 5,
-			questions: [{ id: "format", question: "Which format?", options: [{ label: "JSON" }, { label: "CSV" }], recommended: 1 }],
-		}, undefined, undefined, context).then(value => { result = value; });
+		const pending = createAskTool()
+			.execute(
+				"five-seconds",
+				{
+					timeout: 5,
+					questions: [
+						{
+							id: "format",
+							question: "Which format?",
+							options: [{ label: "JSON" }, { label: "CSV" }],
+							recommended: 1,
+						},
+					],
+				},
+				undefined,
+				undefined,
+				context,
+			)
+			.then(value => {
+				result = value;
+			});
 		await drainMicrotasks();
 		vi.advanceTimersByTime(4_999);
 		await drainMicrotasks();
@@ -72,10 +89,27 @@ describe("AskTool timeout", () => {
 			abort: vi.fn(),
 		} as unknown as AgentToolContext;
 		let result: AskExecutionResult | undefined;
-		const pending = createAskTool().execute("approval", {
-			timeout: 0,
-			questions: [{ id: "approval", question: "Approve?", options: [{ label: "Approve" }, { label: "Decline" }], recommended: 0 }],
-		}, undefined, undefined, context).then(value => { result = value; });
+		const pending = createAskTool()
+			.execute(
+				"approval",
+				{
+					timeout: 0,
+					questions: [
+						{
+							id: "approval",
+							question: "Approve?",
+							options: [{ label: "Approve" }, { label: "Decline" }],
+							recommended: 0,
+						},
+					],
+				},
+				undefined,
+				undefined,
+				context,
+			)
+			.then(value => {
+				result = value;
+			});
 		await drainMicrotasks();
 		vi.advanceTimersByTime(5_001);
 		await drainMicrotasks();

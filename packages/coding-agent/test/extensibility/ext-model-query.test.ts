@@ -57,13 +57,19 @@ describe("createExtensionModelQuery", () => {
 
 	test("resolve() finds a native judge role while list() remains chat-only", () => {
 		const jev = buildModel({
-			id: "jev-test", name: "JEV Test", provider: "typesafe", api: "typesafe",
-			baseUrl: "https://example.test", reasoning: false, input: ["text"],
+			id: "jev-test",
+			name: "JEV Test",
+			provider: "typesafe",
+			api: "typesafe",
+			baseUrl: "https://example.test",
+			reasoning: false,
+			input: ["text"],
 			cost: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200000, maxTokens: 8192,
+			contextWindow: 200000,
+			maxTokens: 8192,
 		});
 		const nativeRegistry = {
-			getAvailable: (kind = "chat") => kind === "all" ? [...available, jev] : available,
+			getAvailable: (kind = "chat") => (kind === "all" ? [...available, jev] : available),
 		} as unknown as ModelRegistry;
 		const settings = Settings.isolated({ modelRoles: { judge: "typesafe/jev-test" } });
 		const q = createExtensionModelQuery(nativeRegistry, settings, () => claude);

@@ -27,6 +27,7 @@ import {
 	getTaskIsolationPath,
 	parseIsolationBackend,
 	type IsolationHandle,
+	type WorktreeBaseline,
 } from "./worktree";
 
 const planSchema = schema({
@@ -94,7 +95,7 @@ export class ExecutorWorkspace {
 	#options?: IsolatedRunOptions;
 	#releasePromise?: Promise<boolean>;
 	#cleanup?: Promise<void>;
-	#context?: IsolationContext;
+	#context?: IsolationContext & { baseline: WorktreeBaseline };
 	#handle?: IsolationHandle;
 	#result?: SingleResult;
 	#releaseArtifacts?: Pick<SingleResult, "patchPath" | "branchName" | "branchBaseSha" | "nestedPatchPaths">;

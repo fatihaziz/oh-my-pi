@@ -41,9 +41,9 @@ When authorized to create or edit a contributor-submitted PR, follow the checkli
 
 ## Fatih Fork
 
-This checkout is a fork. Local behavior lives **directly in the source tree** on `local/main`, applied on top of an upstream release tag. There is no patch file, no patch engine, and no release worktree: the previous `scripts/omp-unified.patch` mechanism is retired.
+This checkout is a fork. Local behavior lives in source commits on top of an upstream release tag. Global OMP runs a verified snapshot outside the editable checkout. The previous unified-patch engine is retired.
 
-Scope rule (owner decision, 2026-09-26): the fork carries **only what Foyer needs**. Every other file matches the upstream tag; `git diff v<TAG> --stat` must list only the rows below, this section, and the `/tmp/` line in `.gitignore`.
+Keep behavior required by the operator and Foyer: workflow ownership, native execution, model approval, writer isolation, lifecycle recovery, compaction, result integrity and supported integration APIs. The rows below identify integration seams, not a file allowlist. Prefer an upstream implementation when it satisfies the same contract; never discard a required behavior merely because its file is outside these rows.
 
 Local behavior carried on top of upstream:
 
@@ -56,20 +56,17 @@ Retired, do not reintroduce: S1, P1, P3, P5, P6, P7, P8, P9, P10, P11, P12, P13,
 
 ### Updating to a new upstream release
 
-1. `git fetch origin main --tags`, then merge the new release tag into `local/main`: `git merge v<NEW>`.
-2. **Resolve every conflict properly.** Read both sides as one contract; never resolve by taking ours/theirs wholesale, and never drop an upstream change to keep a local one. A conflict in a P14 or P23 file means upstream moved the seam — follow it. Then run `git diff --name-status v<NEW>`: any file outside the carried rows goes back to the tag.
-3. Refresh the native addon to the new release; the loader checks the stamped release version and rejects a mismatched `.node`. Put the downloaded package in the user cache, not the repository's `tmp/`:
-   ```sh
-   mkdir -p "$HOME/.cache/omp"
-   npm pack @oh-my-pi/pi-natives-win32-x64@<NEW> --pack-destination "$HOME/.cache/omp" --ignore-scripts
-   # extract package/pi_natives.win32-x64-baseline.node into packages/natives/native/
-   ```
-4. `bun install --frozen-lockfile`, `bun run check:ts`, the carried tests (`bun test packages/coding-agent/test/companion.test.ts packages/coding-agent/test/task/external-executor.test.ts`), and `omp --smoke-test`.
-5. The global `omp` is a Bun link to this checkout (see below), so a merge is live immediately for new processes. Update `ompInstall.version` in the vault's `___claude-fatih/env.yml` to the new release for the record.
+1. Verify that the global CLI, SDK worker entry and native addon resolve inside the approved release directory, not this checkout. Use the vault's `___claude-fatih/scripts/omp_release.py`. Establish a verified baseline snapshot before merging.
+2. Fetch the selected upstream release tag and merge it in a separate candidate worktree. Keep any checkout still used by a running OMP process unchanged, including its dependencies and native addon. Changing the global pointer does not relocate existing processes.
+3. Read both sides of each conflict as one behavior contract. Prefer suitable upstream implementations and migrate required Foyer seams to them. Remove replaced local code. Do not use a historical patch-ID list as a deletion rule.
+4. Install candidate dependencies with `bun install --frozen-lockfile --ignore-scripts`. Build its native addon with `bun run build:native`; a stock addon cannot carry local Rust changes. Keep generated artifacts inside the candidate.
+5. Run applicable type checks and regression checks, then exercise candidate CLI and real Foyer parent/worker paths. Check ownership, model approval, Ask, isolation, lifecycle and compaction. A build does not prove these behaviors.
+6. Commit the verified candidate when authorized. Stage that exact commit with `omp_release.py stage --source <candidate> --commit-sha <full-sha>`. Staging does not change the global runtime.
+7. Activate only the verified release with `omp_release.py activate --release <release-id>`, update the vault's `ompInstall.version`, and verify the installed physical paths and Foyer integration. Keep the previous immutable release for `omp_release.py rollback`. Push only with current authorization.
 
 ### Installed binding
 
-`omp` on this machine resolves to this checkout through `bun link` from `packages/coding-agent`, whose `bin.omp` points at `src/cli.ts`. There is no npm copy of `@oh-my-pi/pi-coding-agent` to patch and no `dist/cli.js` to rebuild. Do not run `bun add -g @oh-my-pi/pi-coding-agent`: it replaces the link with a published tarball and silently drops P14 and P23.
+The vault's `___claude-fatih/env.yml` declares `ompInstall.mode: release`. `omp_release.py` owns snapshot validation, Bun registration, activation and rollback under `~/.omp/releases`. Canonical sync (`--only omp-path`) preserves the approved release recorded in `active.json`; it rejects development-link mode. Never link an editable checkout globally, mutate an activated snapshot, or replace it with an upstream tarball. Initial migration has no previous immutable release; rollback must not restore the unsafe development link.
 
 ## Code Quality
 

@@ -128,7 +128,10 @@ describe("AgentSession idle compaction async-job deferral", () => {
 		tempDir = TempDir.createSync("@pi-idle-compaction-async-wake-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.keys.setRuntime("anthropic", "test-key");
-		modelRegistry = new ModelRegistry(authStorage);
+		modelRegistry = new ModelRegistry(authStorage, undefined, {
+			ignoreLocalModelConfig: true,
+			settings: Settings.isolated(),
+		});
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		manager = new AsyncJobManager({ onJobComplete: async () => {} });
 		gates = [];
