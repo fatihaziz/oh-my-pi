@@ -297,11 +297,17 @@ export async function runExecutorHost(): Promise<void> {
 		}
 		const { id, type } = frame;
 		if (type === "coordinator_init") {
-			if (closing || launch || workspace || coordinatorOpening) throw new Error("Native coordinator ownership is unavailable");
+			if (closing || launch || workspace || coordinatorOpening)
+				throw new Error("Native coordinator ownership is unavailable");
 			if (coordinator) {
 				const previous = coordinator.identity;
-				if (previous.paneId !== frame.paneId || previous.sessionId !== frame.sessionId ||
-					previous.model !== frame.model || previous.thinking !== frame.thinking) throw new Error("Coordinator identity or settings changed; close the old runtime first");
+				if (
+					previous.paneId !== frame.paneId ||
+					previous.sessionId !== frame.sessionId ||
+					previous.model !== frame.model ||
+					previous.thinking !== frame.thinking
+				)
+					throw new Error("Coordinator identity or settings changed; close the old runtime first");
 				respond(id, type, coordinator.selection);
 				return;
 			}
@@ -314,14 +320,19 @@ export async function runExecutorHost(): Promise<void> {
 			}
 			return;
 		}
-		if (type === "coordinator_judge" || type === "coordinator_think") {
+		if (type === "coordinator_judge" || type === "coordinator_think" || type === "coordinator_review_context") {
 			if (closing || !coordinator) throw new Error("Initialize the pane coordinator first");
-			if (callbackRuns.has(id) || callbackRuns.size >= 128) throw new Error("Duplicate or excess coordinator request");
+			if (callbackRuns.has(id) || callbackRuns.size >= 128)
+				throw new Error("Duplicate or excess coordinator request");
 			const abort = new AbortController();
 			callbackRuns.set(id, abort);
 			try {
 				const signal = AbortSignal.any([abort.signal, lifetime.signal]);
-				const result = await (type === "coordinator_judge" ? coordinator.judge(frame, signal) : coordinator.think(frame, signal));
+				const result = await (type === "coordinator_review_context"
+					? coordinator.reviewContext(frame, signal)
+					: type === "coordinator_judge"
+						? coordinator.judge(frame, signal)
+						: coordinator.think(frame, signal));
 				respond(id, type, { ...result, providerCalls: coordinator.providerCalls });
 			} finally {
 				callbackRuns.delete(id);
@@ -784,7 +795,9 @@ export async function runExecutorHost(): Promise<void> {
 				agentId: launch?.id,
 				busy: running !== undefined,
 				workspace: workspace?.snapshot(),
-				coordinator: coordinator ? { ...coordinator.identity, providerCalls: coordinator.providerCalls, active: callbackRuns.size } : undefined,
+				coordinator: coordinator
+					? { ...coordinator.identity, providerCalls: coordinator.providerCalls, active: callbackRuns.size }
+					: undefined,
 			});
 			return;
 		}
@@ -1047,7 +1060,14 @@ export async function runExecutorHost(): Promise<void> {
 		type: "ready",
 		protocol: "omp-native-executor",
 		version: 1,
-		capabilities: ["workspace_v1", "parent_relay_v1", "peer_registry_v1", "operator_controls_v1", "terminal_v1", "coordinator_v1"],
+		capabilities: [
+			"workspace_v1",
+			"parent_relay_v1",
+			"peer_registry_v1",
+			"operator_controls_v1",
+			"terminal_v1",
+			"coordinator_v1",
+		],
 		pid: process.pid,
 	});
 	try {

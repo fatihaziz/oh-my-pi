@@ -14,6 +14,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { normalizeCustomMessagePayload } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { registerHostedMaintenance } from "@oh-my-pi/pi-coding-agent/session/hosted-maintenance";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
@@ -468,6 +469,32 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(message?.customType).toBe("goal-mode-context");
 		expect(content).not.toContain("<todo_context>");
 		expect(content).not.toContain("Run focused checks");
+	});
+
+	it("leaves hosted goal continuation to Foyer, including an already armed timer", async () => {
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		vi.useFakeTimers();
+		const waiter = await armInputWaiter(harness.mode);
+		const release = registerHostedMaintenance(harness.session.sessionManager.getSessionId(), async () => ({
+			compact: false,
+		}));
+		try {
+			vi.advanceTimersByTime(800);
+			await waitForMicrotasks();
+			expect(waiter.getResolvedInput()).toBeUndefined();
+			const input = harness.mode.startPendingSubmission({ text: "operator input" });
+			harness.mode.onInputCallback?.(input);
+			await waiter.inputPromise;
+			harness.mode.finishPendingSubmission(input);
+			const hosted = await armInputWaiter(harness.mode);
+			vi.advanceTimersByTime(800);
+			await waitForMicrotasks();
+			expect(hosted.getResolvedInput()).toBeUndefined();
+			harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "cleanup" }));
+			await hosted.inputPromise;
+		} finally {
+			release();
+		}
 	});
 
 	it("drops a goal continuation tick while the agent is streaming", async () => {
