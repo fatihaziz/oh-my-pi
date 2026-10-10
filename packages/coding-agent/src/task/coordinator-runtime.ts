@@ -8,6 +8,7 @@ import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { hasNativeJudge, resolveJudge, sharedJudgmentCache } from "../judgment";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
+import { createTaskReviewReader } from "./review-evidence";
 
 /** One pane owns this runtime. Each request carries an immutable Foyer snapshot. */
 export async function openCoordinatorRuntime(cwd: string, input: Record<string, unknown>, signal: AbortSignal) {
@@ -49,6 +50,7 @@ export async function openCoordinatorRuntime(cwd: string, input: Record<string, 
 			},
 		});
 		const selection = { provider: model.provider, model: model.id, thinking };
+		const reviewContext = createTaskReviewReader();
 		return {
 			identity,
 			selection,
@@ -57,6 +59,9 @@ export async function openCoordinatorRuntime(cwd: string, input: Record<string, 
 			},
 			close() {
 				auth.close();
+			},
+			reviewContext(input: Record<string, unknown>, signal: AbortSignal) {
+				return reviewContext(input.task, signal, input.workerSources);
 			},
 			async judge(input: Record<string, unknown>, signal: AbortSignal) {
 				if (!isRecord(input.questions)) throw new Error("Coordinator judgment requires typed questions");

@@ -320,7 +320,7 @@ export async function runExecutorHost(): Promise<void> {
 			}
 			return;
 		}
-		if (type === "coordinator_judge" || type === "coordinator_think") {
+		if (type === "coordinator_judge" || type === "coordinator_think" || type === "coordinator_review_context") {
 			if (closing || !coordinator) throw new Error("Initialize the pane coordinator first");
 			if (callbackRuns.has(id) || callbackRuns.size >= 128)
 				throw new Error("Duplicate or excess coordinator request");
@@ -328,9 +328,11 @@ export async function runExecutorHost(): Promise<void> {
 			callbackRuns.set(id, abort);
 			try {
 				const signal = AbortSignal.any([abort.signal, lifetime.signal]);
-				const result = await (type === "coordinator_judge"
-					? coordinator.judge(frame, signal)
-					: coordinator.think(frame, signal));
+				const result = await (type === "coordinator_review_context"
+					? coordinator.reviewContext(frame, signal)
+					: type === "coordinator_judge"
+						? coordinator.judge(frame, signal)
+						: coordinator.think(frame, signal));
 				respond(id, type, { ...result, providerCalls: coordinator.providerCalls });
 			} finally {
 				callbackRuns.delete(id);
