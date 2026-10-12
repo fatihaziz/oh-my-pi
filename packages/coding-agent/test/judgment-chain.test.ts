@@ -206,15 +206,11 @@ describe("ChainJudge", () => {
 		expect(manager.getBranch().filter(entry => entry.type === "model_usage")).toHaveLength(0);
 	});
 
-	it("falls back from a failed native judge only to another native judge", async () => {
+	it("falls back to the next configured native judge", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },
 			"retry.fallbackChains": {
-				judge: [
-					`${LOCAL.provider}/${LOCAL.id}`,
-					`${DECISIONS.provider}/${DECISIONS.id}`,
-					`${ONLINE.provider}/${ONLINE.id}`,
-				],
+				judge: [`${DECISIONS.provider}/${DECISIONS.id}`],
 			},
 		});
 		const registry = makeRegistry([JEV_PREVIEW, LOCAL, DECISIONS, ONLINE], {
@@ -248,7 +244,7 @@ describe("ChainJudge", () => {
 		expect(online).not.toHaveBeenCalled();
 	});
 
-	it("fails instead of degrading to a prompted model, and skips a rejected account on later calls", async () => {
+	it("uses an explicit chat backup after a billing rejection and skips the rejected account on later calls", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },
 			"retry.fallbackChains": { judge: [`${ONLINE.provider}/${ONLINE.id}`] },
@@ -259,23 +255,58 @@ describe("ChainJudge", () => {
 			.mockImplementation(
 				asGlobalFetch(async () => Response.json({ detail: { error_type: "billing_error" } }, { status: 402 })),
 			);
-		const online = vi.spyOn(ai, "completeSimple");
+		const online = vi.spyOn(ai, "completeSimple").mockImplementation(async (model, _context, options) => {
+			const response = reply(model, "level: low");
+			options?.onAttempt?.(response);
+			return response;
+		});
 		const onUsage = vi.fn();
 		const request = { state: "rename a local", questions: { level: TIER_QUESTION } };
 
-		await expect(
-			new ChainJudge({ settings, registry, purpose: "test", sessionModel: ONLINE, onUsage }).judge(request),
-		).rejects.toThrow("402");
-		await expect(new ChainJudge({ settings, registry, purpose: "test", onUsage }).judge(request)).rejects.toThrow(
-			"rejected the account recently",
+		const first = await new ChainJudge({ settings, registry, purpose: "test", sessionModel: ONLINE, onUsage }).judge(
+			request,
 		);
+		const second = await new ChainJudge({ settings, registry, purpose: "test", onUsage }).judge(request);
+		expect(first.answers.level.choice).toBe("low");
+		expect(second.answers.level.choice).toBe("low");
+		expect(first.provider).toBe(ONLINE.provider);
+		expect(second.provider).toBe(ONLINE.provider);
+		expect(first.model).toBe(ONLINE.id);
+		expect(second.model).toBe(ONLINE.id);
 
 		expect(typesafeCalls).toHaveBeenCalledTimes(1);
-		expect(online).not.toHaveBeenCalled();
-		expect(onUsage).toHaveBeenCalledTimes(1);
+		expect(online).toHaveBeenCalledTimes(2);
+		expect(onUsage).toHaveBeenCalledTimes(3);
 		expect(onUsage).toHaveBeenCalledWith(
 			expect.objectContaining({ provider: "typesafe", model: "jev-preview", stopReason: "error" }),
 		);
+		expect(onUsage).toHaveBeenCalledWith(
+			expect.objectContaining({ provider: ONLINE.provider, model: ONLINE.id, stopReason: "stop" }),
+		);
+	});
+
+	it("does not invent a prompted backup after native rejection", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-preview" },
+			"retry.fallbackChains": { judge: [] },
+		});
+		const registry = makeRegistry([JEV_PREVIEW, LOCAL, ONLINE], {
+			typesafe: "ts-key",
+			[ONLINE.provider]: "online-key",
+		});
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async () => Response.json({ detail: { error_type: "billing_error" } }, { status: 402 })),
+		);
+		const online = vi.spyOn(ai, "completeSimple");
+		const local = vi.spyOn(tinyModelClient, "complete");
+		await expect(
+			new ChainJudge({ settings, registry, purpose: "test", sessionModel: ONLINE }).judge({
+				state: "rename a local",
+				questions: { level: TIER_QUESTION },
+			}),
+		).rejects.toThrow("402");
+		expect(online).not.toHaveBeenCalled();
+		expect(local).not.toHaveBeenCalled();
 	});
 
 	it("propagates caller abort without attempting a fallback", async () => {

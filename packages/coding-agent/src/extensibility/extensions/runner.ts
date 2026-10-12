@@ -1399,10 +1399,7 @@ export class ExtensionRunner {
 					onUsage: journalJudgmentUsage(this.sessionManager),
 					cache: sharedJudgmentCache(),
 				});
-				return judge.withCandidate(async (candidate, kind) => {
-					if (kind !== "native") throw new Error("Native extension judgment cannot use a chat-model fallback.");
-					return candidate.judge(request, options);
-				}, options);
+				return judge.judge(request, options);
 			},
 			isIdle: () => this.#isIdleFn(),
 			abort: () => this.#abortFn(),

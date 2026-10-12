@@ -74,13 +74,7 @@ export async function openCoordinatorRuntime(cwd: string, input: Record<string, 
 						];
 					}),
 				) as Questions;
-				return judge.withCandidate(
-					(candidate, kind) => {
-						if (kind !== "native") throw new Error("Coordinator cannot replace JEV with a chat judge");
-						return candidate.judge({ state: input.state as JudgmentState, questions }, { signal });
-					},
-					{ signal },
-				);
+				return judge.judge({ state: input.state as JudgmentState, questions }, { signal });
 			},
 			async think(input: Record<string, unknown>, signal: AbortSignal) {
 				if (typeof input.instructions !== "string" || !input.instructions.trim())
