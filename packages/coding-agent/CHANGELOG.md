@@ -11,6 +11,11 @@
 
 ### Fixed
 
+- Historical task review now recovers carried TODO execution from its recorded snapshot, retains the preceding operator request, and resolves compacted tool output only from the source session's artifact region. Removed or restarted occurrences, forged identities, missing artifacts and recovery cycles cannot supply acceptance proof.
+- Task review now binds each TODO to its occurrence and source, and each Goal to its recorded entry. Closing, replacing or dropping a Goal cannot lend unrelated work to the earlier result.
+- Async evidence tracks transcript-wide call and job identities. Ambiguous reuse remains unresolved, settled prior work survives unrelated later reuse, and captured late failures remain failures.
+- Oversized tool output and call arguments retain bounded, explicitly truncated pairs. The closing explanation remains a deliverable, including its interrupted or failed state, but intervening user input, another Goal or unrelated work prevents borrowing a later answer.
+
 - Dequeue now restores steering that remains visible while a live response is using it. It withdraws that input before interrupting the response, preserves the editor draft, and prevents the withdrawn input from being replayed.
 - Extension model-role resolution now searches all available model kinds, so `ctx.models.resolve("@judge")` can resolve native JEV instead of treating it as unavailable. The ordinary `ctx.models.list()` remains chat-only.
 - Native worker registry notifications now report only the worker's owned identity. Restoring parked sibling transcripts no longer sends them as the current worker and trips Foyer's peer ownership validation; sibling history remains available locally.

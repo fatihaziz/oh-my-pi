@@ -6,7 +6,7 @@ import { validateJsonSchemaValue } from "@oh-my-pi/pi-ai/utils/schema";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
-import { hasNativeJudge, resolveJudge, sharedJudgmentCache } from "../judgment";
+import { resolveJudge, sharedJudgmentCache } from "../judgment";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { createTaskReviewReader } from "./review-evidence";
 
@@ -37,7 +37,6 @@ export async function openCoordinatorRuntime(cwd: string, input: Record<string, 
 			slash > 0 ? registry.find(identity.model.slice(0, slash), identity.model.slice(slash + 1)) : undefined;
 		if (!model || !getSupportedEfforts(model).includes(thinking))
 			throw new Error("Coordinator model or high thinking effort is unavailable");
-		if (!hasNativeJudge(settings, registry)) throw new Error("Coordinator requires the configured native JEV route");
 		let providerCalls = 0;
 		const judge = resolveJudge({
 			settings,

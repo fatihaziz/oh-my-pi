@@ -15,7 +15,8 @@ interface BinaryTarget {
 
 const repoRoot = path.join(import.meta.dir, "..");
 const binariesDir = path.join(repoRoot, "packages", "coding-agent", "binaries");
-const entrypoint = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
+const foyerBuild = process.argv.includes("--foyer");
+const entrypoint = path.join(repoRoot, "packages", "coding-agent", "src", foyerBuild ? "foyer-cli.ts" : "cli.ts");
 const transformersManifest: unknown = createRequire(import.meta.url)("@huggingface/transformers/package.json");
 if (
 	typeof transformersManifest !== "object" ||
@@ -207,6 +208,9 @@ async function main(): Promise<void> {
 
 	if (selectedTargets.length === 0) {
 		throw new Error("No release targets selected.");
+	}
+	for (const target of selectedTargets) {
+		if (foyerBuild) target.outfile = target.outfile.replace("/omp-", "/foyer-omp-");
 	}
 
 	await fs.mkdir(binariesDir, { recursive: true });

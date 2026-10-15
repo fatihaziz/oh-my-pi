@@ -225,6 +225,7 @@ export async function runExecutorHost(): Promise<void> {
 	});
 	let launch: HostedExecutorOptions | undefined;
 	let modelOwner: ExecutorOptions | undefined;
+	let authStorage: import("../session/auth-storage").AuthStorage | undefined;
 	let authorizedModel: { provider: string; id: string } | undefined;
 	let modelSelection: FollowUpTurnOptions["modelSelection"];
 	let turn: AbortController | undefined;
@@ -705,7 +706,8 @@ export async function runExecutorHost(): Promise<void> {
 			turn = new AbortController();
 			const signal = AbortSignal.any([turn.signal, lifetime.signal]);
 			running = context.with(telemetry?.context ?? context.active(), async () => {
-				const modelRegistry = new ModelRegistry(await discoverAuthStorage());
+				authStorage = await discoverAuthStorage();
+				const modelRegistry = new ModelRegistry(authStorage);
 				signal.throwIfAborted();
 				let artifacts: ArtifactManager | undefined;
 				if (isRecord(frame.callbacks) && frame.callbacks.artifacts === true) {
@@ -1102,6 +1104,7 @@ export async function runExecutorHost(): Promise<void> {
 				disconnectOwner?.();
 				unsubscribe();
 				callbackOwners.clear();
+				authStorage?.close();
 				await flushTelemetryExport().catch(() => {});
 				await writer.close();
 			}
