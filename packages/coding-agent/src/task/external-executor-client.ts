@@ -53,6 +53,7 @@ export function createExternalSubagentExecutor(transport: ExternalExecutorTransp
 			authStorage: _auth,
 			modelRegistry: _models,
 			settings: _settings,
+			asyncJobManager: _asyncJobs,
 			getApiKey: _key,
 			mcpManager: _mcp,
 			customTools,

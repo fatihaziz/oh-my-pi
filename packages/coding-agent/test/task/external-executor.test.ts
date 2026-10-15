@@ -11,6 +11,7 @@ import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { IrcBus } from "../../src/irc/bus";
 import { createExternalSubagentExecutor } from "../../src/task/external-executor-client";
 import { parseHostedExecutorLaunch } from "../../src/task/executor-host";
+import { AsyncJobManager } from "../../src/async";
 
 const root = path.resolve("tmp/external-owner/root.jsonl");
 const child = path.resolve("tmp/external-owner/root/Child.jsonl");
@@ -246,4 +247,20 @@ test("native launch accepts inherited agents and classifier context without open
 		parseHostedExecutorLaunch({ ...options, inheritedSessionAgents: [{ ...inheritedAgent, source: "remote" }] }),
 	).toThrow("Invalid native launch");
 	expect(() => parseHostedExecutorLaunch({ ...options, arbitrary: true })).toThrow("Invalid native launch");
+});
+
+test("a live parent async manager does not invalidate the hosted child launch", async () => {
+	const manager = new AsyncJobManager({});
+	const owner = createExternalSubagentExecutor({
+		bind(options) {
+			expect(options.asyncJobManager).toBe(manager);
+		},
+		async request<T>(command: string, data: Record<string, unknown>): Promise<T> {
+			expect(command).toBe("start");
+			const wire = JSON.parse(JSON.stringify(data.options));
+			expect(parseHostedExecutorLaunch(wire).id).toBe("Child");
+			return { exitCode: 0 } as T;
+		},
+	});
+	await owner.start({ ...childLaunch, sessionFile: root, artifactsDir: root.slice(0, -6), asyncJobManager: manager });
 });
