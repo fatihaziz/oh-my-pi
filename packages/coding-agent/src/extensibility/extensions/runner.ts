@@ -45,6 +45,7 @@ import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shar
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../../judgment";
+import { requestHostedJudgment } from "../../session/hosted-judgment";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type {
@@ -1446,6 +1447,19 @@ export class ExtensionRunner {
 			},
 			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel),
 			judge: async (request, options = {}) => {
+				const hosted = await requestHostedJudgment(this.sessionManager.getSessionId(), request, options);
+				if (hosted) {
+					journalJudgmentUsage(this.sessionManager)?.({
+						purpose: "foyer-workflow",
+						role: "judge",
+						api: hosted.api,
+						provider: hosted.provider,
+						model: hosted.model,
+						usage: hosted.usage,
+						stopReason: "stop",
+					});
+					return hosted;
+				}
 				if (!this.settings) throw new Error("Native extension judgment requires session settings.");
 				const judge = resolveJudge({
 					settings: this.settings,
