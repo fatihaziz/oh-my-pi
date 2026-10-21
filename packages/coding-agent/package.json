@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "18.4.4",
+	"version": "18.12.5",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"keywords": [
 		"agent",
@@ -15,7 +15,10 @@
 		"url": "https://github.com/can1357/oh-my-pi/issues"
 	},
 	"license": "MIT",
-	"author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
+	"author": {
+		"name": "Stencil Labs, Inc.",
+		"url": "https://stencil.so"
+	},
 	"contributors": [
 		"Mario Zechner"
 	],
@@ -33,6 +36,7 @@
 		"dist/docs-index.generated.txt",
 		"dist/CHANGELOG-*.md",
 		"dist/*.node",
+		"dist/*.json-*.zst",
 		"dist/template-*.css",
 		"dist/template-*.html",
 		"dist/template-*.js",
@@ -51,6 +55,10 @@
 		".": {
 			"types": "./src/index.ts",
 			"import": "./src/index.ts"
+		},
+		"./irc/bus": {
+			"types": "./src/irc/bus.ts",
+			"import": "./src/irc/bus.ts"
 		},
 		"./*": {
 			"types": "./src/*.ts",
@@ -530,8 +538,7 @@
 		"format-prompts": "bun scripts/format-prompts.ts",
 		"gen:tool-views": "bun --cwd=../collab-web run gen:tool-views",
 		"gen:bundle": "bun scripts/bundle-dist.ts",
-		"gen:native": "bun --cwd=../natives run gen:native",
-		"gen:native:reset": "bun --cwd=../natives run gen:native:reset",
+		"gen:rpc": "bun scripts/gen-rpc/index.ts",
 		"prepack": "bun run gen:tool-views && bun run gen:bundle",
 		"bench:guard": "bun scripts/bench-guard.ts"
 	},

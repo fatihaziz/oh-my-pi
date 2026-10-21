@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-ai",
-	"version": "18.4.4",
+	"version": "18.12.5",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"keywords": [
 		"ai",
@@ -40,6 +40,10 @@
 		".": {
 			"types": "./src/index.ts",
 			"import": "./src/index.ts"
+		},
+		"./auth-retry": {
+			"types": "./src/auth-retry.ts",
+			"import": "./src/auth-retry.ts"
 		},
 		"./model-request-policy": {
 			"types": "./src/model-request-policy.ts",

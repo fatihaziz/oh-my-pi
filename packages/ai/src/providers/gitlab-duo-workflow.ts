@@ -6,6 +6,7 @@ import {
 } from "@oh-my-pi/pi-catalog/discovery/gitlab-duo-workflow";
 import * as AIError from "../error";
 import { checkModelRequestPolicy } from "../model-request-policy";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
 	AssistantMessage,
@@ -786,14 +787,8 @@ function mapGitLabDuoWorkflowMcpToolCall(args: Record<string, unknown>): {
 function parseGitLabDuoWorkflowMcpArguments(value: unknown): Record<string, unknown> {
 	if (value === undefined) return {};
 	if (typeof value === "string") {
-		try {
-			const parsed = JSON.parse(value) as unknown;
-			return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-				? (parsed as Record<string, unknown>)
-				: {};
-		} catch {
-			return {};
-		}
+		const parsed = parseToolCallArguments(value);
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
 	}
 	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
@@ -2029,7 +2024,9 @@ export function runGitLabDuoWorkflowSocket(
 				preapprovedTools: startPayload.preapproved_tools.length,
 			});
 			void checkModelRequestPolicy(`${state.output.provider}/${state.output.model}`, options.signal)
-				.then(() => { if (!settled) ws.send(JSON.stringify({ startRequest: startPayload })); })
+				.then(() => {
+					if (!settled) ws.send(JSON.stringify({ startRequest: startPayload }));
+				})
 				.catch(error => settle("closed", error));
 		};
 	}
@@ -2321,8 +2318,11 @@ function emitGitLabDuoWorkflowCheckpoint(
 		const contentByKey = state.checkpointAgentContentByKey ?? {};
 		const contentSignatures = state.checkpointAgentContentSignatures ?? {};
 		const previousContent = contentByKey[entry.messageKey];
-		const contentSignature = `${turnIndex}\u0000${entry.kind}\u0000${entry.content}`;
-		const contentOnlySignature = `${turnIndex}\u0000content\u0000${entry.content}`;
+		// Keyed by a content hash: every frame is a full snapshot, so keying on the
+		// text itself kept two copies of each message prefix seen per stream.
+		const contentHash = Bun.hash(entry.content).toString(36);
+		const contentSignature = `${turnIndex}\u0000${entry.kind}\u0000${contentHash}`;
+		const contentOnlySignature = `${turnIndex}\u0000content\u0000${contentHash}`;
 		const duplicateContent =
 			previousContent === undefined &&
 			(contentSignatures[contentSignature] === true || contentSignatures[contentOnlySignature] === true);

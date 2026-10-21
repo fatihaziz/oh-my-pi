@@ -256,6 +256,35 @@ describe("subagent HUD lines", () => {
 		expect(out).toContain("SchemaMigrator: Migrating the users table");
 	});
 
+	it("counts running agents and previews the raw assignment, not the rendered prompt", () => {
+		const assignment = "Run the 512-rule corpus against the native build and report every mismatch";
+		const out = render([
+			makeSession({
+				id: "Corpus",
+				progress: makeProgress({
+					id: "Corpus",
+					task: `Complete assignment thoroughly:\n\n${assignment}`,
+					assignment,
+				}),
+			}),
+			makeSession({ id: "Bench", description: "Benchmark the shared build" }),
+		]);
+		expect(out).toContain("Subagents · 2 running");
+		expect(out).toContain(`Corpus ${assignment}`);
+		expect(out).not.toContain("Complete assignment thoroughly");
+	});
+
+	it("strips terminal control sequences from the assignment preview", () => {
+		const assignment = "\x1b]0;pwned\x07\x1b[2JAudit the corpus";
+		const raw = renderSubagentHudLines(
+			[makeSession({ id: "Corpus", progress: makeProgress({ id: "Corpus", task: assignment, assignment }) })],
+			120,
+		).join("\n");
+		expect(Bun.stripANSI(raw)).toContain("Audit the corpus");
+		expect(raw).not.toContain("\x1b]0;");
+		expect(raw).not.toContain("\x1b[2J");
+	});
+
 	it("shows a non-default role badge and hides descriptions that only echo the id", () => {
 		const withRole = render([
 			makeSession({
@@ -941,7 +970,8 @@ describe("InteractiveMode subagent observer UI sync", () => {
 	it("coalesces a burst of progress observer changes into one HUD rebuild and render request", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
 		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
-		const rebuildHud = vi.spyOn(mode.subagentContainer, "clear");
+		const mountHud = vi.spyOn(mode.subagentContainer, "addChild");
+		const updateHud = vi.spyOn(SubagentHudComponent.prototype, "update");
 		vi.useFakeTimers();
 
 		for (let index = 0; index < 6; index++) {
@@ -960,7 +990,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		expect(hud).toContain("BurstAgent2: Burst job 2");
 		expect(hud).not.toContain("BurstAgent3: Burst job 3");
 		expect(hud).toContain("3 more — expand");
-		expect(rebuildHud).toHaveBeenCalledTimes(1);
+		expect(mountHud.mock.calls.length + updateHud.mock.calls.length).toBe(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 

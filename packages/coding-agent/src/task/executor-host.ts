@@ -1,7 +1,10 @@
+import { randomUUID } from "node:crypto";
 import * as path from "node:path";
+import type { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { isRecord, untilAborted } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { ModelRegistry } from "../config/model-registry";
+import { SessionAccountPoolScope, validateAgentAccountPools } from "../config/account-pools";
 import { discoverAuthStorage } from "../sdk";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "../modes/rpc/host-tools";
 import type { RpcHostToolDefinition } from "../modes/rpc/rpc-types";
@@ -61,9 +64,12 @@ export type HostedExecutorOptions = Pick<
 	| "detached"
 	| "modelOverride"
 	| "modelRole"
+	| "modelRoute"
+	| "parentActiveModelPattern"
 	| "thinkingLevel"
 	| "effort"
 	| "solutionSpace"
+	| "structured"
 	| "outputSchema"
 	| "outputSchemaMode"
 	| "outputSchemaSource"
@@ -85,11 +91,20 @@ export type HostedExecutorOptions = Pick<
 	| "preloadedCustomToolPaths"
 	| "parentServiceTier"
 	| "serviceTierOverride"
+	| "compactionThresholdOverride"
+	| "oauthAccountPools"
 	| "inheritedSessionAgents"
 	| "autoloadSkills"
 	| "parentAgentId"
 	| "parentEvalSessionId"
 	| "keepAlive"
+	| "credentialSourceSessionId"
+	| "invokedAt"
+	| "acquiredAt"
+	| "persistArtifacts"
+	| "workspaceTree"
+	| "parentPromptCacheKey"
+	| "cleanupGraceMs"
 >;
 
 const servicesSchema = schema({
@@ -120,6 +135,7 @@ const agentDefinitionSchema = schema({
 	"thinkingLevel?": "string",
 	"output?": "unknown",
 	"blocking?": "boolean",
+	"structured?": "boolean",
 	"autoloadSkills?": "string[]",
 	"readSummarize?": "boolean",
 	"prewalk?": "boolean | string",
@@ -144,9 +160,11 @@ const launchSchema = schema({
 	"parentAgentId?": "string",
 	"modelOverride?": "string | string[]",
 	"modelRole?": "string",
+	"modelRoute?": "string",
 	"parentActiveModelPattern?": "string",
 	"thinkingLevel?": "string",
 	"effort?": "'lo' | 'med' | 'hi'",
+	"structured?": "boolean",
 	"outputSchema?": "unknown",
 	"outputSchemaMode?": "'permissive' | 'strict'",
 	"outputSchemaSource?": "string",
@@ -166,6 +184,7 @@ const launchSchema = schema({
 	artifactsDir: "string",
 	"credentialSourceSessionId?": "string",
 	"preloadedExtensionPaths?": "string[]",
+	"parentPromptCacheKey?": "string",
 	"preloadedCustomToolPaths?": "object[]",
 	"contextFiles?": "object[]",
 	"skills?": "object[]",
@@ -178,6 +197,22 @@ const launchSchema = schema({
 	"workPoolYieldItems?": schema({ id: "string", index: "number.integer >= 0" }).array(),
 	"parentServiceTier?": schema({ "openai?": "string", "anthropic?": "string", "google?": "string" }).or("null"),
 	"serviceTierOverride?": "'inherit' | 'none' | 'auto' | 'default' | 'flex' | 'scale' | 'priority'",
+	"compactionThresholdOverride?": schema({
+		thresholdPercent: "number",
+		thresholdTokens: "number.integer",
+		"fixed?": "true",
+		"+": "reject",
+	}).narrow(
+		(value, ctx) =>
+			(value.thresholdPercent === -1 && Number.isSafeInteger(value.thresholdTokens) && value.thresholdTokens > 0) ||
+			(value.thresholdTokens === -1 &&
+				value.thresholdPercent > 0 &&
+				value.thresholdPercent <= 100 &&
+				value.fixed === undefined) ||
+			ctx.mustBe("a positive token threshold or a percentage in (0, 100]"),
+	),
+	"oauthAccountPools?": schema({ "[string]": "string[]" }),
+	"cleanupGraceMs?": "number >= 0",
 	"parentEvalSessionId?": "string",
 	"+": "reject",
 });
@@ -185,6 +220,9 @@ const launchSchema = schema({
 export function parseHostedExecutorLaunch(input: unknown): HostedExecutorOptions {
 	const validated = launchSchema(input);
 	if (validated instanceof schema.errors) throw new Error(`Invalid native launch: ${validated.summary}`);
+	// Use the same identity-key validation as settings; malformed pools must never widen to unrestricted auth.
+	if (validated.oauthAccountPools !== undefined)
+		validateAgentAccountPools({ [validated.agent.name]: validated.oauthAccountPools });
 	return validated as HostedExecutorOptions;
 }
 
@@ -226,7 +264,8 @@ export async function runExecutorHost(): Promise<void> {
 	});
 	let launch: HostedExecutorOptions | undefined;
 	let modelOwner: ExecutorOptions | undefined;
-	let authStorage: import("../session/auth-storage").AuthStorage | undefined;
+	let authStorage: AuthStorage | undefined;
+	let accountPoolScope: SessionAccountPoolScope | undefined;
 	let authorizedModel: { provider: string; id: string } | undefined;
 	let modelSelection: FollowUpTurnOptions["modelSelection"];
 	let turn: AbortController | undefined;
@@ -315,7 +354,9 @@ export async function runExecutorHost(): Promise<void> {
 			}
 			coordinatorOpening = true;
 			if (frame.modelPolicy === true)
-				setModelRequestPolicy((selector, signal) => ownerTransport.request<void>("model_policy", { selector }, signal));
+				setModelRequestPolicy((selector, signal) =>
+					ownerTransport.request<void>("model_policy", { selector }, signal),
+				);
 			try {
 				coordinator = await openCoordinatorRuntime(process.cwd(), frame, lifetime.signal);
 				respond(id, type, coordinator.selection);
@@ -554,8 +595,28 @@ export async function runExecutorHost(): Promise<void> {
 				throw new Error("Invalid credential callback identity");
 			const owner = callbackOwners.get(frame.agentId);
 			const model = owner?.modelRegistry?.find(frame.provider, frame.modelId);
-			if (!owner?.getApiKey || !model) throw new Error("Parent credential callback is unavailable");
-			respond(id, type, await resolveApiKeyOnce(await owner.getApiKey(model), lifetime.signal));
+			if (!owner?.modelRegistry || !model) throw new Error("Parent credential callback is unavailable");
+			if (owner.oauthAccountPools && Object.hasOwn(owner.oauthAccountPools, model.provider)) {
+				// A parent's custom resolver can return an account outside the child's approved pool.
+				// Resolve pooled credentials here instead; never relay that unscoped token.
+				const scope = new SessionAccountPoolScope(
+					owner.modelRegistry.authStorage,
+					owner.oauthAccountPools,
+					randomUUID(),
+				);
+				try {
+					respond(
+						id,
+						type,
+						await resolveApiKeyOnce(scope.registry(owner.modelRegistry).resolver(model), lifetime.signal),
+					);
+				} finally {
+					scope.release();
+				}
+			} else {
+				if (!owner.getApiKey) throw new Error("Parent credential callback is unavailable");
+				respond(id, type, await resolveApiKeyOnce(await owner.getApiKey(model), lifetime.signal));
+			}
 			return;
 		}
 		if (type === "executor_artifact") {
@@ -611,7 +672,9 @@ export async function runExecutorHost(): Promise<void> {
 			}
 			authorizedModel = { provider: frame.authorizedModel.provider, id: frame.authorizedModel.id };
 			if (frame.modelPolicy === true)
-				setModelRequestPolicy((selector, signal) => ownerTransport.request<void>("model_policy", { selector }, signal));
+				setModelRequestPolicy((selector, signal) =>
+					ownerTransport.request<void>("model_policy", { selector }, signal),
+				);
 			const definitions = frame.tools ?? [];
 			if (
 				!Array.isArray(definitions) ||
@@ -712,7 +775,11 @@ export async function runExecutorHost(): Promise<void> {
 			const signal = AbortSignal.any([turn.signal, lifetime.signal]);
 			running = context.with(telemetry?.context ?? context.active(), async () => {
 				authStorage = await discoverAuthStorage();
-				const modelRegistry = new ModelRegistry(authStorage);
+				let modelRegistry = new ModelRegistry(authStorage);
+				if (options.oauthAccountPools) {
+					accountPoolScope = new SessionAccountPoolScope(authStorage, options.oauthAccountPools, randomUUID());
+					modelRegistry = accountPoolScope.registry(modelRegistry);
+				}
 				signal.throwIfAborted();
 				let artifacts: ArtifactManager | undefined;
 				if (isRecord(frame.callbacks) && frame.callbacks.artifacts === true) {
@@ -747,6 +814,8 @@ export async function runExecutorHost(): Promise<void> {
 							model.id !== authorizedModel.id
 						)
 							throw new Error("Resolved model differs from the authorized native worker model");
+						if (options.oauthAccountPools && Object.hasOwn(options.oauthAccountPools, model.provider))
+							return modelRegistry.resolver(model);
 						if (isRecord(frame.callbacks) && frame.callbacks.credentials === true) {
 							return ownerTransport.request<string | undefined>(
 								"credential",
@@ -754,7 +823,7 @@ export async function runExecutorHost(): Promise<void> {
 								turnSignal(),
 							);
 						}
-						return modelRegistry.getApiKey(model);
+						return modelRegistry.resolver(model);
 					},
 					customTools,
 					parentArtifactManager: artifacts,
@@ -1110,6 +1179,7 @@ export async function runExecutorHost(): Promise<void> {
 				disconnectOwner?.();
 				unsubscribe();
 				callbackOwners.clear();
+				accountPoolScope?.release();
 				authStorage?.close();
 				await flushTelemetryExport().catch(() => {});
 				await writer.close();

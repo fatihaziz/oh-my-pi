@@ -153,35 +153,49 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 
 	it("retains the same session and all context when the Foyer tracker commit fails", async () => {
 		session = await createSession("park");
-		const id=session.sessionManager.getSessionId();
-		const before=session.sessionManager.getBranch();
-		const release=registerHostedMaintenance(id,async()=>{throw new Error("Tracker commit failed")});
+		const id = session.sessionManager.getSessionId();
+		const before = session.sessionManager.getBranch();
+		const release = registerHostedMaintenance(id, async () => {
+			throw new Error("Tracker commit failed");
+		});
 		try {
 			await expect(session.compact()).rejects.toThrow("Tracker commit failed");
 			expect(session.sessionManager.getSessionId()).toBe(id);
 			expect(session.sessionManager.getBranch()).toEqual(before);
-			expect(session.sessionManager.getEntries().some(entry=>entry.type==="compaction")).toBe(false);
-		} finally {release()}
+			expect(session.sessionManager.getEntries().some(entry => entry.type === "compaction")).toBe(false);
+		} finally {
+			release();
+		}
 	});
 
 	it("waits for its tracker without blocking other session evidence and keeps its identity", async () => {
-		session=await createSession("park");
-		const id=session.sessionManager.getSessionId();
-		const waiting=Promise.withResolvers<void>(),committed=Promise.withResolvers<void>();
-		const other=SessionManager.inMemory(tempDir.path());
-		const release=registerHostedMaintenance(id,async request=>{
-			expect(request.phase).toBe("checkpoint");waiting.resolve();await committed.promise;
-			return {compact:true,checkpoint:"a".repeat(40)};
+		session = await createSession("park");
+		const id = session.sessionManager.getSessionId();
+		const waiting = Promise.withResolvers<void>(),
+			committed = Promise.withResolvers<void>();
+		const other = SessionManager.inMemory(tempDir.path());
+		const release = registerHostedMaintenance(id, async request => {
+			expect(request.phase).toBe("checkpoint");
+			waiting.resolve();
+			await committed.promise;
+			return { compact: true, checkpoint: "a".repeat(40) };
 		});
 		try {
-			const compacting=session.compact();
+			const compacting = session.compact();
 			await waiting.promise;
-			other.appendCustomEntry("worker-result",{id:"independent-worker",outcome:"retained"});
-			expect(other.getBranch().some(entry=>entry.type==="custom"&&entry.customType==="worker-result")).toBe(true);
-			committed.resolve();await compacting;
+			other.appendCustomEntry("worker-result", { id: "independent-worker", outcome: "retained" });
+			expect(other.getBranch().some(entry => entry.type === "custom" && entry.customType === "worker-result")).toBe(
+				true,
+			);
+			committed.resolve();
+			await compacting;
 			expect(session.sessionManager.getSessionId()).toBe(id);
-			expect(session.sessionManager.getEntries().filter(entry=>entry.type==="compaction")).toHaveLength(1);
-		} finally {committed.resolve();release();await other.close()}
+			expect(session.sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
+		} finally {
+			committed.resolve();
+			release();
+			await other.close();
+		}
 	});
 
 	it("waits for manual compaction cleanup before starting a replacement prompt", async () => {

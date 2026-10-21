@@ -31,6 +31,11 @@ export function createExternalSubagentExecutor(transport: ExternalExecutorTransp
 				"External execution cannot yet preserve shared Hindsight memory; refusing to launch with reduced native behavior",
 			);
 		}
+		if (options.preparedSession !== undefined) {
+			throw new Error(
+				"External execution cannot preserve prepared Seance sessions: promptSuffix requires the live resolved-model callback; refusing to launch with reduced native behavior",
+			);
+		}
 		// Validate before admission so an untransferable config never reserves a worker.
 		if (options.parentTelemetry) exportWorkerTelemetry(options.parentTelemetry);
 	};
@@ -48,6 +53,7 @@ export function createExternalSubagentExecutor(transport: ExternalExecutorTransp
 		const {
 			signal,
 			onProgress: _progress,
+			onToolResult: _toolResult,
 			eventBus: _events,
 			subagentEventBus: _subevents,
 			authStorage: _auth,

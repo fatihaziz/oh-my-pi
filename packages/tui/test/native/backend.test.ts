@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { type LogEvent, registerLogSink } from "@oh-my-pi/pi-utils/logger";
 import { card, md, node } from "@oh-my-pi/pi-tui/native/describe";
 import type { NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import { nativeComponentId } from "@oh-my-pi/pi-tui/native/reconcile";
@@ -53,6 +54,53 @@ describe("native backend", () => {
 		expect(opsOf(h, sent)).toEqual([["text", id, "append", " two three four five"]]);
 		expect(h.byId(id)?.p).toEqual({ text: "one two three four five", stream: true });
 		expect(h.errors).toEqual([]);
+	});
+
+	it("renders a credit-blocked change once the oldest frame stalls, without any ack", async () => {
+		const stream = new Probe(md("one", { stream: true }));
+		harness = await TspHarness.start(tui => tui.addChild(stream), { credits: 2, autoAck: false });
+		const h = harness;
+		const id = nativeComponentId(stream);
+		stream.current = md("one two", { stream: true });
+		await h.render();
+		stream.current = md("one two three", { stream: true });
+		await h.render();
+		const sent = h.frames.length;
+
+		h.stall(4999);
+		expect(h.frames.length).toBe(sent);
+		h.stall(1);
+		expect(h.frames.length).toBe(sent + 1);
+		expect(h.byId(id)?.p).toEqual({ text: "one two three", stream: true });
+	});
+
+	it("warns once for a stall that spans several credit resets, then logs how long it lasted when acks return", async () => {
+		const stream = new Probe(md("", { stream: true }));
+		harness = await TspHarness.start(tui => tui.addChild(stream), { credits: 2, autoAck: false });
+		const h = harness;
+		const logged: LogEvent[] = [];
+		const unregister = registerLogSink(event => {
+			if (event.message.startsWith("TSP: terminal")) logged.push(event);
+		});
+		try {
+			let text = "";
+			const stalls = 4;
+			for (let stall = 0; stall < stalls; stall++) {
+				for (let frame = 0; frame < 2; frame++) {
+					text += ` ${stall}.${frame}`;
+					stream.current = md(text, { stream: true });
+					await h.render();
+				}
+				h.stall(5000);
+			}
+			h.terminal.ackAll();
+			h.flush();
+		} finally {
+			unregister();
+		}
+		expect(logged.map(event => event.level)).toEqual(["warn", "debug"]);
+		expect(logged[0]?.message).toContain("stopped acknowledging");
+		expect(logged[1]?.context).toMatchObject({ stalledMs: 20_000, resets: 4 });
 	});
 
 	it("routes pointer events to the component that described the node, with its keypath and item key", async () => {

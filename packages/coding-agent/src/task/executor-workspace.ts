@@ -17,7 +17,7 @@ import {
 	prepareIsolationContext,
 	runIsolatedSubprocess,
 	type IsolatedRunOptions,
-	type IsolationContext,
+	type PreparedIsolationContext,
 	type RetainedWorkspace,
 } from "./isolation-runner";
 import { cfgIsolationBackend } from "./settings";
@@ -94,7 +94,7 @@ export class ExecutorWorkspace {
 	#options?: IsolatedRunOptions;
 	#releasePromise?: Promise<boolean>;
 	#cleanup?: Promise<void>;
-	#context?: IsolationContext;
+	#context?: PreparedIsolationContext;
 	#handle?: IsolationHandle;
 	#result?: SingleResult;
 	#releaseArtifacts?: Pick<SingleResult, "patchPath" | "branchName" | "branchBaseSha" | "nestedPatchPaths">;
