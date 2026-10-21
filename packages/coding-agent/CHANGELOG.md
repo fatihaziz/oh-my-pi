@@ -8,6 +8,7 @@
 - Launch compiled workers through the current executable without a Bun virtual source entry.
 - Keep dequeue fallback scoped to Main so an empty focused worker queue cannot consume Main's steering or compaction messages.
 - Preserve the specialized Foyer command surface and report its identity through `--runtime-info`.
+- Keep standalone onboarding and startup splash out of the hosted Foyer runtime so Profile Control owns setup and fresh panes can connect before their first message.
 
 ## [18.12.5] - 2026-10-21
 

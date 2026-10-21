@@ -670,7 +670,8 @@ async function runInteractiveMode(
 		// setting needs the shared setup splash renderer.
 		const storedSetupVersion = cfgSetupVersion.get(settings);
 		setupWizard =
-			forceSetupWizard || storedSetupVersion < CURRENT_SETUP_VERSION || showStartupSplash
+			process.env.PI_FOYER !== "true" &&
+			(forceSetupWizard || storedSetupVersion < CURRENT_SETUP_VERSION || showStartupSplash)
 				? await import("./modes/setup")
 				: undefined;
 		setupScenes = setupWizard
@@ -681,7 +682,7 @@ async function runInteractiveMode(
 					force: forceSetupWizard,
 				})
 			: [];
-		playStartupSplash = showStartupSplash && setupScenes.length === 0;
+		playStartupSplash = setupWizard !== undefined && showStartupSplash && setupScenes.length === 0;
 
 		await logger.time("InteractiveMode.init", () =>
 			mode.init({
