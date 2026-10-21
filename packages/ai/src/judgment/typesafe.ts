@@ -97,6 +97,8 @@ function backoffMs(attempt: number, headers: Headers | undefined): number {
 	return Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_MAX_MS);
 }
 
+import { checkModelRequestPolicy } from "../model-request-policy";
+
 export class TypeSafeJudge implements Judge {
 	readonly label: string;
 	readonly api: JudgmentApi;
@@ -156,6 +158,7 @@ export class TypeSafeJudge implements Judge {
 		};
 		for (let attempt = 0; ; attempt++) {
 			signal?.throwIfAborted();
+			await checkModelRequestPolicy(this.label, signal);
 			const timeout = AbortSignal.timeout(this.#timeoutMs);
 			let response: Response;
 			try {

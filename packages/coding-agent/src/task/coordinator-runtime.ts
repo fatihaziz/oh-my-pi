@@ -5,9 +5,11 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import { validateJsonSchemaValue } from "@oh-my-pi/pi-ai/utils/schema";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 import { ModelRegistry } from "../config/model-registry";
+import { rolePriorityDefaults } from "../config/model-resolver";
 import { Settings } from "../config/settings";
 import { resolveJudge, sharedJudgmentCache } from "../judgment";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
+import { cfgRetryFallbackChains } from "../session/settings";
 import { createTaskReviewReader } from "./review-evidence";
 
 /** One pane owns this runtime. Each request carries an immutable Foyer snapshot. */
@@ -37,6 +39,15 @@ export async function openCoordinatorRuntime(cwd: string, input: Record<string, 
 			slash > 0 ? registry.find(identity.model.slice(0, slash), identity.model.slice(slash + 1)) : undefined;
 		if (!model || !getSupportedEfforts(model).includes(thinking))
 			throw new Error("Coordinator model or high thinking effort is unavailable");
+		// Foyer's selected thinker can also judge when Profile policy excludes the
+		// configured judges. Keep their order and an explicitly disabled fallback chain.
+		const chains = cfgRetryFallbackChains.get(settings);
+		if (chains.judge?.length !== 0) {
+			cfgRetryFallbackChains.override(settings, {
+				...chains,
+				judge: [...(chains.judge ?? rolePriorityDefaults("judge")), `${identity.model}:${thinking}`],
+			});
+		}
 		let providerCalls = 0;
 		const judge = resolveJudge({
 			settings,

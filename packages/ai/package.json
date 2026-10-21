@@ -16,7 +16,10 @@
 		"url": "https://github.com/can1357/oh-my-pi/issues"
 	},
 	"license": "MIT",
-	"author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
+	"author": {
+		"name": "Stencil Labs, Inc.",
+		"url": "https://stencil.so"
+	},
 	"contributors": [
 		"Mario Zechner"
 	],
@@ -37,6 +40,10 @@
 		".": {
 			"types": "./src/index.ts",
 			"import": "./src/index.ts"
+		},
+		"./model-request-policy": {
+			"types": "./src/model-request-policy.ts",
+			"import": "./src/model-request-policy.ts"
 		},
 		"./error": {
 			"types": "./src/error/index.ts",

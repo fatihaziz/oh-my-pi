@@ -23,6 +23,7 @@ import {
 	USER_AGENT,
 } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { checkModelRequestPolicy } from "../model-request-policy";
 import { getEnvApiKey, isOfficialCodexApiUrl } from "../stream";
 import type {
 	Api,
@@ -1853,6 +1854,7 @@ async function openCodexWebSocketTransport(
 			requestContext.rawRequestDump.body = chainedBody;
 			return {
 				eventStream: websocketConnection.streamRequest(
+					`${model.provider}/${model.id}`,
 					{ attachSteerIds: liveSteers.map(steer => steer.id) },
 					timeouts,
 					requestSetup.requestSignal,
@@ -1925,6 +1927,7 @@ async function openCodexWebSocketTransport(
 			retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
 		});
 	const eventStream = websocketConnection.streamRequest(
+		`${model.provider}/${model.id}`,
 		{ send: websocketRequest },
 		timeouts,
 		requestSetup.requestSignal,
@@ -3848,6 +3851,7 @@ class CodexWebSocketConnection {
 	#url: string;
 	#headers: Record<string, string>;
 	#proxy?: string;
+	#modelSelector?: string;
 	#onHandshakeHeaders?: (headers: Headers) => void;
 	#socket: Bun.WebSocket | null = null;
 	#queue: Array<Record<string, unknown> | Error | null> = [];
@@ -4078,6 +4082,7 @@ class CodexWebSocketConnection {
 	}
 
 	async *streamRequest(
+		selector: string,
 		exchange: CodexWebSocketExchange,
 		timeouts: CodexWebSocketRequestTimeouts,
 		signal?: AbortSignal,
@@ -4120,6 +4125,8 @@ class CodexWebSocketConnection {
 
 		try {
 			if ("send" in exchange) {
+				await checkModelRequestPolicy(selector, signal);
+				this.#modelSelector = selector;
 				const request = exchange.send;
 				const debugSession = isRequestDebugEnabled()
 					? await createRequestDebugSession({
@@ -4289,7 +4296,8 @@ class CodexWebSocketConnection {
 	 * Submit `response.steer` for `previousResponseId`, which must be streaming
 	 * on this socket. Resolves on the server's acknowledgement.
 	 */
-	steer(previousResponseId: string, input: InputItem[]): Promise<CodexSteerAck> {
+	async steer(previousResponseId: string, input: InputItem[]): Promise<CodexSteerAck> {
+		if (this.#modelSelector) await checkModelRequestPolicy(this.#modelSelector);
 		const socket = this.#socket;
 		if (!socket || socket.readyState !== WebSocket.OPEN) {
 			return Promise.reject(new CodexWebSocketTransportError(`websocket connection is unavailable`));
