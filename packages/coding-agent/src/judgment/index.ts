@@ -38,6 +38,7 @@ import {
 	type Usage,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { checkModelRequestPolicy } from "@oh-my-pi/pi-ai/model-request-policy";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
@@ -323,6 +324,7 @@ export class ChainJudge implements Judge {
 
 	async #createJudge(candidate: RoleChainCandidate, signal: AbortSignal | undefined): Promise<Judge | undefined> {
 		const model = candidate.model;
+		await checkModelRequestPolicy(`${model.provider}/${model.id}`, signal);
 		if (model.api === "local-inference") return new TextJudge(new LocalTextBackend(model.id));
 		if (!(await this.#deps.registry.getApiKey(model, this.#deps.sessionId, { signal }))) return undefined;
 		const apiKey = this.#deps.registry.resolver(model, this.#deps.sessionId);
@@ -376,6 +378,7 @@ class LocalTextBackend implements TextBackend {
 	}
 
 	async complete(judgment: TextPrompt, options: JudgeOptions): Promise<TextCompletion> {
+		await checkModelRequestPolicy(`${this.provider}/${this.model}`, options.signal);
 		// Sub-2B models answer a bare user message as a question (or echo the
 		// system prompt); one merged turn ending in `Answer:` keeps them classifying.
 		const text = await tinyModelClient.complete(

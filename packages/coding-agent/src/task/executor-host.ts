@@ -19,6 +19,7 @@ import { runSubprocess, runSubagentFollowUpTurn, type ExecutorOptions, type Foll
 import { TASK_SUBAGENT_EVENT_CHANNEL, TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "./types";
 import { createExternalSubagentExecutor } from "./external-executor-client";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
+import { setModelRequestPolicy } from "@oh-my-pi/pi-ai/model-request-policy";
 import { mirrorHostedRegistryChange, registerExternalSubagentExecutor } from "./external-executor";
 import { HostedPeerRegistry } from "./hosted-peers";
 import { ArtifactManager } from "../session/artifacts";
@@ -313,6 +314,8 @@ export async function runExecutorHost(): Promise<void> {
 				return;
 			}
 			coordinatorOpening = true;
+			if (frame.modelPolicy === true)
+				setModelRequestPolicy((selector, signal) => ownerTransport.request<void>("model_policy", { selector }, signal));
 			try {
 				coordinator = await openCoordinatorRuntime(process.cwd(), frame, lifetime.signal);
 				respond(id, type, coordinator.selection);
@@ -607,6 +610,8 @@ export async function runExecutorHost(): Promise<void> {
 				throw new Error("An authorized provider and model are required");
 			}
 			authorizedModel = { provider: frame.authorizedModel.provider, id: frame.authorizedModel.id };
+			if (frame.modelPolicy === true)
+				setModelRequestPolicy((selector, signal) => ownerTransport.request<void>("model_policy", { selector }, signal));
 			const definitions = frame.tools ?? [];
 			if (
 				!Array.isArray(definitions) ||
@@ -1069,6 +1074,7 @@ export async function runExecutorHost(): Promise<void> {
 			"operator_controls_v1",
 			"terminal_v1",
 			"coordinator_v1",
+			"model_policy_v1",
 		],
 		pid: process.pid,
 	});

@@ -4,6 +4,7 @@ import { cursorModelParameters } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { isCursorMaxModeWireId } from "@oh-my-pi/pi-catalog/compat/collapse";
 import { scheduler } from "node:timers/promises";
 import { classifyModel, collapseVariantId } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+import { checkModelRequestPolicy } from "../model-request-policy";
 import type {
 	ConversationStep,
 	CursorRule,
@@ -1188,6 +1189,7 @@ function streamCursorWithWireMode(
 					})
 				: undefined;
 
+			await checkModelRequestPolicy(`${model.provider}/${model.id}`, options?.signal);
 			if (transportMode === "http2") {
 				const proxyUrl = getProxyForUrl(model.provider, new URL(baseUrl));
 				let client: http2.ClientHttp2Session;

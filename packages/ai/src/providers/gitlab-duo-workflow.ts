@@ -5,6 +5,7 @@ import {
 	type GitLabDuoWorkflowNamespaceSelection,
 } from "@oh-my-pi/pi-catalog/discovery/gitlab-duo-workflow";
 import * as AIError from "../error";
+import { checkModelRequestPolicy } from "../model-request-policy";
 import type {
 	Api,
 	AssistantMessage,
@@ -2010,9 +2011,12 @@ export function runGitLabDuoWorkflowSocket(
 		// inline flow only ever has one.) DWS matches it by requestID to the awaiting
 		// outbox future and the workflow continues on the same connection.
 		const responses = Array.isArray(resumeResponse) ? resumeResponse : [resumeResponse];
-		for (const response of responses) {
-			ws.send(JSON.stringify(response));
-		}
+		void (async () => {
+			for (const response of responses) {
+				await checkModelRequestPolicy(`${state.output.provider}/${state.output.model}`, options.signal);
+				if (!settled) ws.send(JSON.stringify(response));
+			}
+		})().catch(error => settle("closed", error));
 	} else {
 		ws.onopen = () => {
 			traceGitLabDuoWorkflow("websocket.open", {
@@ -2024,7 +2028,9 @@ export function runGitLabDuoWorkflowSocket(
 				mcpTools: startPayload.mcpTools.length,
 				preapprovedTools: startPayload.preapproved_tools.length,
 			});
-			ws.send(JSON.stringify({ startRequest: startPayload }));
+			void checkModelRequestPolicy(`${state.output.provider}/${state.output.model}`, options.signal)
+				.then(() => { if (!settled) ws.send(JSON.stringify({ startRequest: startPayload })); })
+				.catch(error => settle("closed", error));
 		};
 	}
 	resetIdleTimer();

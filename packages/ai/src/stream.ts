@@ -21,6 +21,7 @@ import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolv
 import type { OAuthRequestIdentity } from "./auth/types";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
+import { withModelRequestPolicy } from "./model-request-policy";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
@@ -965,6 +966,14 @@ export function stream<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
+	return withModelRequestPolicy(model, options, guarded => streamAllowed(model, context, guarded));
+}
+
+function streamAllowed<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: OptionsForApi<TApi>,
+): AssistantMessageEventStream {
 	if (model.resolveHeaders) {
 		return withResolvedModelHeaders(model, options?.signal, resolvedModel => stream(resolvedModel, context, options));
 	}
@@ -1265,6 +1274,14 @@ function withInferenceSessionId(options?: SimpleStreamOptions): SimpleStreamOpti
 }
 
 export function streamSimple<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+	return withModelRequestPolicy(model, options, guarded => streamSimpleAllowed(model, context, guarded));
+}
+
+function streamSimpleAllowed<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: SimpleStreamOptions,

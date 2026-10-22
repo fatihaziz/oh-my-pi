@@ -7,6 +7,7 @@ import { mapEffortToAnthropicAdaptiveEffort } from "@oh-my-pi/pi-catalog/model-t
 import { calculateCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { withModelRequestPolicy } from "../model-request-policy";
 import {
 	$env,
 	isEnoent,
@@ -3499,9 +3500,11 @@ const streamAnthropicOnce = (
  * loop. The inner attempt owns Anthropic provider-failure retries.
  */
 export const streamAnthropic: StreamFunction<"anthropic-messages"> = (model, context, options) =>
-	withReplaySafeStreamRetry(model, context, options, streamAnthropicOnce, {
-		retryEmptyCompletion: true,
-	});
+	withModelRequestPolicy(model, options, guarded =>
+		withReplaySafeStreamRetry(model, context, guarded, streamAnthropicOnce, {
+			retryEmptyCompletion: true,
+		}),
+	);
 
 export type AnthropicSystemBlock = {
 	type: "text";
