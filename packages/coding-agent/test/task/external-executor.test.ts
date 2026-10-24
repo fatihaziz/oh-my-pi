@@ -239,6 +239,12 @@ test("native launch accepts inherited agents and classifier context without open
 		artifactsDir: root.slice(0, -6),
 		solutionSpace: "single bounded read",
 		inheritedSessionAgents: [inheritedAgent],
+		agent: { ...childLaunch.agent, structured: true },
+		structured: true,
+		oauthAccountPools: { "openai-codex": ["email:approved@example.invalid"] },
+		modelRoute: "openai-codex/gpt-6.1-sol",
+		compactionThresholdOverride: { thresholdPercent: -1, thresholdTokens: 10000 },
+		parentPromptCacheKey: "parent-cache",
 	};
 	const validated = parseHostedExecutorLaunch(options);
 	expect(validated.solutionSpace).toBe("single bounded read");
@@ -247,6 +253,13 @@ test("native launch accepts inherited agents and classifier context without open
 		parseHostedExecutorLaunch({ ...options, inheritedSessionAgents: [{ ...inheritedAgent, source: "remote" }] }),
 	).toThrow("Invalid native launch");
 	expect(() => parseHostedExecutorLaunch({ ...options, arbitrary: true })).toThrow("Invalid native launch");
+	expect(() => parseHostedExecutorLaunch({ ...options, oauthAccountPools: { "openai-codex": [""] } })).toThrow();
+	expect(() =>
+		parseHostedExecutorLaunch({
+			...options,
+			compactionThresholdOverride: { thresholdPercent: 0, thresholdTokens: -1 },
+		}),
+	).toThrow();
 });
 
 test("a live parent async manager does not invalidate the hosted child launch", async () => {

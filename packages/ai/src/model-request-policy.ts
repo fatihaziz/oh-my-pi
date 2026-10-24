@@ -4,7 +4,9 @@ import { AssistantMessageEventStream } from "./utils/event-stream";
 /** The host supplies current policy; the inference runtime does not select models. */
 let requestPolicy: ((selector: string, signal?: AbortSignal) => Promise<void>) | undefined;
 
-export function setModelRequestPolicy(policy: ((selector: string, signal?: AbortSignal) => Promise<void>) | undefined): void {
+export function setModelRequestPolicy(
+	policy: ((selector: string, signal?: AbortSignal) => Promise<void>) | undefined,
+): void {
 	requestPolicy = policy;
 }
 
@@ -13,7 +15,9 @@ export async function checkModelRequestPolicy(selector: string, signal?: AbortSi
 	await requestPolicy?.(selector, signal);
 }
 
-export function withModelRequestPolicy<T extends Pick<StreamOptions, "fetch" | "signal"> & { fallbacks?: readonly { model: string }[] }>(
+export function withModelRequestPolicy<
+	T extends Pick<StreamOptions, "fetch" | "signal"> & { fallbacks?: readonly { model: string }[] },
+>(
 	model: Model,
 	options: T | undefined,
 	dispatch: (options: T | undefined) => AssistantMessageEventStream,
@@ -25,19 +29,23 @@ export function withModelRequestPolicy<T extends Pick<StreamOptions, "fetch" | "
 	const signal = options?.signal ? AbortSignal.any([options.signal, denied.signal]) : denied.signal;
 	const checkRequest = async (signal?: AbortSignal) => {
 		await checkModelRequestPolicy(selector, signal);
-		if (options?.fallbacks) for (const fallback of options.fallbacks) {
-			await checkModelRequestPolicy(`${model.provider}/${fallback.model}`, signal);
-		}
+		if (options?.fallbacks)
+			for (const fallback of options.fallbacks) {
+				await checkModelRequestPolicy(`${model.provider}/${fallback.model}`, signal);
+			}
 	};
-	const guardedFetch: FetchImpl = Object.assign(async (input: Parameters<FetchImpl>[0], init?: Parameters<FetchImpl>[1]) => {
-		try {
-			await checkRequest(init?.signal ?? signal);
-		} catch (error) {
-			denied.abort(error);
-			throw error;
-		}
-		return baseFetch(input, init);
-	}, { preconnect: baseFetch.preconnect });
+	const guardedFetch: FetchImpl = Object.assign(
+		async (input: Parameters<FetchImpl>[0], init?: Parameters<FetchImpl>[1]) => {
+			try {
+				await checkRequest(init?.signal ?? signal);
+			} catch (error) {
+				denied.abort(error);
+				throw error;
+			}
+			return baseFetch(input, init);
+		},
+		{ preconnect: baseFetch.preconnect },
+	);
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
 		try {

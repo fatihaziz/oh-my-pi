@@ -300,6 +300,8 @@ export function* walkGroupedOutput(lines: readonly string[]): Generator<GroupedO
 
 /** `*12│text`, ` 12|text`, `*12:text`: optional match marker, line number, gutter, content. */
 const GROUPED_NUMBERED_LINE_RE = /^\s*(\*?)(\d+)(?:│|[:|])(.*)$/;
+/** `    │...`: grep's gap between non-adjacent context runs (drawn as {@link numberedCode}'s `…` row). */
+const GROUPED_GAP_LINE_RE = /^\s*│\.\.\.$/;
 
 /** One source line for {@link numberedCode}: its number (`null` for an elision marker), text and match mark. */
 export interface NumberedLine {
@@ -312,9 +314,14 @@ export interface NumberedLine {
  * Numbered `code` for possibly non-contiguous source lines: one block per run
  * of consecutive line numbers (`start` = the run's first line, match lines
  * `mark`ed), with a `…` row wherever the numbers jump or an elision marker
- * (`n: null`) sits. No path header: the row or head above names the file.
+ * (`n: null`) sits. `path` is the file the lines come from: Tern picks their
+ * grammar from it and draws no header (the row or head above names the file).
+ * `wrap` soft-wraps long lines instead of scrolling the block sideways.
  */
-export function numberedCode(lines: readonly NumberedLine[], opts: { lang?: string } = {}): NativeNode[] {
+export function numberedCode(
+	lines: readonly NumberedLine[],
+	opts: { path?: string; wrap?: boolean } = {},
+): NativeNode[] {
 	const out: NativeNode[] = [];
 	let run: { start: number; text: string[]; marks: { line: number; tone: TspTone }[] } | undefined;
 	const flush = () => {
@@ -326,7 +333,8 @@ export function numberedCode(lines: readonly NumberedLine[], opts: { lang?: stri
 				code(run.text.join("\n"), {
 					start: run.start,
 					numbers: true,
-					lang: opts.lang,
+					path: opts.path,
+					wrap: opts.wrap,
 					marks: run.marks.length > 0 ? run.marks : undefined,
 				}),
 				`c${run.start}`,
@@ -354,22 +362,26 @@ export function numberedCode(lines: readonly NumberedLine[], opts: { lang?: stri
  * header's suffix or the match count as a chip), then its lines as
  * {@link numberedCode} with match lines marked and `…` between non-adjacent
  * runs. Unnumbered body lines stay plain `code`. `maxFiles` keeps only the
- * first files (the caller says how many were left out).
+ * first files (the caller says how many were left out). `file` owns the lines
+ * before any header: a single-file search prints none, yet its lines get the
+ * same file row as a directory search's.
  */
 export function describeGroupedOutput(
 	lines: readonly string[],
-	options: { lang?: (path: string) => string | undefined; maxFiles?: number } = {},
+	options: { maxFiles?: number; file?: string } = {},
 ): NativeNode[] {
 	const files: NativeNode[] = [];
 	const loose: NativeNode[] = [];
 	let current: { path: string; suffix?: string; children: NativeNode[]; marks: number } | undefined;
 	let numbered: NumberedLine[] = [];
 	let plain: string[] = [];
+	// `options.file` until the first line or header claims it.
+	let headless = options.file;
 
 	const flushLines = () => {
 		const target = current?.children ?? loose;
 		if (numbered.length > 0) {
-			target.push(...numberedCode(numbered, { lang: current ? options.lang?.(current.path) : undefined }));
+			target.push(...numberedCode(numbered, { path: current?.path }));
 			numbered = [];
 		}
 		if (plain.length > 0) {
@@ -395,9 +407,18 @@ export function describeGroupedOutput(
 
 	for (const event of walkGroupedOutput(lines)) {
 		if (event.kind !== "line") {
+			headless = undefined;
 			flushFile();
 			if (options.maxFiles !== undefined && files.length >= options.maxFiles) break;
 			if (event.kind === "file") current = { path: event.path, suffix: event.suffix, children: [], marks: 0 };
+			continue;
+		}
+		if (headless !== undefined) {
+			current = { path: headless, children: [], marks: 0 };
+			headless = undefined;
+		}
+		if (GROUPED_GAP_LINE_RE.test(event.text)) {
+			numbered.push({ n: null, text: "" });
 			continue;
 		}
 		const match = GROUPED_NUMBERED_LINE_RE.exec(event.text);

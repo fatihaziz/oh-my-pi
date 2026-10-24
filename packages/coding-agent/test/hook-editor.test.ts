@@ -2,6 +2,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -194,6 +195,59 @@ describe("HookEditorComponent default (hook) mode", () => {
 });
 
 describe("HookEditorComponent prompt-style mode", () => {
+	it("cuts a long question to the terminal title but gives native hosts all of it", () => {
+		const question = `${"Which of these directions should the effort meter take? ".repeat(12)}FINAL-WORDS`;
+		const component = new HookEditorComponent(createTui(), "Custom answer", undefined, vi.fn(), vi.fn(), {
+			promptStyle: true,
+			question,
+		});
+
+		const terminal = renderText(component);
+		expect(terminal).toContain("Custom answer: Which of these");
+		expect(terminal).toContain("…");
+		expect(terminal).not.toContain("FINAL-WORDS");
+
+		const cx: DescribeContext = {
+			cols: 100,
+			reduceMotion: false,
+			dark: true,
+			supports: () => true,
+			feature: () => true,
+		};
+		const root = component.describe(cx);
+		const head = root.c?.[0];
+		const parts = typeof head === "object" && head !== null && "k" in head ? head.c : undefined;
+		expect(parts?.[0]).toMatchObject({ k: "text", p: { spans: [{ t: "Custom answer" }] } });
+		expect(parts?.[1]).toMatchObject({ k: "md", p: { text: question, role: "omp.ask.question" } });
+	});
+
+	it("runs the native action bar's Submit, Cancel and Open in editor like their keys", async () => {
+		const onSubmit = vi.fn();
+		const submitted = new HookEditorComponent(createTui(), "Prompt", "draft", onSubmit, vi.fn(), {
+			promptStyle: true,
+		});
+		submitted.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
+		expect(onSubmit).toHaveBeenCalledWith("draft");
+
+		const onCancel = vi.fn();
+		const cancelled = new HookEditorComponent(createTui(), "Prompt", "draft", vi.fn(), onCancel);
+		cancelled.handleNativeEvent({ type: "action", key: "actions/cancel", act: "cancel", mods: [] });
+		expect(onCancel).toHaveBeenCalledTimes(1);
+
+		const tui = createTui();
+		// The external edit ends by restarting the TUI and requesting a render; await that.
+		const rendered = Promise.withResolvers<void>();
+		(tui.requestRender as Mock<TUI["requestRender"]>).mockImplementation(() => rendered.resolve());
+		const externalEditor = vi.fn(async (text: string) => `${text} edited`);
+		const onExternalSubmit = vi.fn();
+		const external = new HookEditorComponent(tui, "Prompt", "draft", onExternalSubmit, vi.fn(), { externalEditor });
+		external.handleNativeEvent({ type: "action", key: "actions/external", act: "external", mods: [] });
+		await rendered.promise;
+		expect(externalEditor).toHaveBeenCalledWith("draft");
+		external.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
+		expect(onExternalSubmit).toHaveBeenCalledWith("draft edited");
+	});
+
 	it("refuses image attachments unless the prompt opted in and is still open", () => {
 		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
 		const plain = new HookEditorComponent(createTui(), "Prompt", undefined, vi.fn(), vi.fn(), { promptStyle: true });

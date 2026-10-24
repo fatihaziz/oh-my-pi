@@ -8,11 +8,17 @@ const separator = argv.indexOf("--");
 const flags = separator < 0 ? argv : argv.slice(0, separator);
 if (argv[0] === "--runtime-info") {
 	const { version } = require("../package.json");
-	process.stdout.write(`${JSON.stringify({ flavor: "foyer", version, executable: process.execPath })}\n`);
+	process.stdout.write(
+		`${JSON.stringify({ flavor: "foyer", version, executable: process.execPath, standaloneCommands: process.env.PI_FOYER !== "true" })}\n`,
+	);
 } else if (!agentDir || !isAbsolute(agentDir)) {
 	process.stderr.write("Foyer must supply an absolute PI_CODING_AGENT_DIR for its runtime.\n");
 	process.exitCode = 1;
-} else if (flags.some(arg => arg === "--profile" || arg.startsWith("--profile=") || arg === "--alias" || arg.startsWith("--alias="))) {
+} else if (
+	flags.some(
+		arg => arg === "--profile" || arg.startsWith("--profile=") || arg === "--alias" || arg.startsWith("--alias="),
+	)
+) {
 	process.stderr.write("Foyer owns runtime profiles; use Profile Control instead of standalone profile aliases.\n");
 	process.exitCode = 1;
 } else if (process.env.PI_COMPILED !== "true") {

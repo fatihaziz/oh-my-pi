@@ -17,12 +17,14 @@ function todoRows(entry: Record<string, unknown>) {
 	const data = isRecord(entry.data) ? entry.data : undefined;
 	const message = isRecord(entry.message) ? entry.message : undefined;
 	const details = isRecord(message?.details) ? message.details : undefined;
-	const phases = entry.type === "custom" && entry.customType === "user_todo_edit"
-		? data?.phases
-		: message?.role === "toolResult" && message.toolName === "todo" && !message.isError && details?.op !== "view"
-			? details?.phases : undefined;
+	const phases =
+		entry.type === "custom" && entry.customType === "user_todo_edit"
+			? data?.phases
+			: message?.role === "toolResult" && message.toolName === "todo" && !message.isError && details?.op !== "view"
+				? details?.phases
+				: undefined;
 	return Array.isArray(phases)
-		? phases.flatMap(phase => isRecord(phase) && Array.isArray(phase.tasks) ? phase.tasks.filter(isRecord) : [])
+		? phases.flatMap(phase => (isRecord(phase) && Array.isArray(phase.tasks) ? phase.tasks.filter(isRecord) : []))
 		: undefined;
 }
 
@@ -31,7 +33,9 @@ function anchoredTodoRanges(branch: readonly unknown[], todos: NonNullable<Revie
 	const ranges = new Map<string, { from: number; to: number }>();
 	for (const todo of todos) {
 		if (!todo.entryId) continue;
-		let goal = "", mode = "", scopeChanged = false;
+		let goal = "",
+			mode = "",
+			scopeChanged = false;
 		const initialGoals = new Map<string, string>();
 		let occurrence: { identity: string; goal: string; from: number; entryId: unknown; status: unknown } | undefined;
 		for (const [index, raw] of branch.entries()) {
@@ -47,12 +51,19 @@ function anchoredTodoRanges(branch: readonly unknown[], todos: NonNullable<Revie
 			const rows = todoRows(raw);
 			if (!rows) continue;
 			const matches = rows.filter(row => row.content === todo.content);
-			if (matches.length !== 1) { occurrence = undefined; continue; }
+			if (matches.length !== 1) {
+				occurrence = undefined;
+				continue;
+			}
 			const row = matches[0];
 			const identity = typeof row.id === "string" ? `id:${row.id}` : `content:${row.content}`;
 			if (!initialGoals.has(identity)) initialGoals.set(identity, goal);
 			const terminal = occurrence?.status === "completed" || occurrence?.status === "abandoned";
-			if (!occurrence || occurrence.identity !== identity || ((terminal || scopeChanged) && row.status !== "completed" && row.status !== "abandoned"))
+			if (
+				!occurrence ||
+				occurrence.identity !== identity ||
+				((terminal || scopeChanged) && row.status !== "completed" && row.status !== "abandoned")
+			)
 				occurrence = { identity, goal, from: index, entryId: raw.id, status: row.status };
 			scopeChanged = false;
 			occurrence.status = row.status;
@@ -61,7 +72,13 @@ function anchoredTodoRanges(branch: readonly unknown[], todos: NonNullable<Revie
 			const suffix = todo.key.lastIndexOf(":occurrence:");
 			const base = suffix < 0 ? todo.key : todo.key.slice(0, suffix);
 			const exactOccurrence = suffix < 0 || todo.key.slice(suffix + 12) === occurrence.entryId;
-			if (exactOccurrence && (base === identity || base === `goal:${goal}:${hash}` || base === `goal:${occurrence.goal}:${hash}` || base === `goal:${initialGoals.get(identity)}:${hash}`))
+			if (
+				exactOccurrence &&
+				(base === identity ||
+					base === `goal:${goal}:${hash}` ||
+					base === `goal:${occurrence.goal}:${hash}` ||
+					base === `goal:${initialGoals.get(identity)}:${hash}`)
+			)
 				ranges.set(todo.key, { from: occurrence.from, to: index });
 			break;
 		}
@@ -77,25 +94,66 @@ function boundedEvidence(row: Record<string, unknown>): Record<string, unknown> 
 	const result = isRecord(row.result) ? row.result : undefined;
 	const details = isRecord(result?.details) ? result.details : undefined;
 	return {
-		entryId: row.entryId, truncated: true,
-		...(call ? { call: { entryId: call.entryId, id: call.id, name: call.name, type: call.type,
-			arguments: clip(JSON.stringify(call.arguments) ?? "", 2048), truncated: true } } : {}),
-		...(result ? { result: { tool: result.tool, isError: result.isError, truncated: true,
-			content: [{ type: "text", text: clip(typeof result.content === "string" ? result.content : JSON.stringify(result.content) ?? "", 3072) }],
-			details: { exitCode: details?.exitCode, asyncComplete: details?.asyncComplete, jobId: details?.jobId, status: details?.status },
-		} } : {}),
+		entryId: row.entryId,
+		truncated: true,
+		...(call
+			? {
+					call: {
+						entryId: call.entryId,
+						id: call.id,
+						name: call.name,
+						type: call.type,
+						arguments: clip(JSON.stringify(call.arguments) ?? "", 2048),
+						truncated: true,
+					},
+				}
+			: {}),
+		...(result
+			? {
+					result: {
+						tool: result.tool,
+						isError: result.isError,
+						truncated: true,
+						content: [
+							{
+								type: "text",
+								text: clip(
+									typeof result.content === "string" ? result.content : (JSON.stringify(result.content) ?? ""),
+									3072,
+								),
+							},
+						],
+						details: {
+							exitCode: details?.exitCode,
+							asyncComplete: details?.asyncComplete,
+							jobId: details?.jobId,
+							status: details?.status,
+						},
+					},
+				}
+			: {}),
 		...(typeof row.text === "string" ? { text: clip(row.text, 2048) } : {}),
 		...(typeof row.failure === "string" ? { failure: clip(row.failure, 2048) } : {}),
 	};
 }
 
 // A burst of completions without intervening work shares its preceding window.
-function todoWindows(branch: readonly unknown[], todos: NonNullable<ReviewTask["nativeTodos"]>, ranges: Map<string, { from: number; to: number }>) {
+function todoWindows(
+	branch: readonly unknown[],
+	todos: NonNullable<ReviewTask["nativeTodos"]>,
+	ranges: Map<string, { from: number; to: number }>,
+) {
 	const windows: { from: number; to: number; completed?: boolean }[] = [];
 	for (const todo of todos) {
 		const range = ranges.get(todo.key);
 		if (todo.entryId && !range) continue;
-		let goal = "", mode = "", boundary = 0, lastTodo = 0, open: number | undefined, wasCompleted = false, substantive = false;
+		let goal = "",
+			mode = "",
+			boundary = 0,
+			lastTodo = 0,
+			open: number | undefined,
+			wasCompleted = false,
+			substantive = false;
 		for (const [index, raw] of branch.entries()) {
 			if (!isRecord(raw)) continue;
 			if (raw.type === "mode_change") {
@@ -106,20 +164,31 @@ function todoWindows(branch: readonly unknown[], todos: NonNullable<ReviewTask["
 			}
 			const message = raw.type === "message" && isRecord(raw.message) ? raw.message : undefined;
 			if (message?.role === "toolResult" && message.toolName !== "todo") substantive = true;
-			if (message?.role === "assistant" && Array.isArray(message.content) && message.content.some(part =>
-				isRecord(part) && ((part.type === "text" && typeof part.text === "string" && part.text.trim()) ||
-				(part.type === "toolCall" && part.name !== "todo")))) substantive = true;
+			if (
+				message?.role === "assistant" &&
+				Array.isArray(message.content) &&
+				message.content.some(
+					part =>
+						isRecord(part) &&
+						((part.type === "text" && typeof part.text === "string" && part.text.trim()) ||
+							(part.type === "toolCall" && part.name !== "todo")),
+				)
+			)
+				substantive = true;
 			const rows = todoRows(raw);
 			if (!rows) continue;
 			if (substantive) boundary = lastTodo;
 			const matches = rows.filter(row => row.content === todo.content);
-			const eligible = range ? index >= range.from && index <= range.to
+			const eligible = range
+				? index >= range.from && index <= range.to
 				: !todo.key.startsWith("goal:") || todo.key.startsWith(`goal:${goal}:`);
 			const row = eligible && matches.length === 1 ? matches[0] : undefined;
 			const completed = row?.status === "completed" || row?.status === "abandoned";
 			if (row?.status === "in_progress") open ??= index;
-			else if (open !== undefined) { windows.push({ from: open, to: Math.min(index, range?.to ?? index), completed }); open = undefined; }
-			else if (completed && !wasCompleted)
+			else if (open !== undefined) {
+				windows.push({ from: open, to: Math.min(index, range?.to ?? index), completed });
+				open = undefined;
+			} else if (completed && !wasCompleted)
 				windows.push({ from: Math.max(boundary, range?.from ?? 0), to: index, completed: true });
 			wasCompleted = completed;
 			lastTodo = index;
@@ -132,7 +201,8 @@ function todoWindows(branch: readonly unknown[], todos: NonNullable<ReviewTask["
 
 function goalWindow(branch: readonly unknown[], target: { id: string; entryId?: string }) {
 	let current: { id: string; from: number; to: number; complete: boolean } | undefined;
-	let selected: typeof current, mode = "";
+	let selected: typeof current,
+		mode = "";
 	for (const [index, raw] of branch.entries()) {
 		if (!isRecord(raw) || raw.type !== "mode_change") continue;
 		const goal = isRecord(raw.data) && isRecord(raw.data.goal) ? raw.data.goal : undefined;
@@ -147,7 +217,10 @@ function goalWindow(branch: readonly unknown[], target: { id: string; entryId?: 
 			if (current && !current.complete) current.to = index - 1;
 			current = { id: goal.id, from: index, to: branch.length, complete: false };
 		}
-		if (goal.status === "complete" && !current.complete) { current.to = index; current.complete = true; }
+		if (goal.status === "complete" && !current.complete) {
+			current.to = index;
+			current.complete = true;
+		}
 		if (goal.id === target.id && (!target.entryId || raw.id === target.entryId)) selected = current;
 	}
 	return selected;
@@ -187,7 +260,10 @@ export function taskReviewEvidence(
 	const addEvidence = (row: Record<string, unknown>) => {
 		row = boundedEvidence(row);
 		const size = Buffer.byteLength(JSON.stringify(row));
-		if (size > 8192) { omitted++; return; }
+		if (size > 8192) {
+			omitted++;
+			return;
+		}
 		while (evidence.length && (size + bytes > 24576 || evidence.length >= 24)) {
 			bytes -= Buffer.byteLength(JSON.stringify(evidence.shift()));
 			omitted++;
@@ -204,20 +280,31 @@ export function taskReviewEvidence(
 			precedingDecision = { entryId: entry.id, content: message.content };
 		if (!worker) {
 			const wasActive = active;
-			active = task.nativeGoal ? !!goalRange && index >= goalRange.from && index <= goalRange.to
+			active = task.nativeGoal
+				? !!goalRange && index >= goalRange.from && index <= goalRange.to
 				: windows.some(window => index >= window.from && index <= window.to);
 			if (active) started = true;
 			if (active && !wasActive && precedingDecision) addDecision(precedingDecision);
-			if (wasActive && !active) awaitingAnswer = task.nativeGoal ? goalRange?.complete === true
-				: windows.some(window => window.to === index - 1 && window.completed);
+			if (wasActive && !active)
+				awaitingAnswer = task.nativeGoal
+					? goalRange?.complete === true
+					: windows.some(window => window.to === index - 1 && window.completed);
 		}
 		// Only the closing turn supplies a final deliverable, not a later task.
 		if (entry.type === "mode_change" && isRecord(data?.goal)) awaitingAnswer = false;
-		if (entry.type === "custom_message" && entry.customType === "async-result" && isRecord(entry.details) && Array.isArray(entry.details.jobs)) {
+		if (
+			entry.type === "custom_message" &&
+			entry.customType === "async-result" &&
+			isRecord(entry.details) &&
+			Array.isArray(entry.details.jobs)
+		) {
 			for (const job of entry.details.jobs) {
 				if (!isRecord(job) || typeof job.jobId !== "string") continue;
 				const registration = jobs.get(job.jobId);
-				if (!registration) { seenJobs.add(job.jobId); continue; }
+				if (!registration) {
+					seenJobs.add(job.jobId);
+					continue;
+				}
 				if (!registration.call || registration.ambiguous) continue;
 				const call = registration.call;
 				registration.settled = true;
@@ -226,22 +313,44 @@ export function taskReviewEvidence(
 				const text = typeof job.result === "string" ? job.result : "";
 				const content = clip(text, 4096);
 				addEvidence({
-					entryId: entry.id, call,
-					result: { tool: call.name, content: [{ type: "text", text: content }], isError,
+					entryId: entry.id,
+					call,
+					result: {
+						tool: call.name,
+						content: [{ type: "text", text: content }],
+						isError,
 						details: { asyncComplete: true, jobId: job.jobId, status: job.status, exitCode: job.exitCode },
-						...(content !== text ? { truncated: true } : {}) },
+						...(content !== text ? { truncated: true } : {}),
+					},
 				});
 			}
 		}
 		if (!message) continue;
 		if (message.role === "user" && message.attribution !== "agent") awaitingAnswer = false;
-		if (message.role === "assistant" && Array.isArray(message.content) && message.content.some(part =>
-			isRecord(part) && part.type === "toolCall" && part.name !== "todo" && part.name !== "goal")) awaitingAnswer = false;
-		if (message.role === "toolResult" && message.toolName !== "todo" && message.toolName !== "goal" &&
-			!calls.has(String(message.toolCallId))) awaitingAnswer = false;
-		const answer = awaitingAnswer && message.role === "assistant" && message.stopReason === "stop" &&
-			Array.isArray(message.content) && !message.content.some(part => isRecord(part) && part.type === "toolCall");
-		const closingFailure = awaitingAnswer && message.role === "assistant" &&
+		if (
+			message.role === "assistant" &&
+			Array.isArray(message.content) &&
+			message.content.some(
+				part => isRecord(part) && part.type === "toolCall" && part.name !== "todo" && part.name !== "goal",
+			)
+		)
+			awaitingAnswer = false;
+		if (
+			message.role === "toolResult" &&
+			message.toolName !== "todo" &&
+			message.toolName !== "goal" &&
+			!calls.has(String(message.toolCallId))
+		)
+			awaitingAnswer = false;
+		const answer =
+			awaitingAnswer &&
+			message.role === "assistant" &&
+			message.stopReason === "stop" &&
+			Array.isArray(message.content) &&
+			!message.content.some(part => isRecord(part) && part.type === "toolCall");
+		const closingFailure =
+			awaitingAnswer &&
+			message.role === "assistant" &&
 			(message.stopReason === "error" || message.stopReason === "aborted");
 		if (answer || message.role === "assistant") awaitingAnswer = false;
 		if (active && message.role === "user" && message.attribution !== "agent") {
@@ -253,16 +362,27 @@ export function taskReviewEvidence(
 				if (seenCalls.has(part.id)) {
 					if (calls.delete(part.id)) ambiguousPending++;
 					registrations.set(part.id, { name: undefined });
-					if (active) { ambiguousPending++; omitted++; }
+					if (active) {
+						ambiguousPending++;
+						omitted++;
+					}
 					continue;
 				}
 				seenCalls.add(part.id);
 				if (active) {
 					if (calls.size < 128) {
 						const truncated = Buffer.byteLength(JSON.stringify(part)) > 4096;
-						calls.set(part.id, { entryId: entry.id, ...part,
-							...(truncated ? { arguments: clip(JSON.stringify(part.arguments) ?? "", 2048), truncated: true } : {}) });
-					} else { omitted++; ambiguousPending++; }
+						calls.set(part.id, {
+							entryId: entry.id,
+							...part,
+							...(truncated
+								? { arguments: clip(JSON.stringify(part.arguments) ?? "", 2048), truncated: true }
+								: {}),
+						});
+					} else {
+						omitted++;
+						ambiguousPending++;
+					}
 				}
 				registrations.set(part.id, { name: part.name });
 			}
@@ -301,32 +421,68 @@ export function taskReviewEvidence(
 		const asynchronous = isRecord(details?.async) ? details.async : undefined;
 		const matched = registration?.name === message.toolName;
 		if (asynchronous?.state === "running" && typeof asynchronous.jobId === "string") {
-			const id = asynchronous.jobId, previous = jobs.get(id);
+			const id = asynchronous.jobId,
+				previous = jobs.get(id);
 			const ambiguous = seenJobs.has(id);
-			if (ambiguous && previous?.call && !previous.settled) { ambiguousPending++; omitted++; }
-			if (ambiguous && call) { ambiguousPending++; omitted++; }
+			if (ambiguous && previous?.call && !previous.settled) {
+				ambiguousPending++;
+				omitted++;
+			}
+			if (ambiguous && call) {
+				ambiguousPending++;
+				omitted++;
+			}
 			seenJobs.add(id);
 			jobs.set(id, { call: matched ? call : undefined, settled: false, ambiguous });
 		}
 		if (!call || !matched) {
-			if (call) { ambiguousPending++; omitted++; }
+			if (call) {
+				ambiguousPending++;
+				omitted++;
+			}
 			continue;
 		}
-		if (["todo", "goal", "foyer_tasks", "workflow_review", "workflow_next", "delegation_review"].includes(message.toolName)) continue;
+		if (
+			["todo", "goal", "foyer_tasks", "workflow_review", "workflow_next", "delegation_review"].includes(
+				message.toolName,
+			)
+		)
+			continue;
 		failed ||= message.isError === true;
 		failed ||= typeof details?.exitCode === "number" && details.exitCode !== 0;
 		const original = JSON.stringify(message.content);
 		const content = Array.isArray(message.content)
-			? message.content.map(part => isRecord(part) && part.type === "text" && typeof part.text === "string" ? { ...part, text: clip(part.text, 4096) } : part)
-			: typeof message.content === "string" ? clip(message.content, 4096) : message.content;
+			? message.content.map(part =>
+					isRecord(part) && part.type === "text" && typeof part.text === "string"
+						? { ...part, text: clip(part.text, 4096) }
+						: part,
+				)
+			: typeof message.content === "string"
+				? clip(message.content, 4096)
+				: message.content;
 		let row: Record<string, unknown> = {
-			entryId: entry.id, call, result: {
-				tool: message.toolName, content, isError: message.isError, details: message.details,
+			entryId: entry.id,
+			call,
+			result: {
+				tool: message.toolName,
+				content,
+				isError: message.isError,
+				details: message.details,
 				...(JSON.stringify(content) !== original ? { truncated: true } : {}),
 			},
 		};
 		if (Buffer.byteLength(JSON.stringify(row)) > 8192)
-			row = { entryId: entry.id, call, result: { tool: message.toolName, content, isError: message.isError, truncated: true, details: { exitCode: details?.exitCode } } };
+			row = {
+				entryId: entry.id,
+				call,
+				result: {
+					tool: message.toolName,
+					content,
+					isError: message.isError,
+					truncated: true,
+					details: { exitCode: details?.exitCode },
+				},
+			};
 		addEvidence(row);
 	}
 	const state = {
@@ -335,14 +491,22 @@ export function taskReviewEvidence(
 		started,
 		omitted,
 		failed,
-		pendingCalls: calls.size + ambiguousPending + [...jobs.values()].filter(job => job.call && !job.settled && !job.ambiguous).length,
+		pendingCalls:
+			calls.size +
+			ambiguousPending +
+			[...jobs.values()].filter(job => job.call && !job.settled && !job.ambiguous).length,
 		boundary:
 			"Only captured calls and results during this task's native execution are included. TODO completion, review-tool output and model claims are not proof. Omitted or absent evidence cannot support acceptance.",
 	};
 	return { ...state, version: createHash("sha256").update(JSON.stringify(state)).digest("hex") };
 }
 
-async function restoreReviewEvidence(context: ReturnType<typeof taskReviewEvidence>, path: string, worker: boolean, signal?: AbortSignal) {
+async function restoreReviewEvidence(
+	context: ReturnType<typeof taskReviewEvidence>,
+	path: string,
+	worker: boolean,
+	signal?: AbortSignal,
+) {
 	const artifacts = new ArtifactManager(worker ? dirname(path) : path.slice(0, -6));
 	const files = new Map<string, string>();
 	const recover = async (text: string) => {
@@ -359,10 +523,12 @@ async function restoreReviewEvidence(context: ReturnType<typeof taskReviewEviden
 				const target = await artifacts.getPath(id);
 				if (!target) throw new Error(`Review artifact ${id} is unavailable in its source session`);
 				const before = await stat(target);
-				if (!before.isFile() || before.size > 8 * 1024 * 1024) throw new Error(`Review artifact ${id} exceeds the recovery boundary`);
+				if (!before.isFile() || before.size > 8 * 1024 * 1024)
+					throw new Error(`Review artifact ${id} exceeds the recovery boundary`);
 				body = await readFile(target, "utf8");
 				const after = await stat(target);
-				if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw new Error("Review artifact changed during recovery");
+				if (before.size !== after.size || before.mtimeMs !== after.mtimeMs)
+					throw new Error("Review artifact changed during recovery");
 				files.set(id, body);
 			}
 			const regions = [...body.matchAll(/^### region (\d+) \([^\r\n]*, ~\d+ tok\)\r?\n\r?\n/gm)];
@@ -374,20 +540,39 @@ async function restoreReviewEvidence(context: ReturnType<typeof taskReviewEviden
 		}
 	};
 	const evidence: Record<string, unknown>[] = [];
-	let bytes = 0, omitted = context.omitted;
+	let bytes = 0,
+		omitted = context.omitted;
 	for (const row of context.evidence) {
 		const result = isRecord(row.result) ? row.result : undefined;
 		let truncated = result?.truncated === true;
-		const content = Array.isArray(result?.content) ? await Promise.all(result.content.map(async part => {
-			if (!isRecord(part) || part.type !== "text" || typeof part.text !== "string") return part;
-			const restoredText = await recover(part.text);
-			const text = clip(restoredText, 4096);
-			truncated ||= text !== restoredText;
-			return { ...part, text };
-		})) : result?.content;
-		const restored = boundedEvidence(result ? { ...row, result: { ...result, content, ...(truncated ? { truncated: true, originalContent: result.content } : {}) } } : row);
+		const content = Array.isArray(result?.content)
+			? await Promise.all(
+					result.content.map(async part => {
+						if (!isRecord(part) || part.type !== "text" || typeof part.text !== "string") return part;
+						const restoredText = await recover(part.text);
+						const text = clip(restoredText, 4096);
+						truncated ||= text !== restoredText;
+						return { ...part, text };
+					}),
+				)
+			: result?.content;
+		const restored = boundedEvidence(
+			result
+				? {
+						...row,
+						result: {
+							...result,
+							content,
+							...(truncated ? { truncated: true, originalContent: result.content } : {}),
+						},
+					}
+				: row,
+		);
 		const size = Buffer.byteLength(JSON.stringify(restored));
-		if (size > 8192) { omitted++; continue; }
+		if (size > 8192) {
+			omitted++;
+			continue;
+		}
 		while (evidence.length && size + bytes > 24576) {
 			bytes -= Buffer.byteLength(JSON.stringify(evidence.shift()));
 			omitted++;
@@ -461,12 +646,19 @@ export function createTaskReviewReader(live?: () => Source & { branch: readonly 
 			signal?.throwIfAborted();
 			const sourceTask = {
 				id: task.id,
-				nativeTodos: task.nativeTodos?.filter(todo => todo.sessionPath === path && todo.sessionId === expectedSession),
-				nativeGoal: task.nativeGoal?.sessionPath === path && task.nativeGoal.sessionId === expectedSession ? task.nativeGoal : undefined,
+				nativeTodos: task.nativeTodos?.filter(
+					todo => todo.sessionPath === path && todo.sessionId === expectedSession,
+				),
+				nativeGoal:
+					task.nativeGoal?.sessionPath === path && task.nativeGoal.sessionId === expectedSession
+						? task.nativeGoal
+						: undefined,
 			};
 			const current = live?.();
 			if (current?.sessionId === expectedSession && current.sessionPath === path) {
-				contexts.push(await restoreReviewEvidence(taskReviewEvidence(current.branch, sourceTask), path, false, signal));
+				contexts.push(
+					await restoreReviewEvidence(taskReviewEvidence(current.branch, sourceTask), path, false, signal),
+				);
 				continue;
 			}
 			const info = await stat(path),
@@ -499,7 +691,14 @@ export function createTaskReviewReader(live?: () => Source & { branch: readonly 
 				if (branches.size >= 8) branches.delete(branches.keys().next().value!);
 				branches.set(path, cached);
 			}
-			contexts.push(await restoreReviewEvidence(taskReviewEvidence(cached.branch, sourceTask, workers.has(path)), path, workers.has(path), signal));
+			contexts.push(
+				await restoreReviewEvidence(
+					taskReviewEvidence(cached.branch, sourceTask, workers.has(path)),
+					path,
+					workers.has(path),
+					signal,
+				),
+			);
 		}
 		signal?.throwIfAborted();
 		return {

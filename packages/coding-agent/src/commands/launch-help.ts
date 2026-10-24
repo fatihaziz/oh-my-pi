@@ -21,11 +21,17 @@ export const launchHelp = {
 		smol: Flags.string({ description: "Smol/fast model for lightweight tasks (or PI_SMOL_MODEL env)" }),
 		slow: Flags.string({ description: "Slow/reasoning model for thorough analysis (or PI_SLOW_MODEL env)" }),
 		plan: Flags.string({ description: "Plan model for architectural planning (or PI_PLAN_MODEL env)" }),
+		goal: Flags.string({
+			description:
+				"Start fresh in goal mode (interactive only; bypasses autoResume; no positional prompt, startup plan mode, or explicit resume)",
+		}),
 		prewalk: Flags.boolean({
 			description:
 				"Switch from the active model to a fast/cheap model at the first edit/write after the plan's todo list exists (default off; see prewalk.enabled)",
 		}),
-		"no-prewalk": Flags.boolean({ description: "Disable prewalk even if prewalk.enabled is set" }),
+		"no-prewalk": Flags.boolean({
+			description: "Disable prewalk, including prewalk.auto, even if prewalk.enabled is set",
+		}),
 		"prewalk-into": Flags.string({ description: 'Target model for prewalk (default the "smol" role)' }),
 		"plan-yolo": Flags.boolean({
 			description:
@@ -40,8 +46,14 @@ export const launchHelp = {
 		}),
 		"append-system-prompt": Flags.string({ description: "Append text or file contents to the system prompt" }),
 		"allow-home": Flags.boolean({ description: "Allow starting in ~ without auto-switching to a temp dir" }),
-		profile: Flags.string({ description: "Use an isolated profile for auth, sessions, settings, and caches" }),
-		alias: Flags.string({ description: "Create a shell shortcut for the selected profile and exit" }),
+		...(process.env.PI_FOYER === "true"
+			? {}
+			: {
+					profile: Flags.string({
+						description: "Use an isolated profile for auth, sessions, settings, and caches",
+					}),
+					alias: Flags.string({ description: "Create a shell shortcut for the selected profile and exit" }),
+				}),
 		cwd: Flags.string({ description: "Directory to start in (overrides the launch cwd)" }),
 		mode: Flags.string({
 			description: "Output mode: text (default), json, rpc, or rpc-ui",
@@ -58,6 +70,10 @@ export const launchHelp = {
 		print: Flags.boolean({ char: "p", description: "Non-interactive mode: process prompt and exit" }),
 		continue: Flags.boolean({ char: "c", description: "Continue previous session" }),
 		resume: Flags.string({ char: "r", description: "Resume a session (by ID prefix, path, or picker if omitted)" }),
+		restore: Flags.string({
+			description:
+				"Resume a session as --resume does, then go on with what its last process left unfinished (the interrupted turn and the subagents it was running)",
+		}),
 		"from-claude": Flags.boolean({ description: "Import a Claude Code session into OMP" }),
 		"from-codex": Flags.boolean({ description: "Import a Codex session into OMP" }),
 		"session-dir": Flags.string({ description: "Directory for session storage and lookup" }),
@@ -109,17 +125,21 @@ export const launchHelp = {
 			description: "Auto-approve all tool calls (skip approval prompts)",
 		}),
 		"approval-mode": Flags.string({
-			options: ["always-ask", "write", "yolo"],
-			description: "Override tools.approvalMode for this session (always-ask|write|yolo)",
+			options: ["always-ask", "always-ask-cached", "write", "yolo"],
+			description: "Override tools.approvalMode for this session (always-ask|always-ask-cached|write|yolo)",
 		}),
 	},
 	examples: [
 		`# Interactive mode\n  ${APP_NAME}`,
 		`# Interactive mode with initial prompt\n  ${APP_NAME} "List all .ts files in src/"`,
+		`# Start working on a goal immediately\n  ${APP_NAME} --goal "Investigate the importer"`,
 		`# Include files in initial message\n  ${APP_NAME} @prompt.md @image.png "What color is the sky?"`,
 		`# Non-interactive mode (process and exit)\n  ${APP_NAME} -p "List all .ts files in src/"`,
 		`# Continue previous session\n  ${APP_NAME} --continue "What did we discuss?"`,
-		`# Create a shell shortcut for a work profile\n  ${APP_NAME} --profile work --alias omp-work`,
+		`# Pick a session back up after a crash, subagents included\n  ${APP_NAME} --restore ~/.omp/agent/sessions/--path--/session.jsonl`,
+		...(process.env.PI_FOYER === "true"
+			? []
+			: [`# Create a shell shortcut for a work profile\n  ${APP_NAME} --profile work --alias omp-work`]),
 		`# Use different model (fuzzy matching)\n  ${APP_NAME} --model opus "Help me refactor this code"`,
 		`# Limit model cycling to specific models\n  ${APP_NAME} --models claude-sonnet,claude-haiku,gpt-4o`,
 		`# Export a session file to HTML\n  ${APP_NAME} --export ~/.omp/agent/sessions/--path--/session.jsonl`,

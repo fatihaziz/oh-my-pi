@@ -201,6 +201,47 @@ describe("cache warming scheduling math", () => {
 		}
 	});
 
+	test("uses the actual short TTL when Bedrock emits its five-minute fallback for long retention", () => {
+		const bedrockMessages = buildModel({
+			id: "anthropic.claude-opus-5-5",
+			name: "Claude Opus 5.5",
+			api: "anthropic-messages",
+			provider: "amazon-bedrock",
+			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+			promptCache: { short: 300 },
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+			compat: { supportsLongCacheRetention: false },
+		});
+		expect(getPromptCacheTtlMs(bedrockMessages, { cacheRetention: "long" })).toBe(300_000);
+
+		const converse = buildModel({
+			id: "us.anthropic.claude-opus-5-5",
+			name: "Claude Opus 5.5",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+			promptCache: { short: 300, long: 3600 },
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+			compat: {
+				promptCacheMode: "explicit",
+				supportsLongPromptCacheRetention: false,
+				promptCacheMinimumTokens: 0,
+				promptCacheMaximumCheckpoints: 2,
+			},
+		});
+		expect(getPromptCacheTtlMs(converse, { cacheRetention: "long" })).toBe(300_000);
+		converse.compat.supportsLongPromptCacheRetention = true;
+		expect(getPromptCacheTtlMs(converse, { cacheRetention: "long" })).toBe(3_600_000);
+	});
+
 	test("never warms without a declared lifetime or with caching off", () => {
 		const model = makeModel();
 		model.promptCache = undefined;
@@ -208,7 +249,7 @@ describe("cache warming scheduling math", () => {
 		expect(getPromptCacheTtlMs(makeModel(), { cacheRetention: "none" })).toBeUndefined();
 	});
 
-	test("skips budget-based Anthropic thinking but allows adaptive thinking and other providers", () => {
+	test("rejects budget-based reasoning replays on Converse but preserves adaptive and effort models", () => {
 		const model = makeModel();
 		model.thinking = { mode: "anthropic-budget-effort", efforts: [Effort.High] };
 		expect(isReplayable(model, { reasoning: Effort.High })).toBe(false);
@@ -216,6 +257,28 @@ describe("cache warming scheduling math", () => {
 		expect(isReplayable(model, { reasoning: Effort.High })).toBe(true);
 		expect(isReplayable(model, { reasoning: Effort.High, forceReasoningOff: true })).toBe(true);
 		expect(isReplayable(model, undefined)).toBe(true);
+
+		const bedrock = buildModel({
+			id: "us.anthropic.claude-opus-5-5",
+			name: "Claude Opus 5.5",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+			reasoning: true,
+			thinking: { mode: "budget", efforts: [Effort.High], requiresEffort: true },
+			input: ["text"],
+			cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+		});
+		expect(isReplayable(bedrock, { reasoning: Effort.High })).toBe(false);
+		expect(isReplayable(bedrock, undefined)).toBe(false);
+		expect(isReplayable(bedrock, { forceReasoningOff: true })).toBe(false);
+		bedrock.thinking = { mode: "anthropic-adaptive", efforts: [Effort.High], requiresEffort: true };
+		expect(isReplayable(bedrock, { forceReasoningOff: true })).toBe(true);
+		bedrock.thinking = { mode: "effort", efforts: [Effort.High] };
+		expect(isReplayable(bedrock, { reasoning: Effort.High })).toBe(false);
+
 		const openai = buildModel({
 			id: "gpt-5.4",
 			name: "GPT-5.4",
@@ -404,6 +467,60 @@ describe("cache warmer lifecycle", () => {
 		await advance(SHORT_DELAY_MS);
 		expect(h.replays).toHaveLength(0);
 		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "conversation context changed" });
+	});
+
+	test("publishes the cache entry only once a response reports cache usage, even with warming off", () => {
+		const h = harness();
+		h.mode = "off";
+		const sentAt = Date.now();
+		start(h, { apiKey: () => "resolved-at-request-time" });
+		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "cache warming disabled" });
+		expect(h.warmer.cacheEntry).toBeUndefined();
+		// The provider's reported write tier wins over the credential guess.
+		h.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500, cttl: { ephemeral1h: 500 } })));
+		expect(h.warmer.cacheEntry).toEqual({ touchedAt: sentAt, tier: "long", ttlMs: 3_600_000 });
+		h.current = false;
+		expect(h.warmer.cacheEntry).toBeUndefined();
+	});
+
+	test("a failed or uncached response never publishes its entry", () => {
+		const failed = harness();
+		start(failed, { cacheRetention: "long" });
+		failed.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500 }), "error"));
+		expect(failed.warmer.cacheEntry).toBeUndefined();
+
+		const uncached = harness();
+		start(uncached, { cacheRetention: "long" });
+		uncached.warmer.onResponse(makeMessage(makeUsage({})));
+		expect(uncached.warmer.cacheEntry).toBeUndefined();
+
+		// A later failure keeps the earlier confirmed entry with its own timestamp.
+		const kept = harness();
+		const confirmedAt = Date.now();
+		start(kept);
+		kept.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500 })));
+		vi.advanceTimersByTime(1_000);
+		start(kept);
+		kept.warmer.onResponse(makeMessage(makeUsage({}), "error"));
+		expect(kept.warmer.cacheEntry).toEqual({ touchedAt: confirmedAt, tier: "short", ttlMs: 300_000 });
+	});
+
+	test("a refresh that hits the cache confirms and extends the entry; a miss does not", async () => {
+		const h = harness();
+		start(h);
+		const firstTouch = Date.now();
+		// Still pending: the long-running request has not answered yet.
+		await advance(SHORT_DELAY_MS);
+		expect(h.warmer.cacheEntry).toEqual({ touchedAt: firstTouch + SHORT_DELAY_MS, tier: "short", ttlMs: 300_000 });
+
+		const missed = harness();
+		missed.script = { kind: "generate", usage: makeUsage({ cacheWrite: PROMPT_TOKENS }) };
+		start(missed);
+		const missedTouch = Date.now();
+		missed.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500 })));
+		await advance(SHORT_DELAY_MS);
+		expect(missed.warmer.status.reason).toBe("refresh missed the cache");
+		expect(missed.warmer.cacheEntry?.touchedAt).toBe(missedTouch);
 	});
 
 	test("extensions can stop a refresh and force one past the threshold", async () => {

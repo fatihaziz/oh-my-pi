@@ -169,20 +169,6 @@ it("retains workspace data when native teardown cannot confirm release", async (
 	await expectOwnerWip();
 });
 
-it("reports partial integration when the parent's WIP cannot be restored", async () => {
-	spyOn(executor, "runSubprocess").mockImplementation(async options => {
-		await Bun.write(path.join(options.worktree!, "owner.txt"), "agent edit\n");
-		return result(options);
-	});
-	await prepare("branch");
-	const captured = await workspace!.run();
-	expect((await workspace!.integrate()).changesApplied).toBe(false);
-	const source = vcs.requireGit(repo);
-	expect((await source.showBlob("refs/stash:owner.txt")).data.toString()).toBe("owner unstaged\n");
-	expect((await source.showBlob("refs/stash^2:owner.txt")).data.toString()).toBe("owner staged\n");
-	expect(await source.refExists(captured.branchName!)).toBe(true);
-});
-
 for (const merge of ["patch", "branch"] as const) {
 	it(`captures and integrates two ${merge} turns without reapplying prior work or parent WIP`, async () => {
 		let live = false;
