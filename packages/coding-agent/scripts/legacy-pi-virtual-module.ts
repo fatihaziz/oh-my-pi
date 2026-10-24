@@ -24,6 +24,7 @@ interface BundledPackage {
 }
 
 const BUNDLED_PACKAGES: readonly BundledPackage[] = [
+	{ dir: "omptype", identifier: "OMPType", rootShim: null, rootWildcard: "flat" },
 	{ dir: "agent", identifier: "PiAgentCore", rootShim: null, rootWildcard: null },
 	{ dir: "ai", identifier: "PiAi", rootShim: "legacy-pi-ai-shim.ts", rootWildcard: null },
 	{ dir: "catalog", identifier: "PiCatalog", rootShim: null, rootWildcard: "flat" },

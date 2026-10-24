@@ -815,6 +815,7 @@ const PI_SCOPE_ALIASES = ["oh-my-pi", "mariozechner", "earendil-works"] as const
 
 // Internal host package basenames bundled inside the omp binary.
 const PI_PACKAGE_NAMES = [
+	"omptype",
 	"pi-agent-core",
 	"pi-ai",
 	"pi-catalog",

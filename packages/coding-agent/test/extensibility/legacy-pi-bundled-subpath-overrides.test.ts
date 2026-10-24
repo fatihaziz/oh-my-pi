@@ -34,6 +34,25 @@ async function runRegistryProbe(entries: BundledPiEntry[], source: string): Prom
 // the same `omp-legacy-pi-bundled:` virtual namespace as package roots without
 // a generated registry or duplicate key list.
 describe("legacy pi compat compiled-mode subpath overrides (issue #3442)", () => {
+	it("validates through omptype root and facade exports retained in the bundled registry", async () => {
+		const root = bundledEntries.find(entry => entry.key === "@oh-my-pi/omptype");
+		const facade = bundledEntries.find(entry => entry.key === "@oh-my-pi/omptype/zod");
+		if (!root || !facade) throw new Error("Schema imports are missing from the bundled registry");
+
+		const observed = await runRegistryProbe(
+			[root, facade],
+			`const { type } = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/omptype"]();
+const { z } = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/omptype/zod"]();
+const schema = type({ name: "string" });
+export const observed = [
+	schema({ name: "Foyer" }),
+	schema({ name: 42 }) instanceof type.errors,
+	!z.object({ name: z.string() }).safeParse({ name: 42 }).success,
+];`,
+		);
+		expect(observed).toEqual([{ name: "Foyer" }, true, true]);
+	});
+
 	it("does not evaluate unrelated host modules while loading the registry", async () => {
 		using tempDir = TempDir.createSync("@omp-legacy-pi-loaders-");
 		const alphaPath = path.join(tempDir.path(), "alpha.ts");
