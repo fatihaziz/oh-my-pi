@@ -2,17 +2,17 @@ import type { FetchImpl, Model, StreamOptions } from "./types";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 
 /** The host supplies current policy; the inference runtime does not select models. */
-let requestPolicy: ((selector: string, signal?: AbortSignal) => Promise<void>) | undefined;
+let requestPolicy: ((selector: string, signal?: AbortSignal, policyFingerprint?: string) => Promise<void>) | undefined;
 
 export function setModelRequestPolicy(
-	policy: ((selector: string, signal?: AbortSignal) => Promise<void>) | undefined,
+	policy: ((selector: string, signal?: AbortSignal, policyFingerprint?: string) => Promise<void>) | undefined,
 ): void {
 	requestPolicy = policy;
 }
 
-export async function checkModelRequestPolicy(selector: string, signal?: AbortSignal): Promise<void> {
+export async function checkModelRequestPolicy(selector: string, signal?: AbortSignal, policyFingerprint?: string): Promise<void> {
 	signal?.throwIfAborted();
-	await requestPolicy?.(selector, signal);
+	await requestPolicy?.(selector, signal, policyFingerprint);
 }
 
 export function withModelRequestPolicy<

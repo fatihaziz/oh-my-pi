@@ -12,6 +12,7 @@ import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import { jsBackend, pythonBackend } from "../eval";
+import rustBackend from "../eval/rust";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
 import { IdleTimeout } from "../eval/idle-timeout";
@@ -60,15 +61,17 @@ import { cfgTaskMaxRecursionDepth } from "../task/settings";
 import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
 
 /** Language tokens the eval tool accepts, in stable display order. */
-export type EvalLanguageToken = "py" | "js";
-const EVAL_LANGUAGE_ORDER: readonly EvalLanguageToken[] = ["py", "js"];
+export type EvalLanguageToken = "py" | "js" | "rust";
+const EVAL_LANGUAGE_ORDER: readonly EvalLanguageToken[] = ["py", "js", "rust"];
 const EVAL_LANGUAGE_RUNTIME: Record<EvalLanguageToken, string> = {
 	py: '"py": Python with IPython-style magics (not IPython)',
 	js: '"js": Bun',
+	rust: '"rust": Rust expression or statements via rust-script; each cell starts fresh',
 };
 const EVAL_LANGUAGE_NAME: Record<EvalLanguageToken, string> = {
 	py: "Python",
 	js: "JavaScript",
+	rust: "Rust",
 };
 
 /** Join names as an English "or" list: ["A"]→"A", ["A","B"]→"A or B", 3+→"A, B, or C". */
@@ -86,7 +89,7 @@ function describeLanguageField(langs: readonly EvalLanguageToken[]): string {
 function summarizeEvalLanguages(langs: readonly EvalLanguageToken[]): string {
 	const names = langs.map(lang => EVAL_LANGUAGE_NAME[lang]);
 	const list = names.length > 0 ? joinWithOr(names) : "Python or JavaScript";
-	return `Execute ${list} in persistent kernels; load scripts or install packages`;
+	return `Execute ${list}; Python and JavaScript retain state, Rust cells run independently`;
 }
 
 /** Resolved-allowance → enabled language tokens, preserving display order. */
@@ -94,26 +97,26 @@ function enabledEvalLanguages(backends: EvalBackendsAllowance): EvalLanguageToke
 	const allowed: Record<EvalLanguageToken, boolean> = {
 		py: backends.python,
 		js: backends.js,
+		rust: (backends.python || backends.js) && Bun.which("rust-script") !== null,
 	};
 	return EVAL_LANGUAGE_ORDER.filter(lang => allowed[lang]);
 }
 
 const evalCellCommonFields = {
-	code: type("string").describe("Code or standalone % command; top-level await works."),
+	code: type("string").describe("Code or standalone % command; Python and JavaScript support top-level await."),
 	"title?": type("string").describe("Short transcript label."),
 	"timeout?": type("number").describe("Cell deadline in seconds; 0 disables it."),
-	"reset?": type("boolean").describe("Wipe only this kernel."),
+	"reset?": type("boolean").describe("Wipe the Python or JavaScript kernel; Rust cells are always fresh."),
 };
 
 /**
- * Per-call input: a single cell. State persists within a language across
- * separate eval calls and across tool calls, so each call is one logical step
- * and later calls reuse what earlier ones defined. This static schema carries
+ * Per-call input: a single cell. Python and JavaScript retain state across
+ * calls; Rust cells are independent. This static schema carries
  * the full language union for typing; {@link buildEvalSchema} narrows the wire
  * copy per session so disabled backends are never advertised to the model.
  */
 export const evalSchema = type({
-	language: type("'py' | 'js'").describe(describeLanguageField(EVAL_LANGUAGE_ORDER)),
+	language: type("'py' | 'js' | 'rust'").describe(describeLanguageField(EVAL_LANGUAGE_ORDER)),
 	...evalCellCommonFields,
 });
 export type EvalToolParams = typeof evalSchema.infer;
@@ -151,6 +154,7 @@ const LIVE_UPDATE_INTERVAL_MS = 50;
 export interface EvalToolDescriptionOptions {
 	py?: boolean;
 	js?: boolean;
+	rust?: boolean;
 	/**
 	 * Parent spawn policy (`getSessionSpawns`). `true`/omitted means unrestricted,
 	 * `false`/`""` hides `agent()`, and a comma list drives the advertised default.
@@ -180,6 +184,7 @@ function evalTemplateContext(options: EvalToolDescriptionOptions) {
 	return {
 		py: options.py ?? true,
 		js: options.js ?? true,
+		rust: options.rust ?? Bun.which("rust-script") !== null,
 		evalTools: options.evalTools ?? true,
 		eagerDelegation: options.eagerDelegation ?? true,
 		waitTool: options.waitTool ?? true,
@@ -273,6 +278,11 @@ async function resolveBackend(
 	const allowJs = backends.js;
 	// A hosted worker shares its parent's retained kernels, so its cells run in the parent process.
 	const parentEval = session.getParentServices?.()?.eval;
+	if (language === "rust") {
+		if (!allowPy && !allowJs) throw new ToolError("Eval backends are disabled.");
+		if (!(await rustBackend.isAvailable())) throw new ToolError("Rust eval requires rust-script on PATH.");
+		return { backend: rustBackend };
+	}
 
 	if (language === "python") {
 		if (!allowPy) throw new ToolError("Python backend is disabled (PI_PY=0 or eval.py = false).");
@@ -344,6 +354,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		return {
 			py: backends.python,
 			js: backends.js,
+			rust: (backends.python || backends.js) && Bun.which("rust-script") !== null,
 			spawns: depthAllowsSpawning ? (session.getSessionSpawns?.() ?? "*") : false,
 			autoBackgroundEnabled: cfgEvalAutoBackgroundEnabled.get(session.settings),
 			evalTools: cfgEvalToolsEnabled.get(session.settings),
@@ -428,7 +439,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	 * session) fall back to the shipped defaults (py/js; rb/jl are opt-in).
 	 */
 	#enabledLanguages(): EvalLanguageToken[] {
-		return this.session ? enabledEvalLanguages(resolveEvalBackends(this.session)) : ["py", "js"];
+		return this.session
+			? enabledEvalLanguages(resolveEvalBackends(this.session))
+			: EVAL_LANGUAGE_ORDER.filter(lang => lang !== "rust" || Bun.which("rust-script") !== null);
 	}
 
 	constructor(

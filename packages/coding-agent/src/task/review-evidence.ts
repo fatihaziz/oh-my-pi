@@ -13,6 +13,28 @@ export type ReviewTask = {
 	nativeTodos?: ({ key: string; content: string; entryId?: string } & Partial<Source>)[];
 };
 
+/** Native Question replies retain their tool-result identity, not a synthetic user message. */
+export function operatorEntryText(raw: unknown): string | undefined {
+	if (!isRecord(raw) || raw.type !== "message" || !isRecord(raw.message)) return;
+	const message = raw.message;
+	if (message.role === "user" && message.attribution !== "agent" && message.synthetic !== true) {
+		const text = typeof message.content === "string" ? message.content :
+			Array.isArray(message.content) ? message.content.flatMap(part =>
+				isRecord(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : []).join("\n") : "";
+		return text.trim() ? text : undefined;
+	}
+	if (message.role !== "toolResult" || message.toolName !== "ask" || message.isError || !isRecord(message.details)) return;
+	const details = message.details;
+	if (details.timedOut || details.autoAnswered || details.automatic || details.deferred || details.chatRedirect) return;
+	const rows = Array.isArray(details.results) ? details.results : [details];
+	const answers = rows.flatMap(row => {
+		if (!isRecord(row) || row.timedOut || row.autoAnswered || row.automatic || row.deferred || row.chatRedirect) return [];
+		const text = [row.customInput, row.note].filter((value): value is string => typeof value === "string" && !!value.trim()).join("\n");
+		return text ? [`Question: ${typeof row.question === "string" ? row.question : row.id ?? ""}\nOperator reply: ${text}`] : [];
+	});
+	return answers.length ? answers.join("\n\n") : undefined;
+}
+
 function todoRows(entry: Record<string, unknown>) {
 	const data = isRecord(entry.data) ? entry.data : undefined;
 	const message = isRecord(entry.message) ? entry.message : undefined;
@@ -276,8 +298,9 @@ export function taskReviewEvidence(
 		const entry = raw,
 			data = isRecord(entry.data) ? entry.data : undefined;
 		const message = entry.type === "message" && isRecord(entry.message) ? entry.message : undefined;
-		if (message?.role === "user" && message.attribution !== "agent")
-			precedingDecision = { entryId: entry.id, content: message.content };
+		const operatorText = operatorEntryText(entry);
+		if (operatorText !== undefined)
+			precedingDecision = { entryId: entry.id, content: message?.role === "user" ? message.content : operatorText };
 		if (!worker) {
 			const wasActive = active;
 			active = task.nativeGoal
@@ -326,7 +349,7 @@ export function taskReviewEvidence(
 			}
 		}
 		if (!message) continue;
-		if (message.role === "user" && message.attribution !== "agent") awaitingAnswer = false;
+		if (operatorText !== undefined) awaitingAnswer = false;
 		if (
 			message.role === "assistant" &&
 			Array.isArray(message.content) &&
@@ -353,8 +376,8 @@ export function taskReviewEvidence(
 			message.role === "assistant" &&
 			(message.stopReason === "error" || message.stopReason === "aborted");
 		if (answer || message.role === "assistant") awaitingAnswer = false;
-		if (active && message.role === "user" && message.attribution !== "agent") {
-			addDecision({ entryId: entry.id, content: message.content });
+		if (active && operatorText !== undefined) {
+			addDecision({ entryId: entry.id, content: message.role === "user" ? message.content : operatorText });
 		}
 		if (message.role === "assistant") {
 			for (const part of Array.isArray(message.content) ? message.content : []) {

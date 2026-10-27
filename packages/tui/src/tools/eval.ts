@@ -55,7 +55,7 @@ import type { OutputMeta } from "./output-meta";
 import { type ConfiguredThinkingLevel, expandKeyHint } from "../render/render-utils";
 
 /** Runtime backend that an eval cell dispatches to. */
-export type EvalLanguage = "python" | "js";
+export type EvalLanguage = "python" | "js" | "rust";
 
 /** Status event emitted by eval prelude helpers for TUI rendering. */
 export interface EvalStatusEvent {
@@ -139,9 +139,9 @@ export interface EvalToolDetails {
 /** Default collapsed eval output preview height; kept as a named alias (consumed by chat/tool-execution). */
 export const EVAL_DEFAULT_PREVIEW_LINES: number = DEFAULT_TERMINAL_PREVIEW_LINES;
 
-function languageForHighlighter(language: EvalLanguage | undefined): "python" | "javascript" {
+function languageForHighlighter(language: EvalLanguage | undefined): "python" | "javascript" | "rust" {
 	if (language === "js") return "javascript";
-	return "python";
+	return language === "rust" ? "rust" : "python";
 }
 
 interface EvalRenderCellArg {
@@ -169,6 +169,7 @@ interface EvalRenderCell {
 }
 
 function normalizeRenderLanguage(value: string | undefined): EvalLanguage {
+	if (value === "rust") return "rust";
 	if (value === "js") return "js";
 	return "python";
 }

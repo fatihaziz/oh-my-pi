@@ -69,7 +69,7 @@ export interface ModelControlsHost {
 	promptGeneration(): number;
 	resolveActiveEditMode(): EditMode;
 	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
-	setModelWithProviderSessionReset(model: Model, selection?: "explicit" | "automatic"): Promise<void>;
+	setModelWithProviderSessionReset(model: Model, selection?: "explicit" | "automatic", guard?: () => boolean): Promise<void>;
 	clearActiveRetryFallback(): void;
 	clearInheritedProviderPromptCacheKey(): void;
 	magicKeywordEnabled(keyword: MagicKeywordId): boolean;
@@ -285,30 +285,56 @@ export class ModelControls {
 		options?: { ephemeral?: boolean },
 		selection: "explicit" | "automatic" = "explicit",
 	): Promise<void> {
+		await this.#applyTemporaryModel(model, thinkingLevel, options, selection);
+	}
+
+	applyHostedSelection(
+		model: Model,
+		thinkingLevel: ConfiguredThinkingLevel,
+		validatePolicy: () => Promise<void>,
+		guard: () => boolean,
+	): Promise<"applied" | "unchanged" | "stale"> {
+		return this.#applyTemporaryModel(model, thinkingLevel, undefined, "automatic", { validatePolicy, guard });
+	}
+
+	async #applyTemporaryModel(
+		model: Model,
+		thinkingLevel: ConfiguredThinkingLevel | undefined,
+		options: { ephemeral?: boolean } | undefined,
+		selection: "explicit" | "automatic",
+		hosted?: { validatePolicy: () => Promise<void>; guard: () => boolean },
+	): Promise<"applied" | "unchanged" | "stale"> {
+		const guard = hosted?.guard ?? (() => true);
+		if (!guard()) return "stale";
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		if (!this.#host.modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
-
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
-
+		if (!guard()) return "stale";
+		if (hosted) {
+			await hosted.validatePolicy();
+			if (!guard()) return "stale";
+			if (modelsAreEqual(this.#model, targetModel) && this.configuredThinkingLevel() === thinkingLevel) return "unchanged";
+		}
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
-		await this.#host.setModelWithProviderSessionReset(targetModel, selection);
+		await this.#host.setModelWithProviderSessionReset(targetModel, selection, guard);
+		if (!guard()) return "stale";
 		this.#host.sessionManager.appendModelChange(
 			`${targetModel.provider}/${targetModel.id}`,
 			options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
 		);
 		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
-
-		// Apply explicit thinking level if given; otherwise prefer the model's
-		// configured defaultLevel; otherwise re-clamp the current level (or auto).
+		if (!guard()) return "stale";
 		if (thinkingLevel !== undefined) {
 			this.setThinkingLevel(thinkingLevel);
 		} else {
 			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
 		}
+		if (!guard()) return "stale";
 		await this.#host.syncAfterModelChange(previousEditMode);
+		return guard() ? "applied" : "stale";
 	}
 
 	/**

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Run independent Rust expressions and statements in `eval` when `rust-script` is available on PATH.
+
+### Fixed
+
+- Isolate junction-backed submodules through their own repository materialization instead of copying a junction over a directory.
+
 ### Foyer integration
 
 - Merge upstream 18.12.5 while retaining hosted worker execution, parent services, request-policy enforcement, explicit judge backups, and isolated workspace recovery.

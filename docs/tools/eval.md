@@ -1,6 +1,6 @@
 # eval
 
-> Execute one Python or JavaScript cell in a persistent language runtime. One tool call is one cell; state survives later calls.
+> Execute one Python, JavaScript or Rust cell. Python and JavaScript retain state across calls; Rust cells run independently.
 
 > **Notice:** Do not shell out to `python -c`, `bun -e`, or `node -e` through `bash` for ad-hoc code. `eval` provides retained state, rich `print` rendering, tool/subagent bridges, streaming, cancellation, and artifact-backed truncation.
 
@@ -18,15 +18,15 @@
 
 ## Inputs
 
-The params object is one cell. There is no `cells` array, header parser, language sniffing, or implicit fallback. Run incremental steps as separate tool calls; each language keeps its own state.
+The params object is one cell. There is no `cells` array, header parser, language sniffing, or implicit fallback. Python and JavaScript keep separate state; Rust starts a fresh process for each cell.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `language` | `"py" \| "js"` | Yes | Explicit backend token. Normally the live schema includes only enabled runtimes. |
-| `code` | `string` | Yes | Inline code, or one standalone `%load` / `%pip install` (py) / `%bun add` / `%environment` (js) command. |
+| `language` | `"py" \| "js" \| "rust"` | Yes | Explicit backend token. The live schema includes only enabled runtimes. |
+| `code` | `string` | Yes | Inline code, or one standalone `%load` / `%pip install` (py) / `%bun add` / `%environment` (js) command. Rust accepts statements or an expression. |
 | `title` | `string` | No | Short transcript label. |
 | `timeout` | `number` | No | Active-runtime timeout window in seconds. Default 30; `0` disables it. Nonzero values are clamped by the tool timeout policy (`TOOL_TIMEOUTS.eval`: 1–3600 s) and `tools.maxTimeout`. Paused host waits resume with a fresh window, not the unused remainder. |
-| `reset` | `boolean` | No | Recreate this language's retained runtime before execution. Other language runtimes are untouched. Default `false`. |
+| `reset` | `boolean` | No | Recreate the Python or JavaScript retained runtime before execution. Rust cells are always fresh. Default `false`. |
 
 Example across three calls:
 
@@ -41,6 +41,8 @@ Example across three calls:
 ```json
 {"language":"py","title":"reuse state","code":"print(sorted(data['dependencies']))"}
 ```
+
+Rust uses `rust-script` from `PATH`. Every cell is independent, with no Python or JavaScript helpers or persistent variables. Example: `{"language":"rust","code":"println!(\"{}\", 42);"}`.
 
 ## Scripts and dependencies
 
@@ -70,6 +72,7 @@ Compaction receives a bounded live-kernel snapshot with environment and successf
 | --- | --- | --- | --- | --- |
 | `py` | retained IPython-style Python kernel | `eval.py=true` | `PI_PY` | usable configured Python interpreter/kernel |
 | `js` | retained Bun worker VM | `eval.js=true` | `PI_JS` | bundled JS runtime |
+| `rust` | independent `rust-script` expression | available while eval is enabled | none | `rust-script` on `PATH` |
 
 When at least one runtime is enabled, disabled runtimes are removed from the session-scoped wire schema and model prompt. A requested unavailable runtime raises `ToolError`; the tool never substitutes another language. `eval.tools.enabled=true` (default) independently controls whether kernel-defined tools and the `tools` subagent fields are advertised and usable.
 

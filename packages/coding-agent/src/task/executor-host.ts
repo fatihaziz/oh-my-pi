@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import type { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
-import { isRecord, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { ModelRegistry } from "../config/model-registry";
 import { SessionAccountPoolScope, validateAgentAccountPools } from "../config/account-pools";
@@ -255,7 +255,10 @@ export async function runExecutorHost(): Promise<void> {
 		TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 		TASK_SUBAGENT_PROGRESS_CHANNEL,
 	]) {
-		events.on(channel, payload => emit({ type: "subagent_frame", channel, payload }));
+		events.on(channel, payload => {
+			if (channel === TASK_SUBAGENT_EVENT_CHANNEL) observeModelUsage(payload);
+			void usageTail.then(() => emit({ type: "subagent_frame", channel, payload }));
+		});
 	}
 	const unsubscribe = registry.onChange(({ type, ref }) => {
 		if (relayingRegistry || ref.id !== launch?.id) return;
@@ -267,6 +270,11 @@ export async function runExecutorHost(): Promise<void> {
 	let authStorage: AuthStorage | undefined;
 	let accountPoolScope: SessionAccountPoolScope | undefined;
 	let authorizedModel: { provider: string; id: string } | undefined;
+	let admittedProfile = 0;
+	let admittedThinking = "off";
+	let usageTail: Promise<void> = Promise.resolve();
+	const observedUsage = new Set<string>();
+	const responseAdmissions = new Map<number,{profileId:number;thinking:string}>();
 	let modelSelection: FollowUpTurnOptions["modelSelection"];
 	let turn: AbortController | undefined;
 	let running: Promise<unknown> | undefined;
@@ -322,6 +330,38 @@ export async function runExecutorHost(): Promise<void> {
 				signal?.removeEventListener("abort", abort);
 			});
 		},
+	};
+	const observeModelUsage = (payload: unknown) => {
+		if (!launch || !admittedProfile || !isRecord(payload) || payload.id !== launch.id ||
+			!isRecord(payload.event) || !isRecord(payload.event.message) || payload.event.message.role !== "assistant") return;
+		const message = payload.event.message;
+		if (payload.event.type === "message_start" && typeof message.timestamp === "number") {
+			responseAdmissions.set(message.timestamp,{profileId:admittedProfile,thinking:admittedThinking});
+			return;
+		}
+		if (payload.event.type !== "message_end" || typeof message.timestamp !== "number") return;
+		const admission = responseAdmissions.get(message.timestamp);
+		if (!admission) return;
+		const owner = registry.get(launch.id)?.session;
+		if (!owner) return;
+		let entry = owner.sessionManager.getLeafEntry();
+		while (entry && !(entry.type === "message" && entry.message.role === "assistant" &&
+			entry.message.timestamp === message.timestamp && entry.message.provider === message.provider && entry.message.model === message.model)) {
+			entry = entry.parentId ? owner.sessionManager.getEntry(entry.parentId) : undefined;
+		}
+		if (!entry || observedUsage.has(entry.id)) return;
+		observedUsage.add(entry.id);
+		responseAdmissions.delete(message.timestamp);
+		const data = { agentId: launch.id, profileId: admission.profileId, sessionId: owner.sessionId,
+			sessionFile: owner.sessionManager.getSessionFile(), entryId: entry.id, observedAt: entry.timestamp, thinking: admission.thinking,
+			message: { provider:message.provider,model:message.model,usage:message.usage,stopReason:message.stopReason,
+				served:Array.isArray(message.content)&&message.content.length>0 } };
+		usageTail = usageTail.then(async () => {
+			await ownerTransport.request("model_usage", data, AbortSignal.any([lifetime.signal,AbortSignal.timeout(5000)]));
+		}).catch(error => { logger.warn("Hosted model usage was not retained", { error: String(error), entryId: data.entryId }); });
+	};
+	const emitProgress: NonNullable<ExecutorOptions["onProgress"]> = progress => {
+		void usageTail.then(() => emit({ type: "progress", progress }));
 	};
 	const ownerExecutor = createExternalSubagentExecutor(ownerTransport);
 	const run = async (frame: unknown): Promise<void> => {
@@ -672,9 +712,11 @@ export async function runExecutorHost(): Promise<void> {
 			}
 			authorizedModel = { provider: frame.authorizedModel.provider, id: frame.authorizedModel.id };
 			if (frame.modelPolicy === true)
-				setModelRequestPolicy((selector, signal) =>
-					ownerTransport.request<void>("model_policy", { selector }, signal),
-				);
+				setModelRequestPolicy(async (selector, signal) => {
+					const admission = await ownerTransport.request<{profileId:number}>("model_policy", { selector }, signal);
+					admittedProfile = admission.profileId;
+					admittedThinking = launch ? registry.get(launch.id)?.session?.configuredThinkingLevel() ?? "off" : "off";
+				});
 			const definitions = frame.tools ?? [];
 			if (
 				!Array.isArray(definitions) ||
@@ -845,7 +887,7 @@ export async function runExecutorHost(): Promise<void> {
 					signal,
 					eventBus: events,
 					subagentEventBus: events,
-					onProgress: progress => emit({ type: "progress", progress }),
+					onProgress: emitProgress,
 				};
 				modelOwner = nativeOptions;
 				if (type === "workspace_prepare") {
@@ -853,6 +895,7 @@ export async function runExecutorHost(): Promise<void> {
 					return workspace!.snapshot();
 				}
 				const result = await runSubprocess(nativeOptions);
+				await usageTail;
 				await cleanup;
 				await flushTelemetryExport();
 				return result;
@@ -1060,9 +1103,10 @@ export async function runExecutorHost(): Promise<void> {
 								signal: followUpSignal,
 								eventBus: events,
 								subagentEventBus: events,
-								onProgress: progress => emit({ type: "progress", progress }),
+								onProgress: emitProgress,
 							});
 						const result = workspace ? await workspace.followUp(execute) : await execute();
+						await usageTail;
 						await flushTelemetryExport();
 						return result;
 					},

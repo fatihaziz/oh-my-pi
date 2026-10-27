@@ -28,6 +28,8 @@ import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { cfgTaskMaxEffort } from "./settings";
 
+type RetainedEvalLanguage = Exclude<EvalLanguage, "rust">;
+
 /** Authorized catalog choices; credentials remain in the native parent. */
 export function workerModelChoices(owner: ExecutorOptions) {
 	if (!owner.modelRegistry || !owner.settings) throw new Error("Native parent model settings are unavailable");
@@ -71,7 +73,7 @@ export interface ParentMemory {
 /** Retained Eval kernels owned by an ancestor process. */
 export interface ParentEval {
 	/** Backend that runs cells in the ancestor's kernel for `language`. */
-	backend(language: EvalLanguage): ExecutorBackend;
+	backend(language: RetainedEvalLanguage): ExecutorBackend;
 	/**
 	 * Ancestor registry view for one kernel owner, as of launch or that owner's
 	 * latest cell. Model context is built synchronously, so it cannot wait on the parent.
@@ -94,7 +96,7 @@ export interface WorkerServiceTransport {
 
 interface EvalCellRequest {
 	cellId: string;
-	language: EvalLanguage;
+	language: RetainedEvalLanguage;
 	code: string;
 	identity: WorkerIdentity & {
 		kernelOwnerId: string | null;
@@ -116,7 +118,7 @@ interface EvalCellResponse {
 	state: EvalStateSnapshot | null;
 }
 
-const EVAL_LANGUAGES: Record<EvalLanguage, true> = { python: true, js: true };
+const EVAL_LANGUAGES: Record<RetainedEvalLanguage, true> = { python: true, js: true };
 
 // ─── Worker side ────────────────────────────────────────────────────────────
 
@@ -163,8 +165,8 @@ export function createWorkerServiceClients(
 	const initialState = shared.eval?.state ?? undefined;
 	const states = new Map<string | null, EvalStateSnapshot | undefined>();
 	if (shared.eval) {
-		const remote = (local: ExecutorBackend): ExecutorBackend => ({
-			id: local.id,
+		const remote = (local: ExecutorBackend, language: RetainedEvalLanguage): ExecutorBackend => ({
+			id: language,
 			label: local.label,
 			highlightLang: local.highlightLang,
 			// The kernel runs in the parent, which reports unavailability on the first cell.
@@ -182,7 +184,7 @@ export function createWorkerServiceClients(
 				const localProtocol = contextLocalProtocolOptions(opts.session);
 				const request: EvalCellRequest = {
 					cellId,
-					language: local.id,
+					language,
 					code,
 					identity: {
 						...workerIdentity(opts.session),
@@ -216,9 +218,9 @@ export function createWorkerServiceClients(
 				}
 			},
 		});
-		const backends: Record<EvalLanguage, ExecutorBackend> = {
-			python: remote(pythonBackend),
-			js: remote(jsBackend),
+		const backends: Record<RetainedEvalLanguage, ExecutorBackend> = {
+			python: remote(pythonBackend, "python"),
+			js: remote(jsBackend, "js"),
 		};
 		services.eval = {
 			backend: language => backends[language],

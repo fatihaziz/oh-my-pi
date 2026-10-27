@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, type Context, Effort, type ImageContent, type Model } from "@oh-my-pi/pi-ai";
@@ -12,6 +12,9 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { registerHostedModelRouting, type HostedModelRoutingDecision } from "@oh-my-pi/pi-coding-agent/session/hosted-model-routing";
+import { setModelRequestPolicy } from "@oh-my-pi/pi-ai/model-request-policy";
+import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { AUTO_THINKING, resolveProvisionalAutoLevel } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -864,5 +867,217 @@ describe("AgentSession model persistence", () => {
 				EPHEMERAL_MODEL_CHANGE_ROLE,
 			),
 		).toEqual(["anthropic/claude-sonnet-4-5"]);
+	});
+	describe("hosted routing", () => {
+		const fingerprint = "a".repeat(64);
+		const diagnostics = { coldInputTokens: 0, lastCacheReadTokens: null, switchPenalty: 5, scoreAdvantage: 30, cacheHitRatio: 1, unknowns: [], scores: [], learningRevision: "fixture" };
+		let unregister: (() => void) | undefined;
+		const originalFetch = globalThis.fetch;
+		beforeEach(() => {
+			globalThis.fetch = Object.assign(async () => { throw new Error("Real provider transport is forbidden in hosted routing fixtures"); }, { preconnect() {} }) as typeof fetch;
+			setModelRequestPolicy(async () => {});
+		});
+		afterEach(() => { unregister?.(); unregister = undefined; setModelRequestPolicy(undefined); globalThis.fetch = originalFetch; });
+
+		it("selects before the first provider snapshot, preserves settings, and does not reroute a continuation", async () => {
+			const { session, settings } = await createSession();
+			const target = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			let calls = 0;
+			unregister = registerHostedModelRouting(session.sessionId, async input => {
+				calls++;
+				return { kind: "switch", boundaryId: input.boundaryId, policyFingerprint: fingerprint, selector: modelValue(target),
+					thinking: Effort.High, reason: "Fixture capability advantage.", categoryWeights: { implementation: 1 }, diagnostics };
+			});
+			session.updateHostedModelRoutingPolicy({ profileId: 1, policyFingerprint: fingerprint, mode: "auto", executionAuto: true, executionStopped: false });
+			const selected: string[] = [];
+			session.agent.streamFn = (model) => {
+				selected.push(modelValue(model));
+				expect(session.thinkingLevel).toBe(Effort.High);
+				const stream = new AssistantMessageEventStream();
+				const message = { ...createAssistantMessage("done"), provider: model.provider, model: model.id };
+				if(selected.length===1){message.content=[{type:"toolCall",id:"fixture-read",name:"absent_fixture_tool",arguments:{}}];message.stopReason="toolUse";}
+				stream.push({ type: "done", reason: selected.length === 1 ? "toolUse" : "stop", message }); stream.end(message); return stream;
+			};
+			const previous = settings.getModelRole("default");
+			await session.prompt("Implement this local fixture.");
+			expect(selected).toEqual([modelValue(target), modelValue(target)]);
+			expect(calls).toBe(1);
+			expect(settings.getModelRole("default")).toBe(previous);
+			expect(session.getHostedModelRoutingState().mode).toBe("auto");
+		});
+
+		it.each(["manual", "effort", "stop", "policy", "disconnect", "abort"] as const)("rejects a late decision after %s", async action => {
+			const { session } = await createSession();
+			const initial = session.model!;
+			const target = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const waiting = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			let acknowledged = 0;
+			session.subscribeHostedModelRouting((_state,decision)=>{if(decision)acknowledged++;});
+			unregister = registerHostedModelRouting(session.sessionId, async input => {
+				waiting.resolve(); await release.promise;
+				return { kind: "switch", boundaryId: input.boundaryId, policyFingerprint: fingerprint, selector: modelValue(target),
+					thinking: Effort.High, reason: "Late fixture.", categoryWeights: { implementation: 1 }, diagnostics };
+			});
+			const policy = { profileId: 1, policyFingerprint: fingerprint, mode: "auto" as const, executionAuto: true, executionStopped: false };
+			session.updateHostedModelRoutingPolicy(policy);
+			session.agent.streamFn = model => {
+				expect(modelValue(model)).toBe(modelValue(initial));
+				const stream = new AssistantMessageEventStream(); const message=createAssistantMessage("done");
+				stream.push({type:"done",reason:"stop",message});stream.end(message);return stream;
+			};
+			const running = session.prompt("Run the offline boundary.").catch(error=>{if(action!=="abort")throw error;});
+			await waiting.promise;
+			if(action==="manual")await session.setModelTemporary(initial);
+			if(action==="effort")session.setThinkingLevel(Effort.Low);
+			if(action==="stop")session.updateHostedModelRoutingPolicy({...policy,executionStopped:true});
+			if(action==="policy")session.updateHostedModelRoutingPolicy({...policy,policyFingerprint:"b".repeat(64)});
+			if(action==="disconnect"){unregister();unregister=undefined;session.disconnectHostedModelRouting();}
+			const abort=action==="abort"?session.abort():undefined;
+			release.resolve();await running;await abort;
+			expect(session.model?.id).toBe(initial.id);
+			expect(acknowledged).toBe(0);
+			if(action==="manual"||action==="effort")expect(session.getHostedModelRoutingState().mode).toBe("pinned");
+		});
+
+		it("keeps a same-model manual pin while automatic metadata is awaiting", async () => {
+			const {session,modelRegistry,settings}=await createSession();
+			const initial=session.model!,target=getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const entered=Promise.withResolvers<void>(),release=Promise.withResolvers<void>();
+			const original=modelRegistry.refreshSelectedModelMetadata.bind(modelRegistry);
+			const metadata=spyOn(modelRegistry,"refreshSelectedModelMetadata").mockImplementation(async model=>{
+				if(model.id===target.id){entered.resolve();await release.promise;}
+				return original(model);
+			});
+			unregister=registerHostedModelRouting(session.sessionId,async input=>({kind:"switch",boundaryId:input.boundaryId,policyFingerprint:fingerprint,selector:modelValue(target),thinking:Effort.High,reason:"metadata race",categoryWeights:{implementation:1},diagnostics}));
+			session.updateHostedModelRoutingPolicy({profileId:1,policyFingerprint:fingerprint,mode:"auto",executionAuto:true,executionStopped:false});
+			const dispatched:string[]=[];
+			session.agent.streamFn=model=>{
+				dispatched.push(modelValue(model));
+				const stream=new AssistantMessageEventStream(),message={...createAssistantMessage("done"),provider:model.provider,model:model.id};
+				stream.push({type:"done",reason:"stop",message});stream.end(message);return stream;
+			};
+			const before=settings.getModelRole("default");
+			try{
+				const running=session.prompt("Route this fixture.");
+				await entered.promise;
+				await session.setModelTemporary(initial);
+				release.resolve();await running;
+				expect(dispatched).toEqual([modelValue(initial)]);
+				expect(session.getHostedModelRoutingState().mode).toBe("pinned");
+				expect(settings.getModelRole("default")).toBe(before);
+				expect(session.sessionManager.getBranch().some(entry=>entry.type==="custom"&&entry.customType==="foyer:model-routing-decision")).toBe(false);
+			}finally{release.resolve();metadata.mockRestore();}
+		});
+
+		it.each(["effort","stop"] as const)("does not publish stale automatic state after %s during reconciliation",async action=>{
+			const {session}=await createSession();
+			const target=getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const entered=Promise.withResolvers<void>(),release=Promise.withResolvers<void>();
+			let held=false,acknowledged=0;
+			const original=SessionMaintenance.prototype.renderArchiveForModel;
+			const archive=spyOn(SessionMaintenance.prototype,"renderArchiveForModel").mockImplementation(async function(this: SessionMaintenance, messages){
+				if(!held&&session.model?.id===target.id){held=true;entered.resolve();await release.promise;}
+				return original.call(this,messages);
+			});
+			unregister=registerHostedModelRouting(session.sessionId,async input=>({kind:"switch",boundaryId:input.boundaryId,policyFingerprint:fingerprint,selector:modelValue(target),thinking:Effort.High,reason:"reconciliation race",categoryWeights:{implementation:1},diagnostics}));
+			const policy={profileId:1,policyFingerprint:fingerprint,mode:"auto" as const,executionAuto:true,executionStopped:false};
+			session.updateHostedModelRoutingPolicy(policy);
+			session.subscribeHostedModelRouting((_state,decision)=>{if(decision)acknowledged++;});
+			session.agent.streamFn=model=>{
+				const stream=new AssistantMessageEventStream(),message={...createAssistantMessage("done"),provider:model.provider,model:model.id};
+				stream.push({type:"done",reason:"stop",message});stream.end(message);return stream;
+			};
+			const before=session.configuredThinkingLevel();
+			try{
+				const running=session.prompt("Route this fixture.");
+				await entered.promise;
+				if(action==="effort")session.setThinkingLevel(Effort.Low);else session.updateHostedModelRoutingPolicy({...policy,executionStopped:true});
+				release.resolve();await running;
+				expect(session.configuredThinkingLevel()).toBe(action==="effort"?Effort.Low:before);
+				expect(acknowledged).toBe(0);
+				expect(session.sessionManager.getBranch().some(entry=>entry.type==="custom"&&entry.customType==="foyer:model-routing-decision")).toBe(false);
+			}finally{release.resolve();archive.mockRestore();}
+		});
+
+		it("retains the warm cache and transport for an unchanged route",async()=>{
+			const {session}=await createSession();
+			const initial=session.model!,thinking=session.configuredThinkingLevel()??"off";
+			let closed=0;
+			const transport={close(){closed++;}};
+			session.providerSessionState.set(`anthropic:${initial.provider}`,transport);
+			session.agent.promptCacheKey="fixture-warm-cache";
+			unregister=registerHostedModelRouting(session.sessionId,async input=>({kind:"switch",boundaryId:input.boundaryId,policyFingerprint:fingerprint,selector:modelValue(initial),thinking,reason:"same route",categoryWeights:{implementation:1},diagnostics}));
+			session.updateHostedModelRoutingPolicy({profileId:1,policyFingerprint:fingerprint,mode:"auto",executionAuto:true,executionStopped:false});
+			session.agent.streamFn=model=>{
+				expect(session.agent.promptCacheKey).toBe("fixture-warm-cache");
+				const stream=new AssistantMessageEventStream(),message={...createAssistantMessage("done"),provider:model.provider,model:model.id};
+				stream.push({type:"done",reason:"stop",message});stream.end(message);return stream;
+			};
+			await session.prompt("Continue on the same route.");
+			expect(closed).toBe(0);
+			expect(session.providerSessionState.get(`anthropic:${initial.provider}`)).toBe(transport);
+		});
+
+		it("blocks an undersized target before dispatch",async()=>{
+			const {session,modelRegistry}=await createSession();
+			const initial=session.model!,target=getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const original=modelRegistry.find.bind(modelRegistry);
+			const find=spyOn(modelRegistry,"find").mockImplementation((provider,id)=>id===target.id?{...target,contextWindow:1}:original(provider,id));
+			unregister=registerHostedModelRouting(session.sessionId,async input=>({kind:"switch",boundaryId:input.boundaryId,policyFingerprint:fingerprint,selector:modelValue(target),thinking:Effort.High,reason:"undersized fixture",categoryWeights:{implementation:1},diagnostics}));
+			session.updateHostedModelRoutingPolicy({profileId:1,policyFingerprint:fingerprint,mode:"auto",executionAuto:true,executionStopped:false});
+			let dispatched=0;session.agent.streamFn=()=>{dispatched++;throw Error("Undersized model reached provider");};
+			try{
+				await session.prompt("This context cannot fit in one token.").catch(()=>{});
+				expect(dispatched).toBe(0);
+				expect(session.model?.id).toBe(initial.id);
+				expect(session.getHostedModelRoutingState().state).toBe("blocked");
+			}finally{find.mockRestore();}
+		});
+
+		it("restores an explicit pin without restoring execution authority",async()=>{
+			const {session}=await createSession();
+			session.sessionManager.appendCustomEntry("foyer:model-routing-mode",{mode:"pinned"});
+			unregister=registerHostedModelRouting(session.sessionId,async()=>{throw Error("A restored pin cannot auto-route");});
+			session.updateHostedModelRoutingPolicy({profileId:1,policyFingerprint:fingerprint,mode:"auto",executionAuto:false,executionStopped:true});
+			expect(session.getHostedModelRoutingState()).toMatchObject({mode:"pinned",executionAuto:false,executionStopped:true});
+			session.setHostedModelRoutingMode("auto");
+			expect(session.sessionManager.getBranch().filter(entry=>entry.type==="custom"&&entry.customType==="foyer:model-routing-mode").at(-1)).toMatchObject({data:{mode:"auto"}});
+		});
+
+		it("rejects a pending decision when switching the session",async()=>{
+			const {session}=await createSession({persist:true});
+			const target=getAnthropicModelOrThrow("claude-sonnet-4-6"),initial=session.model!;
+			const entered=Promise.withResolvers<void>(),release=Promise.withResolvers<void>(),aborted=Promise.withResolvers<void>();
+			unregister=registerHostedModelRouting(session.sessionId,async(input,signal)=>{
+				signal?.addEventListener("abort",()=>aborted.resolve(),{once:true});entered.resolve();await release.promise;
+				return {kind:"switch",boundaryId:input.boundaryId,policyFingerprint:fingerprint,selector:modelValue(target),thinking:Effort.High,reason:"late session",categoryWeights:{implementation:1},diagnostics};
+			});
+			session.updateHostedModelRoutingPolicy({profileId:1,policyFingerprint:fingerprint,mode:"auto",executionAuto:true,executionStopped:false});
+			session.agent.streamFn=()=>{throw Error("Switched session dispatched stale work");};
+			const file=await writeRoleModelSession(modelValue(initial),modelValue(initial),"default");
+			const running=session.prompt("Switch before routing completes.").catch(()=>{});
+			await entered.promise;
+			const switching=session.switchSession(file);
+			await aborted.promise;release.resolve();await running;await switching;
+			expect(session.sessionManager.getSessionFile()).toBe(file);
+			expect(session.model?.id).toBe(initial.id);
+			expect(session.getHostedModelRoutingState().state).toBe("offline");
+			expect(session.sessionManager.getBranch().some(entry=>entry.type==="custom"&&entry.customType==="foyer:model-routing-decision")).toBe(false);
+		});
+
+		it("Use Auto does not resume stopped execution or execution Auto OFF", async () => {
+			const { session } = await createSession();
+			let calls=0;
+			unregister=registerHostedModelRouting(session.sessionId,async input=>{
+				calls++;
+				return {kind:"retain",boundaryId:input.boundaryId,policyFingerprint:fingerprint,reason:"retain",categoryWeights:{implementation:1},diagnostics} satisfies HostedModelRoutingDecision;
+			});
+			session.updateHostedModelRoutingPolicy({profileId:1,policyFingerprint:fingerprint,mode:"manual",executionAuto:false,executionStopped:true});
+			session.setHostedModelRoutingMode("auto");
+			expect(session.getHostedModelRoutingState()).toMatchObject({mode:"auto",executionAuto:false,executionStopped:true});
+			expect(session.getHostedModelRoutingState().pending).toBeUndefined();
+			expect(calls).toBe(0);
+		});
 	});
 });

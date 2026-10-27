@@ -84,6 +84,12 @@ import type {
 import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
+import { checkModelRequestPolicy } from "@oh-my-pi/pi-ai/model-request-policy";
+import {
+	hasHostedModelRouting, requestHostedModelRouting,
+	type HostedModelRoutingPolicy, type HostedModelRoutingState,
+	type HostedModelRoutingRequest, type HostedModelRoutingDecision,
+} from "./hosted-model-routing";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -1203,6 +1209,17 @@ export class AgentSession implements SettingsScope {
 	 *  enqueue and fold/resume normally across an in-session interrupt, only a session identity
 	 *  change should drop them. */
 	#sessionGeneration = 0;
+	#routingMode: "auto" | "pinned" = "auto";
+	#routingExplicit = false;
+	#routingRevision = 0;
+	#routingSequence = 0;
+	#routingPolicy: HostedModelRoutingPolicy | undefined;
+	#routingPending: { boundaryId: string; trigger: HostedModelRoutingRequest["trigger"]; prompt: string } | undefined;
+	#routingStatus: HostedModelRoutingState["state"] = "offline";
+	#routingReason = "Hosted model routing is offline.";
+	#routingDiagnostics: HostedModelRoutingState["diagnostics"];
+	#routingListeners = new Set<(state: HostedModelRoutingState, decision?: HostedModelRoutingDecision) => void>();
+	#detachHostedRouting: (() => void) | undefined;
 	/** Latest `session_init` of the transcript the model calls ran on; `init` is null when it has none. */
 	#sessionInit: { sessionFile: string | undefined; init: PersistedSessionInit | null } | undefined;
 	/** Settles when switchSession commits or restores its previous generation on rollback.
@@ -2024,10 +2041,10 @@ export class AgentSession implements SettingsScope {
 			promptGeneration: () => this.#promptGeneration,
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
-			setModelWithProviderSessionReset: async (model, selection = "explicit") => {
-				await this.#setModelWithProviderSessionReset(model);
+			setModelWithProviderSessionReset: async (model, selection = "explicit", guard) => {
+				await this.#setModelWithProviderSessionReset(model, guard);
 				// Only a completed explicit selection, including same-model reselection, takes ownership.
-				if (selection === "explicit") this.#prewalk.releaseHandoff();
+				if (selection === "explicit" && (!guard || guard())) this.#prewalk.releaseHandoff();
 			},
 			clearActiveRetryFallback: () => this.#recovery.clearActiveRetryFallback(),
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
@@ -2117,6 +2134,8 @@ export class AgentSession implements SettingsScope {
 			}
 		});
 		this.agent.prepareQueuedMessages = this.#prepareQueuedUserMessages;
+		this.#detachHostedRouting = this.agent.addBeforeModelCallHook((signal, context) =>
+			this.#routeHostedModel(context.messages, signal));
 		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
 			if (!cfgRetryUsageAwareFallback.get(this.settings)) return;
 			if (this.#usagePreflightReadyForNextModelCall) {
@@ -5984,6 +6003,9 @@ export class AgentSession implements SettingsScope {
 		this.#detachUsageBeforeQueueDequeue = undefined;
 		this.#detachUsageBeforeModelCall?.();
 		this.#detachUsageBeforeModelCall = undefined;
+		this.#detachHostedRouting?.();
+		this.#detachHostedRouting = undefined;
+		this.disconnectHostedModelRouting();
 		if (this.agent.prepareQueuedMessages === this.#prepareQueuedUserMessages) {
 			this.agent.prepareQueuedMessages = undefined;
 		}
@@ -8303,7 +8325,7 @@ export class AgentSession implements SettingsScope {
 		if (queue === "followUp" && userMessages.some(message => this.#isAutoPrewalkTask(message))) {
 			return this.#prepareQueuedAutoPrewalkTask(first, promptText, preparationImages, signal);
 		}
-		return this.#prepareAgentStart(first, promptText, preparationImages, this.#promptGeneration, signal, "queued");
+		return this.#prepareAgentStart(first, promptText, preparationImages, this.#promptGeneration, signal, "queued", false);
 	};
 
 	/**
@@ -8352,6 +8374,7 @@ export class AgentSession implements SettingsScope {
 		generation: number,
 		signal: AbortSignal | undefined,
 		origin: "direct" | "queued",
+		routingBoundary = true,
 	): Promise<QueuedMessagePreparation & { baseXdevCatalogDelivered: boolean }> {
 		const sessionGeneration = this.#sessionGeneration;
 		const alreadyDisposing = this.#isDisposed && origin === "direct";
@@ -8443,6 +8466,7 @@ export class AgentSession implements SettingsScope {
 						this.#tools.clearTurnSystemPromptOverride();
 						this.agent.setSystemPrompt(this.#tools.baseSystemPrompt);
 					}
+					if (routingBoundary && this.#isAutoPrewalkTask(message)) this.#stageHostedRouting("operator", prompt);
 					return messages;
 				},
 			};
@@ -10731,6 +10755,7 @@ export class AgentSession implements SettingsScope {
 			for (const controller of this.#imageDescriptionAbortControllers) controller.abort(options?.reason);
 			this.abortRetry();
 			this.#promptGeneration++;
+			this.#beginExplicitModelSelection();
 			// Cancel any awaited pre-dispatch setup (e.g. Hindsight auto-recall) so the
 			// admitted submission unwinds now instead of at the recall timeout (#12668).
 			this.#promptSetupAbortController?.abort(options?.reason);
@@ -10895,6 +10920,9 @@ export class AgentSession implements SettingsScope {
 			// outgoing session also drops its record instead of landing in this new one.
 			this.#irc.clearPending();
 			this.#sessionGeneration++;
+			this.disconnectHostedModelRouting();
+			this.#routingExplicit = false;
+			this.#routingMode = "auto";
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
@@ -11129,21 +11157,208 @@ export class AgentSession implements SettingsScope {
 			persist?: boolean;
 		},
 	): Promise<{ switched: boolean }> {
-		return this.#models.setModel(model, role, options);
+		const revision = this.#beginExplicitModelSelection();
+		const result = await this.#models.setModel(model, role, options);
+		this.#finishExplicitModelSelection(revision);
+		return result;
+	}
+
+	getHostedModelRoutingState(): HostedModelRoutingState {
+		const policy = this.#routingPolicy;
+		return {
+			mode: this.#routingMode, selectionRevision: this.#routingRevision,
+			profileId: policy?.profileId ?? 0, policyFingerprint: policy?.policyFingerprint ?? "",
+			executionAuto: policy?.executionAuto ?? false, executionStopped: policy?.executionStopped ?? true,
+			current: { selector: this.model ? `${this.model.provider}/${this.model.id}` : "", thinking: this.configuredThinkingLevel() ?? "off" },
+			state: this.#routingStatus, reason: this.#routingReason,
+			pending: this.#routingPending && { boundaryId: this.#routingPending.boundaryId, trigger: this.#routingPending.trigger },
+			diagnostics: this.#routingDiagnostics,
+		};
+	}
+
+	subscribeHostedModelRouting(listener: (state: HostedModelRoutingState, decision?: HostedModelRoutingDecision) => void): () => void {
+		this.#routingListeners.add(listener);
+		return () => { this.#routingListeners.delete(listener); };
+	}
+
+	#publishHostedRouting(decision?: HostedModelRoutingDecision): void {
+		const state = this.getHostedModelRoutingState();
+		for (const listener of this.#routingListeners) listener(state, decision);
+	}
+
+	updateHostedModelRoutingPolicy(input: HostedModelRoutingPolicy): void {
+		if (!hasHostedModelRouting(this.sessionId)) throw new Error("Hosted model routing has no authenticated owner");
+		if (!Number.isSafeInteger(input.profileId) || input.profileId <= 0 || !/^[a-f0-9]{64}$/.test(input.policyFingerprint) ||
+			!["auto", "manual"].includes(input.mode) || typeof input.executionAuto !== "boolean" || typeof input.executionStopped !== "boolean") throw new Error("Invalid hosted routing policy");
+		if (JSON.stringify(input) === JSON.stringify(this.#routingPolicy)) return;
+		this.#routingRevision++;
+		this.#routingPending = undefined;
+		if (!this.#routingPolicy && !this.#routingExplicit) {
+			for (const entry of this.sessionManager.getBranch()) {
+				if (entry.type === "custom" && entry.customType === "foyer:model-routing-mode" && isRecord(entry.data) &&
+					(entry.data.mode === "auto" || entry.data.mode === "pinned")) {
+					this.#routingMode = entry.data.mode;
+					this.#routingExplicit = true;
+				}
+			}
+		}
+		this.#routingPolicy = { ...input };
+		if (!this.#routingExplicit) this.#routingMode = input.mode === "auto" ? "auto" : "pinned";
+		this.#routingStatus = this.#routingMode === "pinned" ? "pinned" : "idle";
+		this.#routingReason = input.executionStopped ? "Execution is stopped." : !input.executionAuto ? "Execution Auto is off." : "Profile policy updated.";
+		this.#stageHostedRouting("policy_change", "");
+		this.#publishHostedRouting();
+	}
+
+	disconnectHostedModelRouting(): void {
+		this.#routingRevision++;
+		this.#routingPolicy = undefined;
+		this.#routingPending = undefined;
+		this.#routingStatus = "offline";
+		this.#routingReason = "Hosted model routing is offline.";
+		this.#publishHostedRouting();
+	}
+
+	setHostedModelRoutingMode(mode: "auto" | "pinned"): void {
+		if (!hasHostedModelRouting(this.sessionId) || !this.#routingPolicy) throw new Error("Hosted model routing is offline.");
+		if (mode !== "auto" && mode !== "pinned") throw new Error("Invalid model routing mode");
+		this.#routingRevision++;
+		this.#routingPending = undefined;
+		this.#routingExplicit = true;
+		this.#routingMode = mode;
+		this.#routingStatus = mode === "pinned" ? "pinned" : "idle";
+		this.#routingReason = mode === "pinned" ? "Model selected by operator." : "Auto will select at the next request.";
+		this.sessionManager.appendCustomEntry("foyer:model-routing-mode", { mode });
+		if (mode === "auto") this.#stageHostedRouting("resume_auto", "");
+		this.#publishHostedRouting();
+	}
+
+	#stageHostedRouting(trigger: HostedModelRoutingRequest["trigger"], prompt: string): void {
+		const policy = this.#routingPolicy;
+		if (!policy || !hasHostedModelRouting(this.sessionId) || this.#routingMode !== "auto" || !policy.executionAuto || policy.executionStopped || this.#agentKind !== "main") return;
+		this.#routingPending = {
+			boundaryId: `${this.sessionId}:${this.#sessionGeneration}:${this.#promptGeneration}:${++this.#routingSequence}`,
+			trigger, prompt: truncateMiddle(prompt, { maxBytes: 8192, maxHeadBytes: 6144 }).content,
+		};
+	}
+
+	#beginExplicitModelSelection(): number {
+		this.#routingPending = undefined;
+		return ++this.#routingRevision;
+	}
+
+	#finishExplicitModelSelection(revision: number): void {
+		if (revision === this.#routingRevision && this.#routingPolicy && hasHostedModelRouting(this.sessionId)) this.setHostedModelRoutingMode("pinned");
+	}
+
+	async #routeHostedModel(messages: AgentMessage[], signal?: AbortSignal): Promise<void> {
+		const pending = this.#routingPending;
+		const policy = this.#routingPolicy;
+		if (!hasHostedModelRouting(this.sessionId)) return;
+		if (!policy) throw new Error("Hosted model routing is offline.");
+		if (!pending) return;
+		this.#routingPending = undefined;
+		const revision = this.#routingRevision;
+		const generation = this.#promptGeneration;
+		const sessionGeneration = this.#sessionGeneration;
+		const guard = () => !signal?.aborted && !this.#isDisposed && this.#routingRevision === revision &&
+			this.#promptGeneration === generation && this.#sessionGeneration === sessionGeneration &&
+			this.#routingPolicy === policy && this.#routingMode === "auto" && policy.executionAuto &&
+			!policy.executionStopped && hasHostedModelRouting(this.sessionId);
+		if (!guard()) return;
+		const current = this.getHostedModelRoutingState().current;
+		const operatorContext: string[] = [];
+		let lastResponse: HostedModelRoutingRequest["lastResponse"] = null;
+		let remaining = 8100;
+		const entries = this.sessionManager.getBranch();
+		for (let index = entries.length - 1; index >= 0 && (!lastResponse || operatorContext.length < 6); index--) {
+			const entry = entries[index];
+			if (entry.type !== "message") continue;
+			const message = entry.message;
+			if (message.role !== "user" && message.role !== "assistant") continue;
+			if (message.role === "user" && (message.synthetic || message.attribution === "agent")) continue;
+			if (message.role === "assistant" && message.stopReason !== "error" && message.stopReason !== "aborted" && message.content.length && !lastResponse) {
+				const usage = message.usage;
+				lastResponse = { entryId: entry.id, selector: `${message.provider}/${message.model}`, input: usage.input ?? null,
+					output: usage.output ?? null, cacheRead: usage.cacheRead ?? null, cacheWrite: usage.cacheWrite ?? null };
+			}
+			if (operatorContext.length >= 6 || remaining <= 0) continue;
+			const text = typeof message.content === "string" ? message.content : message.content.flatMap(part => part.type === "text" ? [part.text] : []).join("\n");
+			if (!text) continue;
+			const bounded = truncateMiddle(text, { maxBytes: Math.min(2048, remaining), maxHeadBytes: Math.min(1536, remaining) }).content;
+			remaining -= Buffer.byteLength(bounded);
+			operatorContext.unshift(`${message.role}: ${bounded}`);
+		}
+		const promptTokens = computeNonMessageTokens(this, this.agent.tokenizer, this.settings.revision) +
+			this.agent.tokenizer.countMessages(messages, { excludeEncryptedReasoning: true });
+		const input: HostedModelRoutingRequest = {
+			sessionId: this.sessionId, boundaryId: pending.boundaryId, promptGeneration: generation,
+			selectionRevision: revision, trigger: pending.trigger, current, prompt: pending.prompt, operatorContext,
+			requirements: { input: messages.some(message => "content" in message && Array.isArray(message.content) && message.content.some(part => part.type === "image")) ? ["text", "image"] : ["text"], tools: this.agent.state.tools.length > 0 },
+			promptTokens: Number.isFinite(promptTokens) && promptTokens >= 0 ? promptTokens : null, lastResponse,
+		};
+		this.#routingStatus = "selecting";
+		this.#routingReason = "Selecting a model for this request.";
+		this.#publishHostedRouting();
+		try {
+			const decision = await requestHostedModelRouting(input, signal);
+			if (!guard()) return;
+			if (!decision || decision.policyFingerprint !== policy.policyFingerprint) throw new Error("Model routing policy changed.");
+			if (decision.kind === "blocked") throw new Error(decision.reason);
+			if (decision.kind === "switch") {
+				const separator = decision.selector.indexOf("/");
+				const model = this.#modelRegistry.find(decision.selector.slice(0, separator), decision.selector.slice(separator + 1));
+				if (!model || input.promptTokens === null || model.contextWindow === null || !(model.contextWindow > 0) || input.promptTokens > 0.8 * model.contextWindow) throw new Error("No permitted compatible model is available for this context.");
+				const applied = await this.#models.applyHostedSelection(model, decision.thinking,
+					async () => {
+						const refreshed = this.#modelRegistry.find(model.provider, model.id);
+						if (!refreshed || input.promptTokens === null || refreshed.contextWindow === null || !(refreshed.contextWindow > 0) || input.promptTokens > 0.8 * refreshed.contextWindow) throw new Error("No permitted compatible model is available for this context.");
+						await checkModelRequestPolicy(decision.selector, signal, decision.policyFingerprint);
+					}, guard);
+				if (applied === "stale" || !guard()) return;
+			} else {
+				await checkModelRequestPolicy(current.selector, signal, decision.policyFingerprint);
+				if (!guard()) return;
+			}
+			this.#routingStatus = "idle";
+			this.#routingReason = decision.reason;
+			this.#routingDiagnostics = decision.diagnostics;
+			this.sessionManager.appendCustomEntry("foyer:model-routing-decision", { ...decision, prior: current, resolved: this.getHostedModelRoutingState().current });
+			this.#publishHostedRouting(decision);
+		} catch (error) {
+			if (!guard()) return;
+			this.#routingStatus = "blocked";
+			this.#routingReason = error instanceof Error ? error.message : String(error);
+			this.#publishHostedRouting();
+			throw error;
+		}
 	}
 
 	/** Selects a model for this session without updating persisted model settings. */
-	setModelTemporary(
+	async setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
-		options?: { ephemeral?: boolean },
+		options?: { ephemeral?: boolean; guard?: () => boolean },
 	): Promise<void> {
-		return this.#models.setModelTemporary(model, thinkingLevel, options);
+		const revision = this.#beginExplicitModelSelection();
+		if (options?.guard) {
+			const sessionGeneration = this.#sessionGeneration;
+			const policy = this.#routingPolicy;
+			const guard = () => options.guard!() && !this.#isDisposed && revision === this.#routingRevision &&
+				sessionGeneration === this.#sessionGeneration && policy === this.#routingPolicy;
+			const result = await this.#models.applyHostedSelection(model, thinkingLevel ?? this.configuredThinkingLevel() ?? "off",
+				() => checkModelRequestPolicy(`${model.provider}/${model.id}`, undefined, policy?.policyFingerprint), guard);
+			if (result === "stale" || !guard()) return;
+		} else await this.#models.setModelTemporary(model, thinkingLevel, options);
+		this.#finishExplicitModelSelection(revision);
 	}
 
 	/** Cycles the scoped model set, or all available models when no scope exists. */
-	cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
-		return this.#models.cycleModel(direction);
+	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
+		const revision = this.#beginExplicitModelSelection();
+		const result = await this.#models.cycleModel(direction);
+		if (result) this.#finishExplicitModelSelection(revision);
+		return result;
 	}
 
 	/** Resolves configured role models and the currently active role index. */
@@ -11152,16 +11367,21 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Applies a resolved role model without changing global settings. */
-	applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
-		return this.#models.applyRoleModel(entry);
+	async applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
+		const revision = this.#beginExplicitModelSelection();
+		await this.#models.applyRoleModel(entry);
+		this.#finishExplicitModelSelection(revision);
 	}
 
 	/** Cycles the configured role models in the supplied order. */
-	cycleRoleModels(
+	async cycleRoleModels(
 		roleOrder: readonly string[],
 		direction: "forward" | "backward" = "forward",
 	): Promise<RoleModelCycleResult | undefined> {
-		return this.#models.cycleRoleModels(roleOrder, direction);
+		const revision = this.#beginExplicitModelSelection();
+		const result = await this.#models.cycleRoleModels(roleOrder, direction);
+		if (result) this.#finishExplicitModelSelection(revision);
+		return result;
 	}
 
 	/** Lists available models after applying the configured enabled-model filter. */
@@ -11171,14 +11391,19 @@ export class AgentSession implements SettingsScope {
 
 	/** Selects the session thinking level and optionally persists it as the default. */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
+		const revision = this.#beginExplicitModelSelection();
 		this.#prewalk.releaseHandoff();
 		this.#models.setThinkingLevel(level, persist);
+		this.#finishExplicitModelSelection(revision);
 	}
 
 	/** Advances through the thinking selectors supported by the active model. */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined {
+		const revision = this.#beginExplicitModelSelection();
 		this.#prewalk.releaseHandoff();
-		return this.#models.cycleThinkingLevel();
+		const result = this.#models.cycleThinkingLevel();
+		if (result !== undefined) this.#finishExplicitModelSelection(revision);
+		return result;
 	}
 
 	/** Lists all selectable effort selectors for the active model. */
@@ -11754,7 +11979,8 @@ export class AgentSession implements SettingsScope {
 		}
 	}
 
-	async #setModelWithProviderSessionReset(model: Model): Promise<void> {
+	async #setModelWithProviderSessionReset(model: Model, guard?: () => boolean): Promise<void> {
+		if (guard && !guard()) return;
 		const currentModel = this.model;
 		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
 		if (currentModel) {
@@ -11781,10 +12007,11 @@ export class AgentSession implements SettingsScope {
 			this.#emit({ type: "model_changed" });
 		}
 
-		await this.#reconcileModelDependentState(model);
+		await this.#reconcileModelDependentState(model, guard);
 	}
 
-	async #reconcileModelDependentState(model: Model): Promise<void> {
+	async #reconcileModelDependentState(model: Model, guard?: () => boolean): Promise<void> {
+		if (guard && !guard()) return;
 		// Re-evaluate append-only context mode — provider or setting may have changed
 		this.#syncAppendOnlyContext(model);
 
@@ -11793,6 +12020,7 @@ export class AgentSession implements SettingsScope {
 		} catch (error) {
 			logger.warn("snapcompact archive view after model change failed", { error: String(error) });
 		}
+		if (guard && !guard()) return;
 
 		try {
 			await this.#tools.reconcileThinkTool();
@@ -12686,6 +12914,9 @@ export class AgentSession implements SettingsScope {
 			this.#models.restoreServiceTiers(
 				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
 			);
+			this.disconnectHostedModelRouting();
+			this.#routingExplicit = false;
+			this.#routingMode = "auto";
 
 			if (switchingToDifferentSession) {
 				await this.#memory.resetContextForNewTranscript();

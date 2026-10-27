@@ -91,6 +91,33 @@ async function warmEval(evalTool: EvalTool, language: "js" | "py"): Promise<void
 	// startup cannot hide whether the delegated call reached execution.
 	await evalTool.execute("warmup", { language, code: "print('ready')", timeout: 0 });
 }
+it.skipIf(!Bun.which("rust-script"))(
+	"runs Rust cells and reports compilation errors",
+	async () => {
+		const tool = new EvalTool(makeSession());
+		const success = await tool.execute("rust-success", {
+			language: "rust",
+			code: 'println!("rust cell {}", 42);',
+			timeout: 120,
+		});
+		expect(success.details?.isError).not.toBe(true);
+		expect(JSON.stringify(success.content)).toContain("rust cell 42");
+		const failure = await tool.execute("rust-failure", {
+			language: "rust",
+			code: 'let value: u8 = "wrong";',
+			timeout: 120,
+		});
+		expect(failure.details?.isError).toBe(true);
+		expect(JSON.stringify(failure.content)).toContain("mismatched types");
+		const cancelled = await tool.execute(
+			"rust-cancel",
+			{ language: "rust", code: "std::thread::sleep(std::time::Duration::from_secs(60));", timeout: 0 },
+			AbortSignal.timeout(1000),
+		);
+		expect(cancelled.details?.isError).toBe(true);
+	},
+	180_000,
+);
 
 // Real Python kernels only under PI_PYTHON_INTEGRATION=1, like the other real-kernel suites.
 const PYTHON_INTEGRATION = Bun.env.PI_PYTHON_INTEGRATION === "1";

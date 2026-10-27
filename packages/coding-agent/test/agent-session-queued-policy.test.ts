@@ -28,6 +28,7 @@ import type { AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SessionProviderBoundary } from "@oh-my-pi/pi-coding-agent/session/session-provider-boundary";
+import { registerHostedModelRouting } from "@oh-my-pi/pi-coding-agent/session/hosted-model-routing";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -1030,6 +1031,26 @@ describe("queued user delivery policy", () => {
 		expect(requests.map(request => request.systemPrompt)).toEqual([
 			[...BASE, "policy:new session", "independent policy"],
 		]);
+	});
+
+	it.each(["steer","followUp"] as const)("hosted routing consumes only admitted queued %s boundaries",async delivery=>{
+		const entered=Promise.withResolvers<void>(),release=Promise.withResolvers<void>();
+		const {agent}=setup([{content:[{type:"toolCall",name:"work",arguments:{}}]},{content:["finished"]},{content:["follow-up finished"]}]);
+		agent.setTools([{name:"work",label:"work",description:"Offline work",parameters:Type.Object({}),execute:async()=>{entered.resolve();await release.promise;return {content:[{type:"text",text:"settled"}],details:{}};}}]);
+		const prompts:string[]=[];
+		const fingerprint="a".repeat(64);
+		const unregister=registerHostedModelRouting(session.sessionId,async input=>{
+			prompts.push(input.prompt);
+			return {kind:"retain",boundaryId:input.boundaryId,policyFingerprint:fingerprint,reason:"Offline continuation",categoryWeights:{implementation:1},diagnostics:{coldInputTokens:input.promptTokens,lastCacheReadTokens:null,switchPenalty:5,scoreAdvantage:0,cacheHitRatio:1,unknowns:[],scores:[],learningRevision:"fixture"}};
+		});
+		session.updateHostedModelRoutingPolicy({profileId:1,policyFingerprint:fingerprint,mode:"auto",executionAuto:true,executionStopped:false});
+		try{
+			const running=session.prompt("initial work");
+			await entered.promise;
+			await session[delivery]("queued work");
+			release.resolve();await running;await session.waitForIdle();
+			expect(prompts).toEqual(delivery==="steer"?["initial work"]:["initial work","queued work"]);
+		}finally{release.resolve();unregister();}
 	});
 
 	it("prepares a steer after a running tool settles, not on subsequent tool iterations", async () => {

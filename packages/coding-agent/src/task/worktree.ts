@@ -630,6 +630,8 @@ async function detachSubmodules(sourceRoot: string, isolationRoot: string): Prom
 		const sourceDir = path.join(sourceRoot, relativePath);
 		const isolatedDir = path.join(isolationRoot, relativePath);
 		try {
+			// Junction-backed submodules are independently materialized below.
+			if ((await fs.lstat(sourceDir)).isSymbolicLink()) continue;
 			await fs.lstat(path.join(sourceDir, ".git"));
 		} catch (error) {
 			if (isEnoent(error)) continue;

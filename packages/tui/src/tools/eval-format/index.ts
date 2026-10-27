@@ -31,6 +31,8 @@ export function formatEvalCodeForDisplay(source: string, language: EvalLanguage)
 			return memoizedFormat(jsDisplayMemo, source, formatJavaScriptForDisplay);
 		case "python":
 			return memoizedFormat(pythonDisplayMemo, source, formatPythonForDisplay);
+		case "rust":
+			return source;
 	}
 }
 
