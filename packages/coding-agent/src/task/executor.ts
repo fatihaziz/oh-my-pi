@@ -454,6 +454,7 @@ export interface ExecutorOptions {
 	parentActiveModelPattern?: string;
 	/** Set for a per-call `model`; every model the child sends to must stay approved by these grants. */
 	perCallModelGrants?: PerCallModelGrants;
+	assertSpawnAuthorization?: () => void;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
 	effort?: TaskEffort;
@@ -4283,6 +4284,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
  * Run a single agent in-process.
  */
 export async function runSubprocess(options: ExecutorOptions): Promise<SingleResult> {
+	options.assertSpawnAuthorization?.();
 	const external = externalExecutorForSession(options.sessionFile);
 	if (external) return external.start(options);
 	const {

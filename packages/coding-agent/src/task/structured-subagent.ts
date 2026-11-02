@@ -227,6 +227,7 @@ export interface EffectiveSubagentPolicy {
 	structured: boolean;
 	/** Present for a per-call `model`: every model the child sends to must stay approved by these grants. */
 	perCallModelGrants?: PerCallModelGrants;
+	assertSpawnAuthorization?: () => void;
 	schema: StructuredSubagentSchemaResolution;
 	planMode: boolean;
 	isIsolated: boolean;
@@ -748,6 +749,10 @@ async function applySpawnHook(
 		spawnResult.assertAuthorization();
 		return policy;
 	}
+	if (spawnResult?.assertAuthorization) {
+		spawnResult.assertAuthorization();
+		policy.assertSpawnAuthorization = spawnResult.assertAuthorization;
+	}
 	if (spawnResult?.model === undefined) return policy;
 	const replacement = resolveConfiguredModelPatterns(spawnResult.model, request.session.settings);
 	if (replacement.length === 0) return policy;
@@ -878,6 +883,7 @@ function buildExecutorOptions(
 		oauthAccountPools: policy.oauthAccountPools,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		perCallModelGrants: policy.perCallModelGrants,
+		assertSpawnAuthorization: policy.assertSpawnAuthorization,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		effort: request.effort,
 		solutionSpace: request.solutionSpace?.trim() || undefined,
@@ -1090,6 +1096,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
 	const external = externalExecutorForSession(request.session.getSessionFile());
 	if (external) {
+		policy.assertSpawnAuthorization?.();
 		const execution = await external.execute(request, policy);
 		attachStructuredOutputMetadata(execution.result, policy.schema);
 		if (request.invocationKind === "eval")

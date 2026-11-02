@@ -131,7 +131,7 @@ async function discoverNestedRepos(repoRoot: string, ownRepos: readonly string[]
 				const commonDir = await realCommonDir(full);
 				if (commonDir && ownCommonDirs.has(commonDir)) continue;
 				result.push(rel);
-				// Don't recurse into nested repos — they manage their own tree
+				await walk(full);
 				continue;
 			}
 			await walk(full);
@@ -619,52 +619,128 @@ export function getTaskIsolationPath(repoRoot: string, id: string): string {
 	return path.join(getWorktreeDir(`${TASK_ISOLATION_DIR_PREFIX}${digest}`), TASK_ISOLATION_MOUNT_DIR);
 }
 
-/**
- * Submodule pointers in copied checkouts may target the source admin directory
- * or one under the root `.git` that detach removes. Materialize missing trees
- * from parents down, then detach admin state from leaves up.
- */
+async function assertSafeParents(root: string, target: string): Promise<void> {
+	const relative = path.relative(root, path.dirname(target));
+	if (relative === ".." || path.isAbsolute(relative) || relative.startsWith(`..${path.sep}`))
+		throw new Error(`Isolation path escapes workspace: ${target}`);
+	let current = root;
+	for (const part of relative.split(path.sep).filter(Boolean)) {
+		current = path.join(current, part);
+		const stat = await fs.lstat(current).catch(error => {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		});
+		if (!stat) return;
+		if (stat.isSymbolicLink() || !stat.isDirectory())
+			throw new Error(`Unsafe isolation ancestor: ${current}`);
+	}
+}
+
+async function assertSafeIsolationLinks(root: string, dir = root): Promise<void> {
+	for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+		const current = path.join(dir, entry.name);
+		const stat = await fs.lstat(current);
+		if (entry.name === ".git") {
+			if (stat.isSymbolicLink()) throw new Error(`Unsafe isolation Git link: ${current}`);
+			continue;
+		}
+		if (stat.isSymbolicLink()) {
+			const target = await fs.realpath(current).catch(() => undefined);
+			const relative = target === undefined ? ".." : path.relative(root, target);
+			if (relative === ".." || path.isAbsolute(relative) || relative.startsWith(`..${path.sep}`))
+				throw new Error(`Unsafe isolation link: ${current}`);
+		} else if (stat.isDirectory()) {
+			await assertSafeIsolationLinks(root, current);
+		}
+	}
+}
+
+async function materializeRepository(source: string, destination: string): Promise<void> {
+	const repo = vcs.requireGit(source);
+	const info = repo.info();
+	const submodules = new Set((await repo.submodulePaths()).map(value => path.normalize(value)));
+	const tracked = new Set(await repo.lsFiles(false, false));
+	const untracked = new Set(await repo.lsFiles(true, true));
+	const entries = new Set([...tracked, ...untracked]);
+	await fs.mkdir(destination, { recursive: true });
+	// Detach the index before copying files so no operation can modify the source repository.
+	await fs.writeFile(path.join(destination, ".git"), `gitdir: ${info.gitDir}\n`);
+	await vcs.detachGitDir(destination, info.commonDir);
+	for (const entry of entries) {
+		const relative = path.normalize(entry);
+		if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) {
+			throw new Error(`Unsafe repository path: ${entry}`);
+		}
+		if (submodules.has(relative)) continue;
+		const parts = relative.split(path.sep);
+		let parent = source;
+		for (const part of parts.slice(0, -1)) {
+			parent = path.join(parent, part);
+			const stat = await fs.lstat(parent).catch(error => {
+				if (isEnoent(error)) return undefined;
+				throw error;
+			});
+			if (!stat) break;
+			if (stat.isSymbolicLink() || !stat.isDirectory()) {
+				throw new Error(`Unsafe repository path through link or non-directory: ${entry}`);
+			}
+		}
+		const from = path.join(source, relative);
+		const stat = await fs.lstat(from).catch(error => {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		});
+		if (!stat) {
+			if (untracked.has(entry)) throw new Error(`Untracked repository entry disappeared: ${from}`);
+			continue;
+		}
+		if (stat.isDirectory()) {
+			const nestedGit = await fs.lstat(path.join(from, ".git")).then(() => true, error => {
+				if (isEnoent(error)) return false;
+				throw error;
+			});
+			if (nestedGit) continue;
+		}
+		const to = path.join(destination, relative);
+		await fs.mkdir(path.dirname(to), { recursive: true });
+		if (stat.isSymbolicLink()) {
+			const target = await fs.readlink(from);
+			const resolved = await fs.realpath(from).catch(() => undefined);
+			const relTarget = resolved === undefined ? ".." : path.relative(source, resolved);
+			if (path.isAbsolute(target) || relTarget === ".." || path.isAbsolute(relTarget) || relTarget.startsWith(`..${path.sep}`)) {
+				throw new Error(`Unsafe repository link: ${entry}`);
+			}
+			await fs.symlink(target, to);
+		} else if (stat.isFile()) {
+			await fs.copyFile(from, to, fsConstants.COPYFILE_FICLONE);
+		} else {
+			throw new Error(`Unsupported repository entry: ${entry}`);
+		}
+	}
+}
+
 async function detachSubmodules(sourceRoot: string, isolationRoot: string): Promise<void> {
-	const paths = await vcs.requireGit(sourceRoot).submodulePaths();
-	const initialized: Array<{ sourceDir: string; isolatedDir: string; isFile: boolean }> = [];
+	const paths = (await vcs.requireGit(sourceRoot).submodulePaths()).map(value => path.normalize(value));
 	for (const relativePath of paths) {
+		if (paths.some(parent => parent !== relativePath && relativePath.startsWith(`${parent}${path.sep}`))) continue;
 		const sourceDir = path.join(sourceRoot, relativePath);
 		const isolatedDir = path.join(isolationRoot, relativePath);
+		await assertSafeParents(isolationRoot, isolatedDir);
 		try {
-			if ((await fs.lstat(sourceDir)).isSymbolicLink()) {
-				const existing = await fs.lstat(isolatedDir).catch(error => {
-					if (isEnoent(error)) return undefined;
-					throw error;
-				});
-				if (existing?.isSymbolicLink()) await fs.unlink(isolatedDir);
-				else if (existing) await fs.rm(isolatedDir, { recursive: true });
-				await fs.cp(await fs.realpath(sourceDir), isolatedDir, {
-					recursive: true, verbatimSymlinks: true, mode: fsConstants.COPYFILE_FICLONE,
-				});
-			}
 			await fs.lstat(path.join(sourceDir, ".git"));
 		} catch (error) {
 			if (isEnoent(error)) continue;
 			throw error;
 		}
-		let isolatedEntry;
-		try {
-			isolatedEntry = await fs.lstat(path.join(isolatedDir, ".git"));
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-			// `git worktree add` (rcopy) checks out gitlinks but not their trees.
-			await fs.cp(sourceDir, isolatedDir, { recursive: true });
-			isolatedEntry = await fs.lstat(path.join(isolatedDir, ".git"));
-		}
-		initialized.push({ sourceDir, isolatedDir, isFile: isolatedEntry.isFile() });
-	}
-	for (const { sourceDir, isolatedDir, isFile } of initialized.reverse()) {
-		if (!isFile) continue;
-		const info = vcs.requireGit(sourceDir).info();
-		// A relative pointer into the copied root `.git/modules` becomes
-		// dangling after root detach; read from the source until detached.
-		await fs.writeFile(path.join(isolatedDir, ".git"), `gitdir: ${info.gitDir}\n`);
-		await vcs.detachGitDir(isolatedDir, info.commonDir);
+		const existing = await fs.lstat(isolatedDir).catch(error => {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		});
+		if (existing?.isSymbolicLink()) await fs.unlink(isolatedDir);
+		else if (existing) await fs.rm(isolatedDir, { recursive: true });
+		const source = await fs.realpath(sourceDir);
+		await materializeRepository(source, isolatedDir);
+		await detachSubmodules(source, isolatedDir);
 	}
 }
 
@@ -679,7 +755,10 @@ export async function ensureIsolation(
 	const mergedDir = getTaskIsolationPath(repoRoot, id);
 	const baseDir = path.dirname(mergedDir);
 	const resolution = await natives.isoResolve(preferred ?? null);
-	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
+	const hasNested = (await vcs.requireGit(repoRoot).submodulePaths()).length > 0 ||
+		(await discoverNestedRepos(repoRoot)).length > 0;
+	const candidates = hasNested ? [IsoBackendKind.Rcopy] :
+		resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
 	let fallbackReason = resolution.reason ?? null;
 
 	for (const candidate of candidates) {
@@ -714,18 +793,17 @@ export async function ensureIsolation(
 				const source = await fs.realpath(path.join(repoRoot, relativePath));
 				isolationSource = source;
 				const destination = path.join(mergedDir, relativePath);
+				await assertSafeParents(mergedDir, destination);
 				const existing = await fs.lstat(destination).catch(error => {
 					if (isEnoent(error)) return undefined;
 					throw error;
 				});
 				if (existing?.isSymbolicLink()) await fs.unlink(destination);
 				else if (existing) await fs.rm(destination, { recursive: true });
-				await fs.cp(source, destination, {
-					recursive: true, verbatimSymlinks: true, mode: fsConstants.COPYFILE_FICLONE,
-				});
+				await materializeRepository(source, destination);
 				await detachSubmodules(source, destination);
-				await vcs.detachGitDir(destination, vcs.requireGit(source).info().commonDir);
 			}
+			await assertSafeIsolationLinks(await fs.realpath(mergedDir));
 			return {
 				mergedDir,
 				backend: candidate,
@@ -733,6 +811,17 @@ export async function ensureIsolation(
 				fallbackReason,
 			};
 		} catch (err) {
+			const materialized = await fs.lstat(mergedDir).then(() => true, error => {
+				if (isEnoent(error)) return false;
+				throw error;
+			});
+			if (materialized) {
+				try {
+					await assertSafeIsolationLinks(await fs.realpath(mergedDir));
+				} catch (unsafe) {
+					throw new Error(`Isolation setup failed; unsafe workspace retained at ${mergedDir}`, { cause: unsafe });
+				}
+			}
 			if (started) {
 				try {
 					await cleanupIsolation({ mergedDir, backend: candidate, fellBack: false, fallbackReason: null });
@@ -740,12 +829,8 @@ export async function ensureIsolation(
 					throw new Error(`Isolation setup failed; workspace retained at ${mergedDir}`, { cause: cleanupError });
 				}
 			} else {
-				const materialized = await fs.lstat(mergedDir).then(() => true, error => {
-					if (isEnoent(error)) return false;
-					throw error;
-				});
-				if (needsNativeTeardown(candidate) && materialized) {
-					throw new Error(`Isolation setup failed; inspect retained workspace at ${mergedDir} before cleanup`, { cause: err });
+				if (materialized) {
+					throw new Error(`Isolation failed for ${isolationSource}: ${errorMessage(err)}; workspace retained at ${mergedDir}`, { cause: err });
 				}
 				await fs.rm(baseDir, { recursive: true, force: true });
 			}

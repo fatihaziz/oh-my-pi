@@ -205,6 +205,18 @@ export const observed = buildModel({
 		expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
 	});
 
+	it("loads the workflow ignore parser through the bundled registry", async () => {
+		const key = "@oh-my-pi/pi-coding-agent/skillshare/pack";
+		const entry = bundledEntries.find(item => item.key === key);
+		if (!entry) throw new Error(`Missing bundled workflow import: ${key}`);
+		const observed = await runRegistryProbe(
+			[entry],
+			`const { parseIgnoreRules } = await BUNDLED_PI_MODULE_LOADERS[${JSON.stringify(key)}]();
+export const observed = parseIgnoreRules(["# comment", "cache/", "!keep"]).map(({negate, dirOnly}) => ({negate, dirOnly}));`,
+		);
+		expect(observed).toEqual([{ negate: false, dirOnly: true }, { negate: true, dirOnly: false }]);
+	});
+
 	it("keeps coding-agent's root catch-all wildcards (./* / ./*.js) out of the bundle", () => {
 		// coding-agent exposes CLI entrypoints at the root; importing one from
 		// the virtual registry would expand the binary entry's transitive graph.

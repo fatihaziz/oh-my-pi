@@ -451,6 +451,10 @@
 			"types": "./src/session/*.ts",
 			"import": "./src/session/*.ts"
 		},
+		"./skillshare/pack": {
+			"types": "./src/skillshare/pack.ts",
+			"import": "./src/skillshare/pack.ts"
+		},
 		"./slash-commands/*": {
 			"types": "./src/slash-commands/*.ts",
 			"import": "./src/slash-commands/*.ts"

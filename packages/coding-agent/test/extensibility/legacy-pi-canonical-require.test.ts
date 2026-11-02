@@ -76,4 +76,21 @@ describe("legacy-pi specifier shim", () => {
 		expect(loaded.pluginLocal).toBe(false);
 		expect(loaded.keys).toBeGreaterThan(1);
 	}, 30_000);
+
+	it("rejects a missing host subpath instead of loading a plugin-local copy", async () => {
+		tempDir = TempDir.createSync("@pi-legacy-missing-host-");
+		const localPackage = tempDir.join("node_modules/@oh-my-pi/pi-coding-agent");
+		await Bun.write(path.join(localPackage, "package.json"), JSON.stringify({
+			name: "@oh-my-pi/pi-coding-agent", exports: { "./missing-host-only": "./local.js" },
+		}));
+		await Bun.write(path.join(localPackage, "local.js"), "module.exports = { PLUGIN_LOCAL_COPY: true };");
+		const pluginEntry = tempDir.join("plugin.ts");
+		await Bun.write(pluginEntry, 'import "@oh-my-pi/pi-coding-agent/missing-host-only"; export default () => {};');
+		const source = `const {loadLegacyPiModule} = await import(${JSON.stringify(SHIM_PATH)}); try { await loadLegacyPiModule(${JSON.stringify(pluginEntry)}); console.log("OK"); } catch (error) { console.log(String(error)); }`;
+		const proc = Bun.spawn([process.execPath, "-e", source], { cwd: PACKAGE_DIR, stdout: "pipe", stderr: "pipe" });
+		const output = await new Response(proc.stdout).text();
+		await proc.exited;
+		expect(output).toContain("Host coding-agent export is unavailable");
+		expect(output).not.toContain("OK ");
+	}, 30_000);
 });
