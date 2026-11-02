@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Serialize Git-backed task isolation creation across processes so parallel workers cannot observe partially registered worktrees.
 - Isolate junction-backed submodules through their own repository materialization instead of copying a junction over a directory.
 - Preserve the parent working directory inside isolated worktrees and restrict workflow reviewers to their declared files.
 - Cancel a standalone session's owned background task workers when the user stops it, without cancelling other owners' jobs or background shell commands.

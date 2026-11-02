@@ -6,7 +6,7 @@ import * as path from "node:path";
 import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { acquireFileLock, formatBytes, getWorktreeDir, isEnoent, logger, Snowflake, type FileLockHandle } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
@@ -773,16 +773,15 @@ export async function ensureIsolation(
 		await writeRetainedBackend(baseDir, candidate);
 		let started = false;
 		let isolationSource = repoRoot;
+		let gitLock: FileLockHandle | undefined;
 		try {
+			if (candidate === IsoBackendKind.Rcopy) {
+				const common = await fs.realpath(sourceCommonDir);
+				const key = process.platform === "win32" ? common.toLowerCase() : common;
+				gitLock = await acquireFileLock(path.join(key, "omp-task-isolation"), { retries: 6000, retryDelayMs: 100 });
+			}
 			await natives.isoStart(candidate, repoRoot, mergedDir);
 			started = true;
-			// Sever the isolation's git metadata from the source checkout. Copy
-			// backends duplicate `repoRoot`'s `.git` verbatim — a linked-worktree
-			// pointer file (or the rcopy `git worktree add` registration) leaves
-			// the isolation sharing the source's HEAD/index/ref namespace, so a
-			// task's git operations would mutate the parent checkout and stack
-			// parallel task branches. Detaching gives each isolation a private,
-			// frozen repo that still borrows the source object DB via alternates.
 			await detachSubmodules(repoRoot, mergedDir);
 			await vcs.detachGitDir(mergedDir, sourceCommonDir);
 			// Child repositories need their own private Git metadata and file tree.
@@ -839,6 +838,8 @@ export async function ensureIsolation(
 				throw new Error(`Isolation failed for ${isolationSource}: ${message}`, { cause: err });
 			}
 			fallbackReason ??= message;
+		} finally {
+			gitLock?.release();
 		}
 	}
 

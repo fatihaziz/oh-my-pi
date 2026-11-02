@@ -406,6 +406,30 @@ describe("worktree isolation helpers", () => {
 			vi.restoreAllMocks();
 		});
 
+		it("creates concurrent rcopy isolations without exposing partial Git administration", async () => {
+			const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-concurrent-"));
+			try {
+				const fixture = path.resolve(import.meta.dir, "../fixtures/isolation-concurrent-probe.ts");
+				const processes = Array.from({ length: 6 }, (_, index) => Bun.spawn(
+					[process.execPath, fixture, repo, worktreeBase, `concurrent-${index}`],
+					{ stdout: "pipe", stderr: "pipe", env: { ...process.env, OMP_WORKTREE_DIR: worktreeBase }, windowsHide: true },
+				));
+				const results = await Promise.all(processes.map(async proc => ({
+					out: await new Response(proc.stdout).text(),
+					err: await new Response(proc.stderr).text(),
+					exit: await proc.exited,
+				})));
+				for (const result of results) {
+					expect(result.err).toBe("");
+					expect(result.exit).toBe(0);
+					expect(result.out).toBe("base version\n");
+				}
+				expect(await runGit(repo, ["status", "--porcelain"])).toBe("");
+			} finally {
+				await removeWithRetries(worktreeBase);
+			}
+		}, 60_000);
+
 		it("retries isoResolve candidates when a backend is path-unavailable", async () => {
 			const unavailable = new Error("ISO_UNAVAILABLE: btrfs source is not a subvolume");
 			const isoResolve = vi.spyOn(natives, "isoResolve").mockResolvedValue({
