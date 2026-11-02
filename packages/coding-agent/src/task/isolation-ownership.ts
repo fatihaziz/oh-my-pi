@@ -122,20 +122,14 @@ export const RETAINED_BACKEND_FILE = ".omp-retained-backend.json";
  * no teardown — and their `stop` routines delete data themselves, so they
  * must never be routed through it.
  *
- * Notably absent: ZFS clones also need dataset-aware teardown, but `isoStop`
- * locates the dataset by its recorded mountpoint property, which no longer
- * matches after the retain rename — that needs pi-iso mount-table support
- * before a sidecar here could help.
+ * ZFS clones retain their original mountpoint while the workspace is retained.
  */
 export function needsNativeTeardown(backend: unknown): backend is number {
-	return backend === IsoBackendKind.Overlayfs || backend === IsoBackendKind.Projfs || backend === IsoBackendKind.Btrfs;
+	return backend === IsoBackendKind.Overlayfs || backend === IsoBackendKind.Projfs ||
+		backend === IsoBackendKind.Btrfs || backend === IsoBackendKind.Zfs;
 }
 
-/**
- * Record which backend built a retained workspace, so cleanup can route it
- * through native teardown before removal. Best-effort: retention stays valid
- * without it (the workspace merely falls back to plain recursive removal).
- */
+/** Record the isolation backend before it can materialize a workspace. */
 export async function writeRetainedBackend(baseDir: string, backend: number): Promise<void> {
 	await Bun.write(
 		path.join(baseDir, RETAINED_BACKEND_FILE),
@@ -143,26 +137,19 @@ export async function writeRetainedBackend(baseDir: string, backend: number): Pr
 	);
 }
 
-/**
- * Backend recorded for a retained workspace when it needs native teardown
- * before remove. `undefined` only when no sidecar exists. Any other read
- * problem (permissions, I/O, malformed JSON) throws instead of reading as
- * absent: the workspace may be a live mount whose guard must not be silently
- * bypassed — the caller then leaves it in place rather than removing through
- * the mount. A well-formed record for a backend needing no teardown keeps
- * today's removal behavior.
- */
+/** Missing or invalid metadata requires manual inspection; it never authorizes deletion. */
 export async function readRetainedMountBackend(dir: string): Promise<number | undefined> {
 	const sidecar = path.join(dir, RETAINED_BACKEND_FILE);
-	if (!(await Bun.file(sidecar).exists())) return undefined;
+	if (!(await Bun.file(sidecar).exists())) {
+		throw new Error(`isolation backend metadata is missing at ${sidecar}; inspect the workspace manually`);
+	}
 	const decoded: unknown = await Bun.file(sidecar).json();
 	if (typeof decoded !== "object" || decoded === null || !("backend" in decoded)) {
 		throw new Error(`retained-mount metadata at ${sidecar} is malformed`);
 	}
 	const backend = decoded.backend;
-	if (typeof backend !== "number" || !Number.isInteger(backend)) {
-		throw new Error(`retained-mount metadata at ${sidecar} is malformed`);
+	if (typeof backend !== "number" || !Object.values(IsoBackendKind).includes(backend)) {
+		throw new Error(`retained-mount metadata at ${sidecar} has an unknown backend`);
 	}
-	if (!needsNativeTeardown(backend)) return undefined;
-	return backend;
+	return needsNativeTeardown(backend) ? backend : undefined;
 }

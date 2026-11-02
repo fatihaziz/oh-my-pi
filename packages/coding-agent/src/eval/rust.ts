@@ -12,8 +12,8 @@ export default {
 	id: "rust",
 	label: "Rust",
 	highlightLang: "rust",
-	async isAvailable() {
-		return Bun.which("rust-script") !== null;
+	async checkAvailability() {
+		return { ok: Bun.which("rust-script") !== null };
 	},
 	async execute(code: string, opts: ExecutorBackendExecOptions): Promise<ExecutorBackendResult> {
 		const executable = Bun.which("rust-script");

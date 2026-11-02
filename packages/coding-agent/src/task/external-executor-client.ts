@@ -151,7 +151,7 @@ export function createExternalSubagentExecutor(transport: ExternalExecutorTransp
 		},
 		start,
 		followUp(options: FollowUpTurnOptions): Promise<SingleResult> {
-			const { signal, onProgress: _progress, eventBus: _events, subagentEventBus: _subevents, ...data } = options;
+			const { signal, onProgress: _progress, eventBus: _events, subagentEventBus: _subevents, deferIrcWakeRelease: _release, ...data } = options;
 			const trace: Record<string, string> = {};
 			propagation.inject(context.active(), trace);
 			return transport.request("follow_up", { ...data, agentId: options.id, trace }, signal);

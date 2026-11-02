@@ -1093,7 +1093,7 @@ export async function runExecutorHost(): Promise<void> {
 				running = context.with(
 					isRecord(frame.trace) ? propagation.extract(ROOT_CONTEXT, frame.trace) : context.active(),
 					async () => {
-						const execute = () =>
+						const execute = (deferIrcWakeRelease?: (release: () => void) => void) =>
 							runSubagentFollowUpTurn({
 								...followUpLaunch,
 								message: String(frame.message),
@@ -1103,6 +1103,7 @@ export async function runExecutorHost(): Promise<void> {
 								signal: followUpSignal,
 								eventBus: events,
 								subagentEventBus: events,
+								deferIrcWakeRelease,
 								onProgress: emitProgress,
 							});
 						const result = workspace ? await workspace.followUp(execute) : await execute();

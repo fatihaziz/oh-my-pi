@@ -41,6 +41,7 @@ describe("worktree clear task-isolation ownership", () => {
 		const dir = path.join(base, name);
 		await fs.mkdir(path.join(dir, "m"), { recursive: true });
 		await Bun.write(path.join(dir, "m", "work.txt"), "uncaptured\n");
+		await writeRetainedBackend(dir, natives.IsoBackendKind.Rcopy);
 		return dir;
 	}
 
@@ -109,15 +110,17 @@ describe("worktree clear task-isolation ownership", () => {
 		await expect(fs.stat(retained)).rejects.toThrow();
 	});
 
-	it("removes sandboxes without a retained-mount sidecar without unmounting", async () => {
+	it("retains sandboxes without backend metadata rather than guessing whether they are mounted", async () => {
 		const plain = await makeSandbox("tplain08");
+		await fs.rm(path.join(plain, RETAINED_BACKEND_FILE));
 		await Bun.write(path.join(plain, ISOLATION_OWNER_FILE), JSON.stringify({ pid: await deadPid(), id: "plain08" }));
 		const isoStopSpy = vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
 
-		await clearWorktrees({ all: false, dryRun: false, json: true });
+		const { failed } = await clearWorktrees({ all: false, dryRun: false, json: true });
 
+		expect(failed).toBe(1);
 		expect(isoStopSpy).not.toHaveBeenCalled();
-		await expect(fs.stat(plain)).rejects.toThrow();
+		expect(await Bun.file(path.join(plain, "m", "work.txt")).exists()).toBe(true);
 	});
 
 	it("keeps the workspace when its retained mount cannot stop", async () => {

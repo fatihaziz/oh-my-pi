@@ -9,6 +9,7 @@ import learnDescription from "../prompts/tools/learn.md" with { type: "text" };
 import type { ToolSession } from ".";
 
 import { cfgAutolearnEnabled } from "../autolearn/settings";
+import { cfgSkillsEnabled } from "../extensibility/settings";
 import { cfgMemoryBackend } from "../memory-backend/settings";
 import { isGlobalMemoryScopeAvailable } from "../mnemopi/settings";
 
@@ -34,8 +35,18 @@ const learnSchemaWithScope = type({
 	),
 	"skill?": learnSkillSchema,
 });
+const learnMemoryOnly = type({
+	memory: type("string").describe("the durable, self-contained lesson to remember (what, when, why)"),
+	"context?": type("string").describe("optional source context for the lesson"),
+});
+const learnMemoryWithScope = type({
+	memory: type("string").describe("the durable, self-contained lesson to remember (what, when, why)"),
+	"context?": type("string").describe("optional source context for the lesson"),
+	"scope?": type("'project' | 'global'").describe("storage scope; defaults to project"),
+});
 
-type LearnSchema = typeof learnSchemaBase | typeof learnSchemaWithScope;
+
+type LearnSchema = typeof learnSchemaBase | typeof learnSchemaWithScope | typeof learnMemoryOnly | typeof learnMemoryWithScope;
 
 export type LearnParams = typeof learnSchemaWithScope.infer;
 
@@ -57,10 +68,13 @@ export class LearnTool implements AgentTool<LearnSchema> {
 	};
 	readonly label = "Learn";
 	get description(): string {
-		return prompt.render(learnDescription, { globalScope: isGlobalMemoryScopeAvailable(this.session.settings) });
+		return prompt.render(learnDescription, { globalScope: isGlobalMemoryScopeAvailable(this.session.settings), skills: cfgSkillsEnabled.get(this.session.settings) });
 	}
 	get parameters(): LearnSchema {
-		return isGlobalMemoryScopeAvailable(this.session.settings) ? learnSchemaWithScope : learnSchemaBase;
+		const global = isGlobalMemoryScopeAvailable(this.session.settings);
+		return cfgSkillsEnabled.get(this.session.settings)
+			? (global ? learnSchemaWithScope : learnSchemaBase)
+			: (global ? learnMemoryWithScope : learnMemoryOnly);
 	}
 	readonly strict = true;
 	readonly loadMode = "essential" as const;
@@ -77,6 +91,9 @@ export class LearnTool implements AgentTool<LearnSchema> {
 	}
 
 	async execute(_id: string, params: LearnParams, signal?: AbortSignal): Promise<AgentToolResult> {
+		if (params.skill && !cfgSkillsEnabled.get(this.session.settings)) {
+			throw new Error("Skills are disabled; managed skills cannot be created or updated.");
+		}
 		const parentMemory = this.session.getParentServices?.()?.memory;
 		if (parentMemory) return parentMemory.executeTool(this.name, _id, params, this.session, signal);
 		// 1) Persist or queue the lesson to long-term memory (mirrors MemoryRetainTool).
@@ -168,6 +185,14 @@ export class LearnTool implements AgentTool<LearnSchema> {
 				throw new Error(`${memoryMessage}, but the managed skill could not be written: ${reason}`);
 			}
 			const verb = params.skill.action === "create" ? "Created" : "Updated";
+			try {
+				await this.session.refreshSkills?.();
+			} catch (err) {
+				const reason = err instanceof Error ? err.message : String(err);
+				throw new Error(
+					`${memoryMessage}. ${verb} managed skill "${params.skill.name}", but refreshing session skills failed: ${reason}`,
+				);
+			}
 			return {
 				content: [{ type: "text", text: `${memoryMessage}. ${verb} managed skill "${params.skill.name}".` }],
 				details: { skill: params.skill.name },

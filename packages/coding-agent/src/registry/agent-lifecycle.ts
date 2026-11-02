@@ -412,15 +412,19 @@ export class AgentLifecycleManager {
 				`Unknown agent "${id}" — it was never registered or has been released. If a transcript exists, read history://${id}.`,
 			);
 		}
-		if (ref.status === "aborted") ref = await this.#reopen(id, ref);
-		if (ref.session) return ref.session;
-		if (hostedPeerRoute(ref) || externalExecutorForSession(ref.sessionFile, false)) {
-			throw new Error(
-				`Agent "${id}" is externally hosted; use its owner's controls rather than a local session revival`,
-			);
+		if (ref.status === "aborted") {
+			if (!ref.session && (hostedPeerRoute(ref) || externalExecutorForSession(ref.sessionFile, false))) {
+				throw new Error(`Agent "${id}" is externally hosted; use its owner's controls rather than a local session revival`);
+			}
+			ref = await this.#reopen(id, ref);
 		}
+		// Join a revive before handing out a session whose initialization is incomplete.
 		const inflight = this.#revivals.get(id);
 		if (inflight?.ref === ref) return inflight.promise;
+		if (ref.session) return ref.session;
+		if (hostedPeerRoute(ref) || externalExecutorForSession(ref.sessionFile, false)) {
+			throw new Error(`Agent "${id}" is externally hosted; use its owner's controls rather than a local session revival`);
+		}
 		const revival = this.#resolveAndRevive(id, ref);
 		const pending: RevivingAgent = { ref, promise: revival };
 		this.#revivals.set(id, pending);
@@ -698,6 +702,13 @@ export class AgentLifecycleManager {
 		clearTimeout(adopted.timer);
 		const timer = setTimeout(() => {
 			adopted.timer = undefined;
+			// A session still owing turns to IRC messages (held by a run publishing
+			// its result, or queued) would drop them when parked. Try again once the
+			// TTL passes anew.
+			if (adopted.ref.session?.ircWakesPending) {
+				this.#armTimer(id, adopted);
+				return;
+			}
 			void this.park(id);
 		}, adopted.idleTtlMs);
 		timer.unref?.();
