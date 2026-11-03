@@ -8,6 +8,7 @@
  * - Interact with the user via UI primitives
  */
 
+import type { TaskModelRequirements } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	type ExtensionUiComponent,
 	type ExtensionUiComponentFactory,
@@ -1243,6 +1244,7 @@ export interface BeforeSubagentSpawnEvent {
 	readonly dispatchId?: string;
 	readonly parentToolCallId?: string;
 	readonly index?: number;
+	readonly requirements?: Readonly<TaskModelRequirements>;
 	readonly effort?: "lo" | "med" | "hi";
 	readonly solutionSpace?: string;
 	readonly standalone?: boolean;

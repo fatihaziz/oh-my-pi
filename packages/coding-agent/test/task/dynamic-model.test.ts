@@ -38,6 +38,7 @@ async function runWorker(options: {
 	settings?: Settings;
 	assignment?: string;
 	missingAuthorization?: boolean;
+	workflowRouting?: boolean;
 	authorizationCheck?: () => void;
 	automaticSelection?: boolean;
 	context?: string;
@@ -83,6 +84,7 @@ async function runWorker(options: {
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getSessionAgents: () => [],
+		expectsSubagentRouting: () => options.workflowRouting ?? true,
 		emitBeforeSubagentSpawn: options.missingAuthorization ? undefined : async () => ({
 			...(options.automaticSelection ? { model: options.perCallModel, enforceExactModel: true } : {}),
 			assertAuthorization: options.authorizationCheck ?? (() => undefined),
@@ -172,6 +174,33 @@ describe("per-call exact selection after background discovery", () => {
 	it("refuses an explicit model when live workflow authorization is unavailable", async () => {
 		const model = createMockModel({ id: "unauthorized" });
 		await expect(runWorker({ model, perCallModel: "mock/unauthorized:off", missingAuthorization: true })).rejects.toThrow();
+		expect(model.calls).toHaveLength(0);
+	});
+
+	it("refuses automatic selection when live workflow authorization is unavailable", async () => {
+		const model = createMockModel({ id: "automatic-unauthorized" });
+		await expect(runWorker({
+			model, perCallModel: "mock/automatic-unauthorized:off", automaticSelection: true, missingAuthorization: true,
+		})).rejects.toThrow(/routing requires live workflow authorization/);
+		expect(model.calls).toHaveLength(0);
+	});
+
+	it("uses configured per-call grants without workflow authorization when routing is disabled", async () => {
+		const model = createMockModel({ id: "disabled-workflow", handler: () => ({ content: ["Configured grant."] }) });
+		const result = await runWorker({
+			model, perCallModel: "mock/disabled-workflow:off", workflowRouting: false, missingAuthorization: true,
+		});
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toBe("Configured grant.");
+		expect(model.calls).toHaveLength(1);
+	});
+
+	it("does not grant an unconfigured explicit model when workflow routing is disabled", async () => {
+		const model = createMockModel({ id: "not-granted" });
+		const settings = perCallSettings(model, { modelRoles: { review: "mock/other" } });
+		await expect(runWorker({
+			model, settings, perCallModel: "mock/not-granted:off", workflowRouting: false, missingAuthorization: true,
+		})).rejects.toThrow(/not approved/);
 		expect(model.calls).toHaveLength(0);
 	});
 

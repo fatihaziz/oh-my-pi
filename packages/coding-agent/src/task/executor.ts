@@ -24,6 +24,7 @@ import {
 	TRUNCATE_LENGTHS,
 } from "@oh-my-pi/pi-tui/render/render-utils";
 import { type EditMode, getEditInputPaths } from "@oh-my-pi/pi-tui/tools/edit";
+import type { TaskModelRequirements } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	formatModelStringWithRouting,
 	resolveAgentAdvisorRolePattern,
@@ -424,6 +425,7 @@ export interface ExecutorOptions {
 	preparedSession?: PreparedSeanceSession;
 	/** Shared background from the task call (`task.batch`), rendered into the subagent's system prompt. */
 	context?: string;
+	requirements?: TaskModelRequirements;
 	/**
 	 * The session's active overall plan, handed off so subagents spawned during
 	 * plan execution share the same plan context as the main agent. Omitted when
@@ -4832,7 +4834,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 									assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
 									if (perCallModelGrants.standaloneSelector !== undefined) {
 										const kind = perCallModelGrants.standaloneInvocationKind;
-										const ceiling = cfgTaskMaxEffort.get(settings);
+										const ceiling = perCallModelGrants.automaticSelection ? spawnEffortCeiling! : cfgTaskMaxEffort.get(settings);
 										const changed = effectiveThinkingLevel === "off"
 											? dispatchModel.reasoning && streamOptions?.disableReasoning !== true
 											: streamOptions?.reasoning !== effectiveThinkingLevel;
@@ -5116,6 +5118,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 							...(perCallModelGrants.standaloneSelector !== undefined ? {
 								standaloneAssignment: options.assignment,
 								standaloneContext: options.context,
+								standaloneRequirements: options.requirements,
 								standaloneAutomaticSelection: perCallModelGrants.automaticSelection === true,
 								standaloneDispatchId: id,
 							} : {}),

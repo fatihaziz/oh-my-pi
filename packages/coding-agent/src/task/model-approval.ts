@@ -70,6 +70,8 @@ export interface PerCallModelGrants {
 	standaloneInvocationKind?: "task" | "eval";
 	/** Selection made by a trusted automatic routing handler, not a model-facing per-call request. */
 	automaticSelection?: boolean;
+	/** Exact automatic selection already approved at dispatch, retained for this worker. */
+	approvedAutomaticIdentity?: string;
 	assertAuthorization?: () => void;
 	/** Spawn-time selector preferences; unrelated later model usage cannot change a grant. */
 	matchPreferences?: ModelMatchPreferences;
@@ -335,6 +337,11 @@ export function assertPerCallModelApproved(
 ): void {
 	grants.assertAuthorization?.();
 	const target = formatModelStringWithRouting(model);
+	if (grants.automaticSelection && grants.approvedAutomaticIdentity !== undefined) {
+		if (target !== grants.approvedAutomaticIdentity)
+			throw new PerCallModelError("The automatic worker cannot change its selected model.");
+		return;
+	}
 	let cache = decisionCache.get(grants);
 	if (!cache || !isCurrent(cache, grants.settings, registry)) {
 		cache = {
@@ -357,7 +364,10 @@ export function assertPerCallModelApproved(
 			cache.decisions.set(target, granted);
 		}
 	}
-	if (granted) return;
+	if (granted) {
+		if (grants.automaticSelection) grants.approvedAutomaticIdentity = target;
+		return;
+	}
 	const allowGuidance = perCallAllowlists(grants.settings).some(allow => allow.length > 0)
 		? " It must also be listed in task.perCallModelAllow."
 		: "";

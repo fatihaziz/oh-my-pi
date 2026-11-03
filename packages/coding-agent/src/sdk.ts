@@ -3021,6 +3021,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// rebuild their own session-scoped extensions.
 		toolSession.extensionPaths = extensionPaths;
 		toolSession.effectiveExtensionRoots = buildSessionExtensionRoots;
+		toolSession.expectsSubagentRouting = () => {
+			const roots = buildSessionExtensionRoots();
+			const paths = roots.mode === "explicit-only" ? roots.explicit : [...roots.explicit, ...roots.configured];
+			if (roots.mode !== "explicit-only" && cfgDisabledExtensions.get(settings).includes("extension-module:decision-workflow")) return false;
+			return paths.some(extensionPath => /(?:^|[\\/])decision-workflow(?:[\\/]|$)/i.test(extensionPath));
+		};
 
 		// Inline source ids must remain stable when caller factories are rebound in
 		// child sessions. Start after any prepared inline sources so SDK-provided

@@ -457,6 +457,8 @@ export interface ToolSession {
 		event: BeforeSubagentSpawnEvent,
 		signal?: AbortSignal,
 	): Promise<BeforeSubagentSpawnEventResult | undefined>;
+	/** Whether this session explicitly expects the decision-workflow spawn router. */
+	expectsSubagentRouting?: () => boolean;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
 	authStorage?: import("../session/auth-storage").AuthStorage;
 	/** Model registry for passing to subagents (avoids re-discovery) */

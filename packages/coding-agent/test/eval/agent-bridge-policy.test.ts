@@ -1,6 +1,7 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../../src/async";
 import { Settings } from "../../src/config/settings";
@@ -348,17 +349,49 @@ describe("runEvalAgent", () => {
 	it("routes an agent() model above a pinned agent in eval-only mode", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-
+		const model = createMockModel({ provider: "p", id: "requested", reasoning: true });
+		const session = Object.assign(
+			makeSession({
+				settings: Settings.isolated({
+					"task.perCallModel": "eval", "task.isolation.enabled": false, modelRoles: { review: "p/requested" },
+				}),
+			}),
+			{ modelRegistry: { getAll: () => [model], getAvailable: () => [model] }, expectsSubagentRouting: () => false },
+		);
 		await runEvalAgentAndWait(
 			{ prompt: "work", agent: "reviewer", model: "p/requested:high" },
-			{
-				session: makeSession({
-					settings: Settings.isolated({ "task.perCallModel": "eval", "task.isolation.enabled": false }),
-				}),
-			},
+			{ session },
 		);
 
 		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/requested:high"]);
+	});
+
+	it("requires workflow authorization for an explicit eval model when routing is enabled", async () => {
+		mockAgents();
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const model = createMockModel({ provider: "p", id: "requested", reasoning: true });
+		const session = Object.assign(
+			makeSession({ settings: Settings.isolated({ "task.perCallModel": "eval", "task.isolation.enabled": false }) }),
+			{
+				modelRegistry: { getAll: () => [model], getAvailable: () => [model] },
+				expectsSubagentRouting: () => true,
+			},
+		);
+		await expect(runEvalAgentAndWait(
+			{ prompt: "work", agent: "reviewer", model: "p/requested:high" }, { session },
+		)).rejects.toThrow(/live workflow authorization/);
+		expect(runSpy).not.toHaveBeenCalled();
+		let authorized = true;
+		Object.assign(session, {
+			emitBeforeSubagentSpawn: async () => ({
+				assertAuthorization: () => { if (!authorized) throw new Error("revoked"); },
+			}),
+		});
+		await runEvalAgentAndWait({ prompt: "work", agent: "reviewer", model: "p/requested:high" }, { session });
+		const grants = runSpy.mock.calls[0]?.[0]?.perCallModelGrants;
+		expect(grants?.standaloneSelector).toBe("p/requested:high");
+		authorized = false;
+		expect(() => grants?.assertAuthorization?.()).toThrow("revoked");
 	});
 
 	it.each([

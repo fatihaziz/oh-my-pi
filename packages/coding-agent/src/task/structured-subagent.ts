@@ -9,6 +9,7 @@ import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import type { TaskModelRequirements } from "@oh-my-pi/pi-tui/tools/task";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
 	resolveAgentModelSelection,
@@ -165,6 +166,7 @@ export interface StructuredSubagentRequest {
 	effort?: TaskEffort;
 	/** Caller's description of how open-ended the work is; steers the child's `auto` thinking classification. */
 	solutionSpace?: string;
+	requirements?: TaskModelRequirements;
 	identity?: StructuredSubagentIdentity;
 	index?: number;
 	parentToolCallId?: string;
@@ -436,6 +438,7 @@ function preflightPerCallModel(
 		throw new StructuredSubagentError("preflight", message);
 	};
 	const standalone = !hostedRuntime() && !externalExecutorForSession(request.session.getSessionFile());
+	const workflowRouting = standalone && request.session.expectsSubagentRouting?.() === true;
 	if (request.model !== undefined) fail("A call cannot supply both a host model and a per-call model.");
 	const disabled = perCallModelDisabledReason(settings, request.invocationKind);
 	if (disabled) fail(disabled);
@@ -458,8 +461,8 @@ function preflightPerCallModel(
 		agentModel: agent.model,
 		agentSource: agent.source,
 		parentModelPattern,
-		standaloneSelector: standalone ? perCallModel : undefined,
-		standaloneInvocationKind: standalone ? request.invocationKind : undefined,
+		standaloneSelector: workflowRouting ? perCallModel : undefined,
+		standaloneInvocationKind: workflowRouting ? request.invocationKind : undefined,
 		matchPreferences: structuredClone(getModelMatchPreferences(settings.grantAuthority())),
 	};
 	// A cold registry is checked again in the executor once models are loaded.
@@ -716,11 +719,12 @@ async function applySpawnHook(
 	dispatchId?: string,
 ): Promise<EffectiveSubagentPolicy> {
 	const standalone = !hostedRuntime() && !externalExecutorForSession(request.session.getSessionFile());
+	const routingExpected = standalone && request.session.expectsSubagentRouting?.() === true;
 	if (!standalone && policy.preparedSession !== undefined && policy.perCallModelGrants?.standaloneSelector === undefined) return policy;
 	const emit = request.session.emitBeforeSubagentSpawn;
 	if (!emit) {
-		if (policy.perCallModelGrants?.standaloneSelector !== undefined)
-			throw new StructuredSubagentError("preflight", "An explicit standalone model requires live workflow authorization.");
+		if (routingExpected || policy.perCallModelGrants?.standaloneSelector !== undefined)
+			throw new StructuredSubagentError("preflight", "Subagent routing requires live workflow authorization.");
 		return policy;
 	}
 	const spawnKey =
@@ -738,6 +742,10 @@ async function applySpawnHook(
 			spawnKey,
 			assignment: request.assignment.trim(),
 			context: request.context?.trim() || undefined,
+			requirements: request.requirements === undefined ? undefined : Object.freeze({
+				...request.requirements,
+				...(request.requirements.input === undefined ? {} : { input: Object.freeze([...request.requirements.input]) as unknown as string[] }),
+			}),
 			dispatchId,
 			parentToolCallId: request.parentToolCallId,
 			index: request.index,
@@ -750,6 +758,10 @@ async function applySpawnHook(
 	);
 	if (spawnResult?.block) {
 		throw new StructuredSubagentError("preflight", spawnResult.reason ?? "Subagent spawn blocked by extension.");
+	}
+	if (routingExpected && policy.perCallModelGrants?.standaloneSelector === undefined &&
+		(!spawnResult?.model || !spawnResult.enforceExactModel || !spawnResult.assertAuthorization)) {
+		throw new StructuredSubagentError("preflight", "Automatic subagent routing did not select an authorized model.");
 	}
 	if (policy.perCallModelGrants?.standaloneSelector !== undefined) {
 		if (spawnResult?.model !== undefined)
@@ -900,6 +912,7 @@ function buildExecutorOptions(
 		readScope: constrained ? scopedReadPaths(request.assignment) : undefined,
 		preparedSession,
 		context: constrained ? undefined : (request.context?.trim() || undefined),
+		requirements: request.requirements === undefined ? undefined : structuredClone(request.requirements),
 		planReference: undefined,
 		// Task `name` is the spawn handle (id allocation). Eval `label` is a
 		// real UI description. Copy it only for eval so generateTaskLabel can run.
@@ -1129,6 +1142,7 @@ function describeSalvagedWork(result: SingleResult): string {
  * lease or child dispatch; callers keep responsibility for their result text.
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
+	request = { ...request, requirements: request.requirements === undefined ? undefined : structuredClone(request.requirements) };
 	const preflight = await resolveEffectiveSubagentPolicy(request);
 	const external = externalExecutorForSession(request.session.getSessionFile());
 	let dispatchId: string | undefined;

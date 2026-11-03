@@ -197,7 +197,8 @@ export function createPersistedSubagentReviverFactory(
 						);
 					}
 					await ctx.modelRegistry.awaitBackgroundRefresh();
-					perCallModel = resolveExactModelIdentity(init.perCallModelIdentity, ctx.modelRegistry);
+					perCallModel = resolveExactModelIdentity(init.perCallModelIdentity, init.standaloneAutomaticSelection
+						? { getAvailable: () => ctx.modelRegistry.getAll() } : ctx.modelRegistry);
 					if (!perCallModel) {
 						throw new PerCallModelError(
 							`Cannot revive subagent "${ref.id}": its per-call model ${init.perCallModelIdentity} is no longer available. A per-call worker revives only on its exact saved model.`,
@@ -215,12 +216,13 @@ export function createPersistedSubagentReviverFactory(
 						if (init.standaloneDispatchId !== ref.id) {
 							throw new PerCallModelError(`Cannot revive subagent "${ref.id}": the persisted dispatch identity does not match. The agent was not revived.`);
 						}
-						const resolution = resolveModelOverride([init.perCallStandaloneSelector], ctx.modelRegistry, ctx.settings, { exactOnly: true });
+						const resolution = resolveModelOverride([init.perCallStandaloneSelector], init.standaloneAutomaticSelection
+							? { getAvailable: () => ctx.modelRegistry.getAll() } : ctx.modelRegistry, ctx.settings, { exactOnly: true });
 						const level = resolution.thinkingLevel;
 						const ceiling = cfgTaskMaxEffort.get(ctx.settings);
 						if (!resolution.model || formatModelStringWithRouting(resolution.model) !== init.perCallModelIdentity ||
 							!resolution.explicitThinkingLevel || !level || level === "auto" || level !== init.perCallThinkingLevel ||
-							clampThinkingLevelToCeiling(perCallModel, level, ceiling) !== level ||
+							(!init.standaloneAutomaticSelection && clampThinkingLevelToCeiling(perCallModel, level, ceiling) !== level) ||
 							(level === "off" ? !!perCallModel.thinking?.requiresEffort : !getSupportedEfforts(perCallModel).some(effort => effort === level)) ||
 							!perCallModel.input.includes("text") || perCallModel.supportsTools === false ||
 							!init.perCallStandaloneInvocationKind || (!init.standaloneAutomaticSelection && !perCallModelEnabled(ctx.settings, init.perCallStandaloneInvocationKind))) {
@@ -230,6 +232,10 @@ export function createPersistedSubagentReviverFactory(
 							type: "before_subagent_spawn", agent: init.agent ?? ref.displayName, invocationKind: init.perCallStandaloneInvocationKind,
 							patterns: [init.perCallStandaloneSelector], requestedModel: init.perCallStandaloneSelector, spawnKey: ref.id,
 							assignment: init.standaloneAssignment.trim(), context: init.standaloneContext?.trim() || undefined,
+							requirements: init.standaloneRequirements === undefined ? undefined : Object.freeze({
+								...init.standaloneRequirements,
+								...(init.standaloneRequirements.input === undefined ? {} : { input: Object.freeze([...init.standaloneRequirements.input]) as unknown as string[] }),
+							}),
 							dispatchId: ref.id, standalone: true, prepared: false, revival: true,
 							automaticSelection: init.standaloneAutomaticSelection,
 						});
@@ -273,6 +279,7 @@ export function createPersistedSubagentReviverFactory(
 								standaloneSelector: init.perCallStandaloneSelector,
 								standaloneInvocationKind: init.perCallStandaloneInvocationKind,
 								automaticSelection: init.standaloneAutomaticSelection,
+								approvedAutomaticIdentity: init.standaloneAutomaticSelection ? init.perCallModelIdentity : undefined,
 								assertAuthorization: standaloneAuthorization,
 								matchPreferences,
 							};
@@ -309,7 +316,7 @@ export function createPersistedSubagentReviverFactory(
 						}
 					};
 					assertApprovedModel(perCallModel);
-					assertModelSupportsEffortCeiling(perCallModel, cfgTaskMaxEffort.get(ctx.settings));
+					if (!init.standaloneAutomaticSelection) assertModelSupportsEffortCeiling(perCallModel, cfgTaskMaxEffort.get(ctx.settings));
 				} catch (error) {
 					await reopened.close();
 					throw error;
@@ -428,7 +435,7 @@ export function createPersistedSubagentReviverFactory(
 					// never switches models, and keeps the live task.maxEffort ceiling the spawn ran under.
 					...(assertApprovedModel
 						? {
-								thinkingLevelCeiling: cfgTaskMaxEffort.get(ctx.settings),
+								thinkingLevelCeiling: init.standaloneAutomaticSelection ? undefined : cfgTaskMaxEffort.get(ctx.settings),
 								disableModelFallback: true,
 								disableServerSideFallback: true,
 								assertDispatchModel: (model: Model, streamOptions) => {
@@ -439,11 +446,11 @@ export function createPersistedSubagentReviverFactory(
 											? model.reasoning && streamOptions?.disableReasoning !== true
 											: streamOptions?.reasoning !== level;
 										if (!level || level === "auto" || changed ||
-											clampThinkingLevelToCeiling(model, level, cfgTaskMaxEffort.get(ctx.settings)) !== level) {
+											(!init.standaloneAutomaticSelection && clampThinkingLevelToCeiling(model, level, cfgTaskMaxEffort.get(ctx.settings)) !== level)) {
 											throw new PerCallModelError("The revived worker's model effort was changed or revoked.");
 										}
 									}
-									assertModelSupportsEffortCeiling(model, cfgTaskMaxEffort.get(ctx.settings));
+									if (!init.standaloneAutomaticSelection) assertModelSupportsEffortCeiling(model, cfgTaskMaxEffort.get(ctx.settings));
 								},
 							}
 						: {}),

@@ -71,6 +71,23 @@ function approved(
 		return false;
 	}
 }
+it("keeps an automatic worker's approved model snapshot while enforcing revocation and exact identity", () => {
+	let authorized = true;
+	const grants: PerCallModelGrants = {
+		settings: Settings.isolated({}),
+		agentName: "worker",
+		standaloneSelector: "mock/target",
+		automaticSelection: true,
+		assertAuthorization: () => { if (!authorized) throw new Error("revoked"); },
+	};
+	assertPerCallModelApproved(target, grants, registry);
+	const changedRegistry = { getAll: () => [other], getAvailable: () => [other] };
+	assertPerCallModelApproved(target, grants, changedRegistry);
+	expect(() => assertPerCallModelApproved(other, grants, changedRegistry)).toThrow("cannot change");
+	authorized = false;
+	expect(() => assertPerCallModelApproved(target, grants, changedRegistry)).toThrow("revoked");
+});
+
 
 interface Row {
 	name: string;

@@ -175,6 +175,7 @@ async function createPersistedSession(
 		perCallStandaloneInvocationKind?: "task" | "eval";
 		standaloneAssignment?: string;
 		standaloneContext?: string;
+		standaloneRequirements?: { contextTokens?: number; input?: string[]; reasoning?: boolean };
 		standaloneAutomaticSelection?: boolean;
 		standaloneDispatchId?: string;
 	},
@@ -201,6 +202,7 @@ async function createPersistedSession(
 		perCallStandaloneInvocationKind: contract?.perCallStandaloneInvocationKind,
 		standaloneAssignment: contract?.standaloneAssignment,
 		standaloneContext: contract?.standaloneContext,
+		standaloneRequirements: contract?.standaloneRequirements,
 		standaloneAutomaticSelection: contract?.standaloneAutomaticSelection,
 		standaloneDispatchId: contract?.standaloneDispatchId,
 		...(contract?.compactionThreshold !== undefined
@@ -667,15 +669,20 @@ describe("persisted subagent revival", () => {
 			perCallThinkingLevel: Effort.Low, perCallStandaloneSelector: "mock/selected:low",
 			perCallStandaloneInvocationKind: "task", standaloneAssignment: "original assignment",
 			standaloneContext: "original context", standaloneAutomaticSelection: automatic,
+			standaloneRequirements: { contextTokens: 180000, input: ["text", "image"], reasoning: false },
 			standaloneDispatchId: "persisted-restricted",
 		});
 		const ref = createRef(sessionFile);
-		const settings = Settings.isolated({ "task.perCallModel": automatic ? "off" : "on" });
+		const settings = Settings.isolated({
+			"task.perCallModel": automatic ? "off" : "on",
+			...(automatic ? { "task.perCallModelAllow": ["mock/other"] } : {}),
+		});
 		const revive = await createFactory(cwd, undefined, { settings, modelRegistry: stubRegistry([model]), extensionRunner })(ref);
 		if (!revive) throw new Error("Expected a persisted reviver");
 		await revive(ref);
 		expect(emitBeforeSubagentSpawn).toHaveBeenCalledWith(expect.objectContaining({
 			agent: "task", assignment: "original assignment", context: "original context",
+			requirements: { contextTokens: 180000, input: ["text", "image"], reasoning: false },
 			dispatchId: ref.id, spawnKey: ref.id, requestedModel: "mock/selected:low",
 			standalone: true, prepared: false, revival: true, automaticSelection: automatic,
 		}));

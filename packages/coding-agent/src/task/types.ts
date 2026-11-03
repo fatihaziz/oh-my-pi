@@ -46,6 +46,15 @@ export interface SubagentEventPayload {
 const outputSchemaInputSchema = type("object | boolean | string | null");
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
+export const taskRequirementsSchema = type({
+	"contextTokens?": "number.integer > 0",
+	"outputTokens?": "number.integer > 0",
+	"input?": "string[]",
+	"reasoning?": "boolean",
+	"tools?": "boolean",
+	"effort?": "string",
+	"+": "reject",
+});
 
 // Per-spawn fields the seance schema adds or widens. Typed against
 // SeanceTaskSchemaFields so a field added there fails to compile until it is
@@ -77,6 +86,7 @@ export const taskItemSchema = type({
 	agent: "string = 'task'",
 	task: "string",
 	solutionSpace: "string",
+	"requirements?": taskRequirementsSchema,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -88,6 +98,7 @@ const taskItemSchemaIsolated = type({
 	agent: "string = 'task'",
 	task: "string",
 	solutionSpace: "string",
+	"requirements?": taskRequirementsSchema,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -101,6 +112,7 @@ export const taskSchema = type({
 	agent: "string = 'task'",
 	task: "string",
 	solutionSpace: "string",
+	"requirements?": taskRequirementsSchema,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -113,6 +125,7 @@ const taskSchemaNoIsolation = type({
 	agent: "string = 'task'",
 	task: "string",
 	solutionSpace: "string",
+	"requirements?": taskRequirementsSchema,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -200,6 +213,7 @@ function createTaskSchema(options: {
 				agent,
 				...taskFields,
 				solutionSpace: "string",
+				"requirements?": taskRequirementsSchema,
 				...effortField,
 				...schemaFields,
 				...toolsField,
@@ -220,6 +234,7 @@ function createTaskSchema(options: {
 			agent,
 			...taskFields,
 			solutionSpace: "string",
+			"requirements?": taskRequirementsSchema,
 			...effortField,
 			...schemaFields,
 			...toolsField,
@@ -240,6 +255,7 @@ function createTaskSchema(options: {
 			agent,
 			...taskFields,
 			solutionSpace: "string",
+			"requirements?": taskRequirementsSchema,
 			...effortField,
 			...schemaFields,
 			...toolsField,
@@ -253,6 +269,7 @@ function createTaskSchema(options: {
 		agent,
 		...taskFields,
 		solutionSpace: "string",
+		"requirements?": taskRequirementsSchema,
 		...effortField,
 		...schemaFields,
 		...toolsField,

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
@@ -39,7 +40,7 @@ import {
 	StructuredSubagentError,
 	type StructuredSubagentRequest,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
-import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import { taskRequirementsSchema, type AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
@@ -662,6 +663,9 @@ describe("structured subagent primitive", () => {
 				assignment: "resolved file contents", context: "shared context",
 				dispatchId: "BoundWorker", parentToolCallId: "call-1", index: 2, standalone: true,
 			});
+			expect(event.requirements).toEqual({ contextTokens: 200000, outputTokens: 8000, input: ["text", "image"], reasoning: false });
+			expect(Object.isFrozen(event.requirements)).toBe(true);
+			expect(Object.isFrozen(event.requirements?.input)).toBe(true);
 			expect(Object.isFrozen(event)).toBe(true);
 			return {
 				model: "openai/gpt-4o:medium", enforceExactModel: true,
@@ -678,10 +682,29 @@ describe("structured subagent primitive", () => {
 		});
 		const settled = await runStructuredSubagent(request({
 			session: childSession, invocationKind, assignment: "resolved file contents", context: "shared context",
+			requirements: { contextTokens: 200000, outputTokens: 8000, input: ["text", "image"], reasoning: false },
 			identity: { id: "BoundWorker" }, parentToolCallId: "call-1", index: 2, retainArtifacts: true,
 		}));
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
+
+	it("rejects malformed or unknown declared requirements", () => {
+		expect(taskRequirementsSchema({ contextTokens: 10, input: ["text", "image"], reasoning: false })).not.toBeInstanceOf(type.errors);
+		expect(taskRequirementsSchema({ contextTokens: 0 })).toBeInstanceOf(type.errors);
+		expect(taskRequirementsSchema({ unrecognized: true })).toBeInstanceOf(type.errors);
+	});
+
+	it.each([undefined, async () => undefined, async () => ({ model: "openai/gpt-4o" })])(
+		"refuses unselected dispatch when workflow routing is expected", async emit => {
+			mockDiscovery();
+			const childSession = session();
+			childSession.expectsSubagentRouting = () => true;
+			childSession.emitBeforeSubagentSpawn = emit;
+			const run = vi.spyOn(executorModule, "runSubprocess");
+			await expect(runStructuredSubagent(request({ session: childSession }))).rejects.toThrow(/routing/i);
+			expect(run).not.toHaveBeenCalled();
+		},
+	);
 
 	it("rejects automatic model routing without a live authorization", async () => {
 		mockDiscovery();
@@ -1548,7 +1571,7 @@ describe("per-call model preflight", () => {
 		const agentDir = path.join(root, "agent");
 		await fs.mkdir(projectDir, { recursive: true });
 		const configPath = path.join(agentDir, "config.yml");
-		const taskConfig = 'task:\n  perCallModel: "on"\n  isolation:\n    enabled: false\n';
+		const taskConfig = 'modelRoles:\n  review: mock/target\ntask:\n  perCallModel: "on"\n  isolation:\n    enabled: false\n';
 		await Bun.write(configPath, `${taskConfig}  perCallModelAllow:\n    - mock/target\n`);
 		const liveSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
 		const child = executorModule.createSubagentSettings(liveSettings, {

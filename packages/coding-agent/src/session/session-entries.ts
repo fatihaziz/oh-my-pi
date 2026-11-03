@@ -7,7 +7,7 @@ import type {
 	TextContent,
 	Usage,
 } from "@oh-my-pi/pi-ai";
-import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { StructuredSubagentSchemaMode, TaskModelRequirements } from "@oh-my-pi/pi-tui/tools/task";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { CompactionMethod } from "./compaction-methods";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
@@ -295,6 +295,7 @@ export interface SessionInitEntry extends SessionEntryBase {
 	/** Original dispatch binding and selection provenance for standalone revival. */
 	standaloneAssignment?: string;
 	standaloneContext?: string;
+	standaloneRequirements?: TaskModelRequirements;
 	standaloneAutomaticSelection?: boolean;
 	standaloneDispatchId?: string;
 	/** Subagent's `subagent:<id>` retry fallback role as installed at spawn; cold revival reinstalls it. Absent when none was installed or on older files. */
