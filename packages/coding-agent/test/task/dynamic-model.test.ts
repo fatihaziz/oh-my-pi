@@ -39,6 +39,8 @@ async function runWorker(options: {
 	assignment?: string;
 	missingAuthorization?: boolean;
 	authorizationCheck?: () => void;
+	automaticSelection?: boolean;
+	context?: string;
 	setup?: (modelRegistry: ModelRegistry) => void;
 }) {
 	const { model } = options;
@@ -81,14 +83,18 @@ async function runWorker(options: {
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getSessionAgents: () => [],
-		emitBeforeSubagentSpawn: options.missingAuthorization ? undefined : async () => ({ assertAuthorization: options.authorizationCheck ?? (() => undefined) }),
+		emitBeforeSubagentSpawn: options.missingAuthorization ? undefined : async () => ({
+			...(options.automaticSelection ? { model: options.perCallModel, enforceExactModel: true } : {}),
+			assertAuthorization: options.authorizationCheck ?? (() => undefined),
+		}),
 	} as unknown as ToolSession;
 	const execution = await runStructuredSubagent({
 		session,
 		invocationKind: "task",
 		assignment: options.assignment ?? "Answer the question.",
+		context: options.context,
 		agent: "worker",
-		perCallModel: options.perCallModel,
+		perCallModel: options.automaticSelection ? undefined : options.perCallModel,
 		structured: false,
 		identity: { id: agentId },
 		keepAlive: false,
@@ -167,6 +173,47 @@ describe("per-call exact selection after background discovery", () => {
 		const model = createMockModel({ id: "unauthorized" });
 		await expect(runWorker({ model, perCallModel: "mock/unauthorized:off", missingAuthorization: true })).rejects.toThrow();
 		expect(model.calls).toHaveLength(0);
+	});
+
+	it("rechecks authorization after asynchronous session creation before dispatch", async () => {
+		let authorized = true;
+		const model = createMockModel({ id: "startup-revoked" });
+		const result = await runWorker({
+			model,
+			perCallModel: "mock/startup-revoked:off",
+			authorizationCheck: () => { if (!authorized) throw new Error("startup authorization revoked"); },
+			setup: () => {
+				const createAgentSession = sdk.createAgentSession;
+				vi.spyOn(sdk, "createAgentSession").mockImplementation(async options => {
+					const created = await createAgentSession(options);
+					authorized = false;
+					return created;
+				});
+			},
+		});
+		expect(result.exitCode).not.toBe(0);
+		expect(failure(result)).toContain("startup authorization revoked");
+		expect(model.calls).toHaveLength(0);
+	});
+
+	it("rejects a model changed while the worker session is being created", async () => {
+		const model = createMockModel({ id: "startup-selected" });
+		const other = createMockModel({ id: "startup-substitute" });
+		const result = await runWorker({
+			model,
+			perCallModel: "mock/startup-selected:off",
+			setup: () => {
+				const createAgentSession = sdk.createAgentSession;
+				vi.spyOn(sdk, "createAgentSession").mockImplementation(async options => {
+					const created = await createAgentSession(options);
+					created.session.agent.setModel(other);
+					return created;
+				});
+			},
+		});
+		expect(result.exitCode).not.toBe(0);
+		expect(model.calls).toHaveLength(0);
+		expect(other.calls).toHaveLength(0);
 	});
 
 	it("refuses the next request once the operator revokes the grant mid-run", async () => {
@@ -253,6 +300,24 @@ describe("per-call exact selection after background discovery", () => {
 			perCallModel: true,
 			perCallModelIdentity: identity,
 			perCallThinkingLevel: level,
+			standaloneAssignment: "Answer the question.",
+			standaloneAutomaticSelection: false,
+		});
+	});
+
+	it("persists the reviewed assignment, context and automatic selection provenance", async () => {
+		const model = createMockModel({ id: "automatic-persisted", handler: () => ({ content: ["Done."] }) });
+		const init = vi.spyOn(SessionManager.prototype, "appendSessionInit");
+		const result = await runWorker({
+			model, perCallModel: "mock/automatic-persisted:off", automaticSelection: true,
+			assignment: "Reviewed assignment.", context: "Reviewed context.",
+		});
+		expect(result.exitCode).toBe(0);
+		expect(init.mock.calls[0]?.[0]).toMatchObject({
+			standaloneAssignment: "Reviewed assignment.",
+			standaloneContext: "Reviewed context.",
+			standaloneAutomaticSelection: true,
+			perCallStandaloneSelector: "mock/automatic-persisted:off",
 		});
 	});
 });

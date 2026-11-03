@@ -292,6 +292,11 @@ export interface SessionInitEntry extends SessionEntryBase {
 	/** Original standalone selection; revival must obtain fresh parent authorization. */
 	perCallStandaloneSelector?: string;
 	perCallStandaloneInvocationKind?: "task" | "eval";
+	/** Original dispatch binding and selection provenance for standalone revival. */
+	standaloneAssignment?: string;
+	standaloneContext?: string;
+	standaloneAutomaticSelection?: boolean;
+	standaloneDispatchId?: string;
 	/** Subagent's `subagent:<id>` retry fallback role as installed at spawn; cold revival reinstalls it. Absent when none was installed or on older files. */
 	retryFallback?: RetryFallbackRole;
 	/** Whether the agent definition is read-only, allowing an exact zero-LoC attribution. */

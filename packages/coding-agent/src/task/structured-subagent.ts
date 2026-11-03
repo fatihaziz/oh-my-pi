@@ -713,8 +713,10 @@ export async function resolveEffectiveSubagentPolicy(
 async function applySpawnHook(
 	request: StructuredSubagentRequest,
 	policy: EffectiveSubagentPolicy,
+	dispatchId?: string,
 ): Promise<EffectiveSubagentPolicy> {
-	if (policy.preparedSession !== undefined && policy.perCallModelGrants?.standaloneSelector === undefined) return policy;
+	const standalone = !hostedRuntime() && !externalExecutorForSession(request.session.getSessionFile());
+	if (!standalone && policy.preparedSession !== undefined && policy.perCallModelGrants?.standaloneSelector === undefined) return policy;
 	const emit = request.session.emitBeforeSubagentSpawn;
 	if (!emit) {
 		if (policy.perCallModelGrants?.standaloneSelector !== undefined)
@@ -726,15 +728,24 @@ async function applySpawnHook(
 		request.identity?.label ??
 		(request.parentToolCallId !== undefined ? `${request.parentToolCallId}:${request.index ?? 0}` : undefined);
 	const spawnResult = await emit(
-		{
-			type: "before_subagent_spawn",
+		Object.freeze({
+			type: "before_subagent_spawn" as const,
 			agent: policy.agentName,
 			invocationKind: request.invocationKind,
 			modelRole: policy.modelRole,
-			patterns: policy.modelOverride ?? [],
+			patterns: Object.freeze([...(policy.modelOverride ?? [])]) as unknown as string[],
 			requestedModel: policy.perCallModelGrants?.standaloneSelector,
 			spawnKey,
-		},
+			assignment: request.assignment.trim(),
+			context: request.context?.trim() || undefined,
+			dispatchId,
+			parentToolCallId: request.parentToolCallId,
+			index: request.index,
+			effort: request.effort,
+			solutionSpace: request.solutionSpace,
+			standalone,
+			prepared: policy.preparedSession !== undefined,
+		}),
 		request.signal,
 	);
 	if (spawnResult?.block) {
@@ -749,11 +760,36 @@ async function applySpawnHook(
 		spawnResult.assertAuthorization();
 		return policy;
 	}
+	if (standalone && spawnResult?.assertAuthorization && !spawnResult.enforceExactModel) {
+		throw new StructuredSubagentError("preflight", "Standalone authorization requires an exact automatic model selection.");
+	}
 	if (spawnResult?.assertAuthorization) {
 		spawnResult.assertAuthorization();
 		policy.assertSpawnAuthorization = spawnResult.assertAuthorization;
 	}
 	if (spawnResult?.model === undefined) return policy;
+	if (spawnResult.enforceExactModel) {
+		if (!standalone || policy.preparedSession || typeof spawnResult.model !== "string" ||
+			!/^[^\s/@,*?[\]{}]+\/[^\s,*?{}]+$/.test(spawnResult.model.trim()) ||
+			resolveExplicitModelRole(spawnResult.model.trim(), request.session.settings) !== undefined ||
+			!spawnResult.assertAuthorization) {
+			throw new StructuredSubagentError("preflight", "Automatic routing requires one exact standalone model and live authorization.");
+		}
+		const selector = spawnResult.model.trim();
+		const grants: PerCallModelGrants = {
+			settings: request.session.settings,
+			agentName: policy.agentName,
+			agentModel: policy.agent.model,
+			agentSource: policy.agent.source,
+			standaloneSelector: selector,
+			standaloneInvocationKind: request.invocationKind,
+			automaticSelection: true,
+			assertAuthorization: spawnResult.assertAuthorization,
+			matchPreferences: structuredClone(getModelMatchPreferences(request.session.settings.grantAuthority())),
+		};
+		return { ...policy, modelOverride: [selector], modelRole: undefined, modelRoute: spawnResult.note,
+			parentActiveModelPattern: undefined, perCallModelGrants: grants };
+	}
 	const replacement = resolveConfiguredModelPatterns(spawnResult.model, request.session.settings);
 	if (replacement.length === 0) return policy;
 	return { ...policy, modelOverride: replacement, modelRoute: spawnResult.note };
@@ -885,7 +921,7 @@ function buildExecutorOptions(
 		perCallModelGrants: policy.perCallModelGrants,
 		assertSpawnAuthorization: policy.assertSpawnAuthorization,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
-		effort: request.effort,
+		effort: policy.perCallModelGrants?.automaticSelection ? undefined : request.effort,
 		solutionSpace: request.solutionSpace?.trim() || undefined,
 		structured: policy.structured,
 		...(policy.schema.source === "none"
@@ -1093,8 +1129,24 @@ function describeSalvagedWork(result: SingleResult): string {
  * lease or child dispatch; callers keep responsibility for their result text.
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
-	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
+	const preflight = await resolveEffectiveSubagentPolicy(request);
 	const external = externalExecutorForSession(request.session.getSessionFile());
+	let dispatchId: string | undefined;
+	try {
+		dispatchId = !hostedRuntime() && !external
+			? await reserveStructuredSubagentId(request.session, {
+					...request.identity,
+					label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
+				})
+			: request.identity?.id;
+	} catch (error) {
+		throw new StructuredSubagentError(
+			"execution",
+			`Subagent execution failed: ${error instanceof Error ? error.message : String(error)}`,
+			{ cause: error },
+		);
+	}
+	const policy = await applySpawnHook(request, preflight, dispatchId);
 	if (external) {
 		policy.assertSpawnAuthorization?.();
 		const execution = await external.execute(request, policy);
@@ -1123,10 +1175,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			? (result: SingleResult) => request.session.recordEvalSubagentUsage?.(result.usage?.output ?? 0)
 			: undefined;
 	try {
-		const id = await reserveStructuredSubagentId(request.session, {
-			...request.identity,
-			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
-		});
+		const id = dispatchId ?? await reserveStructuredSubagentId(request.session, request.identity);
 		if (policy.preparedSession === undefined) await refreshSkillsForAutoload(request.session, policy.agent);
 		const baseOptions = buildExecutorOptions(request, policy, lease, id);
 		baseOptions.onCleanupDeferred = completion => {

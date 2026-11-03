@@ -208,6 +208,13 @@ export function createPersistedSubagentReviverFactory(
 							process.env.PI_FOYER === "true" || process.env.FOYER_VERSION || process.env.FOYER_COMPANION_OBSERVER_URL) {
 							throw new PerCallModelError("A standalone per-call worker requires its live, authorized standalone parent to revive.");
 						}
+						if (typeof init.standaloneAssignment !== "string" || !init.standaloneAssignment.trim() ||
+							typeof init.standaloneAutomaticSelection !== "boolean" || !init.standaloneDispatchId) {
+							throw new PerCallModelError(`Cannot revive subagent "${ref.id}": its original standalone assignment or selection provenance was not recorded. The agent was not revived.`);
+						}
+						if (init.standaloneDispatchId !== ref.id) {
+							throw new PerCallModelError(`Cannot revive subagent "${ref.id}": the persisted dispatch identity does not match. The agent was not revived.`);
+						}
 						const resolution = resolveModelOverride([init.perCallStandaloneSelector], ctx.modelRegistry, ctx.settings, { exactOnly: true });
 						const level = resolution.thinkingLevel;
 						const ceiling = cfgTaskMaxEffort.get(ctx.settings);
@@ -216,12 +223,15 @@ export function createPersistedSubagentReviverFactory(
 							clampThinkingLevelToCeiling(perCallModel, level, ceiling) !== level ||
 							(level === "off" ? !!perCallModel.thinking?.requiresEffort : !getSupportedEfforts(perCallModel).some(effort => effort === level)) ||
 							!perCallModel.input.includes("text") || perCallModel.supportsTools === false ||
-							!init.perCallStandaloneInvocationKind || !perCallModelEnabled(ctx.settings, init.perCallStandaloneInvocationKind)) {
+							!init.perCallStandaloneInvocationKind || (!init.standaloneAutomaticSelection && !perCallModelEnabled(ctx.settings, init.perCallStandaloneInvocationKind))) {
 							throw new PerCallModelError("The saved standalone model or effort no longer meets the current policy.");
 						}
 						const admitted = await parentSession.extensionRunner.emitBeforeSubagentSpawn({
 							type: "before_subagent_spawn", agent: init.agent ?? ref.displayName, invocationKind: init.perCallStandaloneInvocationKind,
 							patterns: [init.perCallStandaloneSelector], requestedModel: init.perCallStandaloneSelector, spawnKey: ref.id,
+							assignment: init.standaloneAssignment.trim(), context: init.standaloneContext?.trim() || undefined,
+							dispatchId: ref.id, standalone: true, prepared: false, revival: true,
+							automaticSelection: init.standaloneAutomaticSelection,
 						});
 						if (admitted?.block || admitted?.model !== undefined || !admitted?.assertAuthorization) {
 							throw new PerCallModelError(admitted?.reason ?? "The parent refused or replaced the saved standalone model.");
@@ -261,6 +271,8 @@ export function createPersistedSubagentReviverFactory(
 								agentRemoved: configuredAgent === undefined,
 								parentModelPattern,
 								standaloneSelector: init.perCallStandaloneSelector,
+								standaloneInvocationKind: init.perCallStandaloneInvocationKind,
+								automaticSelection: init.standaloneAutomaticSelection,
 								assertAuthorization: standaloneAuthorization,
 								matchPreferences,
 							};
@@ -273,7 +285,7 @@ export function createPersistedSubagentReviverFactory(
 						// after this revival; transcript metadata never substitutes for it.
 						const liveParentSession = resolveParentSession();
 						if (init.perCallStandaloneSelector && (!liveParentSession || !init.perCallStandaloneInvocationKind ||
-							!perCallModelEnabled(ctx.settings, init.perCallStandaloneInvocationKind))) {
+							(!init.standaloneAutomaticSelection && !perCallModelEnabled(ctx.settings, init.perCallStandaloneInvocationKind)))) {
 							throw new PerCallModelError("The standalone worker's parent or model authorization is no longer available.");
 						}
 						const parentModel = liveParentSession?.model;

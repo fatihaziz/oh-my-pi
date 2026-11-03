@@ -171,6 +171,12 @@ async function createPersistedSession(
 		resolvedModel?: string;
 		perCallModelIdentity?: string;
 		perCallThinkingLevel?: ConfiguredThinkingLevel | null;
+		perCallStandaloneSelector?: string;
+		perCallStandaloneInvocationKind?: "task" | "eval";
+		standaloneAssignment?: string;
+		standaloneContext?: string;
+		standaloneAutomaticSelection?: boolean;
+		standaloneDispatchId?: string;
 	},
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
@@ -191,6 +197,12 @@ async function createPersistedSession(
 		perCallModel: contract?.perCallModel,
 		perCallModelIdentity: contract?.perCallModelIdentity,
 		perCallThinkingLevel: contract?.perCallThinkingLevel,
+		perCallStandaloneSelector: contract?.perCallStandaloneSelector,
+		perCallStandaloneInvocationKind: contract?.perCallStandaloneInvocationKind,
+		standaloneAssignment: contract?.standaloneAssignment,
+		standaloneContext: contract?.standaloneContext,
+		standaloneAutomaticSelection: contract?.standaloneAutomaticSelection,
+		standaloneDispatchId: contract?.standaloneDispatchId,
 		...(contract?.compactionThreshold !== undefined
 			? { compactionThreshold: contract.compactionThreshold }
 			: undefined),
@@ -223,6 +235,7 @@ interface ReviveOwnerOptions {
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
 	sessionAgents?: readonly AgentDefinition[];
+	extensionRunner?: unknown;
 }
 
 function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptions = {}) {
@@ -248,6 +261,7 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 			return owner.preparedExtensions;
 		},
 		getSessionAgents: () => owner.sessionAgents ?? [],
+		extensionRunner: owner.extensionRunner,
 	} as unknown as AgentSession;
 	return createPersistedSubagentReviverFactory({
 		session: parentSession,
@@ -633,6 +647,91 @@ describe("persisted subagent revival", () => {
 			getAvailable: () => models,
 			getAll: () => models,
 		}) as unknown as ModelRegistry;
+
+	it.each([true, false])("reauthorizes a cold standalone worker with automaticSelection=%s", async automatic => {
+		const cwd = makeTempDir("@pi-revive-standalone-");
+		const model = perCallModelFixture("selected");
+		let revoked = false;
+		const assertAuthorization = () => {
+			if (revoked) throw new PerCallModelError("authorization revoked");
+		};
+		const emitBeforeSubagentSpawn = vi.fn(async () => ({ assertAuthorization }));
+		const extensionRunner = { hasHandlers: () => true, emitBeforeSubagentSpawn };
+		let options: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async created => {
+			options = created;
+			return { session: Object.assign(createRevivedSession([]).session, { model }) } as CreateAgentSessionResult;
+		});
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			agent: "task", perCallModel: true, perCallModelIdentity: "mock/selected",
+			perCallThinkingLevel: Effort.Low, perCallStandaloneSelector: "mock/selected:low",
+			perCallStandaloneInvocationKind: "task", standaloneAssignment: "original assignment",
+			standaloneContext: "original context", standaloneAutomaticSelection: automatic,
+			standaloneDispatchId: "persisted-restricted",
+		});
+		const ref = createRef(sessionFile);
+		const settings = Settings.isolated({ "task.perCallModel": automatic ? "off" : "on" });
+		const revive = await createFactory(cwd, undefined, { settings, modelRegistry: stubRegistry([model]), extensionRunner })(ref);
+		if (!revive) throw new Error("Expected a persisted reviver");
+		await revive(ref);
+		expect(emitBeforeSubagentSpawn).toHaveBeenCalledWith(expect.objectContaining({
+			agent: "task", assignment: "original assignment", context: "original context",
+			dispatchId: ref.id, spawnKey: ref.id, requestedModel: "mock/selected:low",
+			standalone: true, prepared: false, revival: true, automaticSelection: automatic,
+		}));
+		expect(options?.assertDispatchModel).toBeDefined();
+		revoked = true;
+		expect(() => options?.assertDispatchModel?.(model)).toThrow("authorization revoked");
+	});
+
+	it.each([
+		{ assignment: undefined, automatic: true, id: "persisted-restricted", error: /assignment or selection provenance was not recorded/ },
+		{ assignment: "original assignment", automatic: undefined, id: "persisted-restricted", error: /assignment or selection provenance was not recorded/ },
+		{ assignment: "original assignment", automatic: true, id: undefined, error: /assignment or selection provenance was not recorded/ },
+		{ assignment: "original assignment", automatic: true, id: "different-worker", error: /persisted dispatch identity does not match/ },
+	])("refuses standalone revival without matching provenance", async ({ assignment, automatic, id, error }) => {
+		const cwd = makeTempDir("@pi-revive-standalone-legacy-");
+		const model = perCallModelFixture("selected");
+		const emitBeforeSubagentSpawn = vi.fn();
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			perCallModel: true, perCallModelIdentity: "mock/selected", perCallThinkingLevel: Effort.Low,
+			perCallStandaloneSelector: "mock/selected:low", perCallStandaloneInvocationKind: "task",
+			standaloneAssignment: assignment, standaloneAutomaticSelection: automatic,
+			standaloneDispatchId: id,
+		});
+		const ref = createRef(sessionFile);
+		const revive = await createFactory(cwd, undefined, {
+			modelRegistry: stubRegistry([model]), extensionRunner: { hasHandlers: () => true, emitBeforeSubagentSpawn },
+		})(ref);
+		if (!revive) throw new Error("Expected a persisted reviver");
+		await expect(revive(ref)).rejects.toThrow(error);
+		expect(emitBeforeSubagentSpawn).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		{ automatic: false, mode: "off" as const, response: { assertAuthorization: () => {} } },
+		{ automatic: true, mode: "off" as const, response: { block: true, reason: "authorization denied" } },
+		{ automatic: true, mode: "off" as const, response: { model: "mock/other:low", assertAuthorization: () => {} } },
+	])("refuses disabled explicit selection, denied or replaced authorization", async ({ automatic, mode, response }) => {
+		const cwd = makeTempDir("@pi-revive-standalone-denied-");
+		const model = perCallModelFixture("selected");
+		const create = vi.spyOn(sdkModule, "createAgentSession");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			perCallModel: true, perCallModelIdentity: "mock/selected", perCallThinkingLevel: Effort.Low,
+			perCallStandaloneSelector: "mock/selected:low", perCallStandaloneInvocationKind: "task",
+			standaloneAssignment: "original assignment", standaloneAutomaticSelection: automatic,
+			standaloneDispatchId: "persisted-restricted",
+		});
+		const ref = createRef(sessionFile);
+		const revive = await createFactory(cwd, undefined, {
+			settings: Settings.isolated({ "task.perCallModel": mode }),
+			modelRegistry: stubRegistry([model]),
+			extensionRunner: { hasHandlers: () => true, emitBeforeSubagentSpawn: async () => response },
+		})(ref);
+		if (!revive) throw new Error("Expected a persisted reviver");
+		await expect(revive(ref)).rejects.toBeInstanceOf(PerCallModelError);
+		expect(create).not.toHaveBeenCalled();
+	});
 
 	it("re-checks a revived per-call worker against current grants and keeps it off fallbacks", async () => {
 		const own = getBundledModel("anthropic", "claude-sonnet-4-5");

@@ -3985,7 +3985,7 @@ export class Settings {
 	 * `overrides` deep-merged over `base`. Keys follow the higher layer's order, then base-only keys:
 	 * record order is meaningful to some consumers (`retry.fallbackChains` is searched in order).
 	 */
-	#deepMerge(base: RawSettings, overrides: RawSettings): RawSettings {
+	#deepMerge(base: RawSettings, overrides: RawSettings, path = ""): RawSettings {
 		const result: RawSettings = {};
 		for (const key of Object.keys(overrides)) {
 			const override = overrides[key];
@@ -3997,11 +3997,13 @@ export class Settings {
 				typeof override === "object" &&
 				override !== null &&
 				!Array.isArray(override) &&
+				// An explicit empty worker map clears inherited pins; other records still merge.
+				!(path === "task" && key === "agentModelOverrides" && Object.keys(override).length === 0) &&
 				typeof baseVal === "object" &&
 				baseVal !== null &&
 				!Array.isArray(baseVal)
 			) {
-				setOwn(result, key, this.#deepMerge(baseVal as RawSettings, override as RawSettings));
+				setOwn(result, key, this.#deepMerge(baseVal as RawSettings, override as RawSettings, path ? `${path}.${key}` : key));
 			} else {
 				setOwn(result, key, override);
 			}

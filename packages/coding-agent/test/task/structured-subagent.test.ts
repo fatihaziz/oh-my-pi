@@ -639,16 +639,69 @@ describe("structured subagent primitive", () => {
 			modelRole: "definition",
 			modelRoute: "pool test",
 		});
-		expect(events).toEqual([
-			{
-				type: "before_subagent_spawn",
-				agent: "worker",
-				invocationKind: "task",
-				modelRole: "definition",
-				patterns: ["anthropic/claude-opus-4-5"],
-			},
-		]);
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({
+			type: "before_subagent_spawn",
+			agent: "worker",
+			invocationKind: "task",
+			modelRole: "definition",
+			patterns: ["anthropic/claude-opus-4-5"],
+			assignment: "Inspect the target.",
+			standalone: true,
+			prepared: false,
+		});
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it.each(["task", "eval"] as const)("binds %s automatic routing to the resolved assignment and rechecks authorization at dispatch", async invocationKind => {
+		mockDiscovery();
+		const childSession = session();
+		let permitted = true;
+		childSession.emitBeforeSubagentSpawn = async event => {
+			expect(event).toMatchObject({
+				assignment: "resolved file contents", context: "shared context",
+				dispatchId: "BoundWorker", parentToolCallId: "call-1", index: 2, standalone: true,
+			});
+			expect(Object.isFrozen(event)).toBe(true);
+			return {
+				model: "openai/gpt-4o:medium", enforceExactModel: true,
+				assertAuthorization: () => { if (!permitted) throw new Error("revoked"); },
+			};
+		};
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			expect(options.id).toBe("BoundWorker");
+			expect(options.modelOverride).toEqual(["openai/gpt-4o:medium"]);
+			expect(options.perCallModelGrants?.automaticSelection).toBe(true);
+			permitted = false;
+			expect(() => options.perCallModelGrants?.assertAuthorization?.()).toThrow("revoked");
+			return result();
+		});
+		const settled = await runStructuredSubagent(request({
+			session: childSession, invocationKind, assignment: "resolved file contents", context: "shared context",
+			identity: { id: "BoundWorker" }, parentToolCallId: "call-1", index: 2, retainArtifacts: true,
+		}));
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("rejects automatic model routing without a live authorization", async () => {
+		mockDiscovery();
+		const childSession = session();
+		childSession.emitBeforeSubagentSpawn = async () => ({ model: "openai/gpt-4o:medium", enforceExactModel: true });
+		await expect(runStructuredSubagent(request({ session: childSession }))).rejects.toThrow(
+			"Automatic routing requires one exact standalone model and live authorization.",
+		);
+	});
+
+	it.each(["task", "eval"] as const)("rejects %s authorization without an exact automatic selection", async invocationKind => {
+		mockDiscovery();
+		const childSession = session();
+		childSession.emitBeforeSubagentSpawn = async () => ({ assertAuthorization: () => {} });
+		const run = vi.spyOn(executorModule, "runSubprocess");
+		await expect(runStructuredSubagent(request({ session: childSession, invocationKind }))).rejects.toThrow(
+			"Standalone authorization requires an exact automatic model selection.",
+		);
+		expect(run).not.toHaveBeenCalled();
+		expect(artifactsDirsFromRegistry()).toEqual([]);
 	});
 
 	it("rejects dispatch before leasing artifacts when an extension blocks the spawn", async () => {
@@ -1091,7 +1144,7 @@ describe("structured subagent primitive", () => {
 		await fs.rm(restrictedRun.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("unregisters and removes a temporary lease when output ID allocation fails", async () => {
+	it("reports output ID allocation failure before creating a temporary lease", async () => {
 		mockDiscovery();
 		const failingSession = session();
 		failingSession.agentOutputManager = {
@@ -1105,10 +1158,8 @@ describe("structured subagent primitive", () => {
 			"Subagent execution failed: allocate failed",
 		);
 
-		const artifactsDir = remove.mock.calls[0]?.[0];
-		expect(typeof artifactsDir).toBe("string");
+		expect(remove).not.toHaveBeenCalled();
 		expect(artifactsDirsFromRegistry()).toEqual([]);
-		await expect(fs.stat(artifactsDir as string)).rejects.toThrow();
 	});
 
 	it("unregisters and removes a temporary lease when plan reference loading fails", async () => {

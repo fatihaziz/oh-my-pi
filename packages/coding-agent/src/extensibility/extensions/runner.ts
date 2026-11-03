@@ -2464,7 +2464,7 @@ export class ExtensionRunner {
 	): Promise<BeforeSubagentSpawnEventResult | undefined> {
 		if (!this.hasHandlers("before_subagent_spawn")) return undefined;
 		const ctx = this.createContext();
-		let chosen: Pick<BeforeSubagentSpawnEventResult, "model" | "note"> | undefined;
+		let chosen: Pick<BeforeSubagentSpawnEventResult, "model" | "note" | "enforceExactModel"> | undefined;
 		const authorizations: Array<() => void> = [];
 
 		for (const ext of this.extensions) {
@@ -2478,16 +2478,23 @@ export class ExtensionRunner {
 					ctx,
 					ext,
 					extensionHandlerTimeoutMs,
-					undefined,
+					event.standalone ? () => ({ block: true, reason: "Subagent routing handler failed or timed out." }) : undefined,
 					signal,
 				);
 				if (!handlerResult) continue;
 				const result = handlerResult as BeforeSubagentSpawnEventResult;
 				if (result.block) return result;
 				if (result.assertAuthorization) authorizations.push(result.assertAuthorization);
-				if (result.model !== undefined) chosen = { model: result.model, note: result.note };
+				if (result.model !== undefined) {
+					if (chosen?.enforceExactModel || (result.enforceExactModel && chosen?.model !== undefined))
+						return { block: true, reason: "Conflicting subagent model routing handlers." };
+					chosen = { model: result.model, note: result.note, enforceExactModel: result.enforceExactModel };
+				} else if (result.enforceExactModel) {
+					return { block: true, reason: "Automatic subagent routing did not select a model." };
+				}
 			}
 		}
+		if (signal?.aborted) return { block: true, reason: "Subagent routing was cancelled." };
 
 		return authorizations.length
 			? { ...chosen, assertAuthorization: () => { for (const authorize of authorizations) authorize(); } }

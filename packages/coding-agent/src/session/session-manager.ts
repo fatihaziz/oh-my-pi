@@ -3664,6 +3664,10 @@ export class SessionManager {
 		perCallThinkingLevel?: ConfiguredThinkingLevel | null;
 		perCallStandaloneSelector?: string;
 		perCallStandaloneInvocationKind?: "task" | "eval";
+		standaloneAssignment?: string;
+		standaloneContext?: string;
+		standaloneAutomaticSelection?: boolean;
+		standaloneDispatchId?: string;
 		retryFallback?: RetryFallbackRole;
 		readOnly?: boolean;
 		outputSchema?: unknown;
@@ -4715,6 +4719,10 @@ export interface PersistedSessionInit {
 	perCallThinkingLevel?: ConfiguredThinkingLevel | null;
 	perCallStandaloneSelector?: string;
 	perCallStandaloneInvocationKind?: "task" | "eval";
+	standaloneAssignment?: string;
+	standaloneContext?: string;
+	standaloneAutomaticSelection?: boolean;
+	standaloneDispatchId?: string;
 	retryFallback?: RetryFallbackRole;
 	readOnly?: boolean;
 	outputSchema?: unknown;
@@ -4748,6 +4756,10 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			perCallThinkingLevel: entry.perCallThinkingLevel,
 			perCallStandaloneSelector: entry.perCallStandaloneSelector,
 			perCallStandaloneInvocationKind: entry.perCallStandaloneInvocationKind,
+			standaloneAssignment: entry.standaloneAssignment,
+			standaloneContext: entry.standaloneContext,
+			standaloneAutomaticSelection: entry.standaloneAutomaticSelection,
+			standaloneDispatchId: entry.standaloneDispatchId,
 			retryFallback: entry.retryFallback,
 			readOnly: entry.readOnly,
 			outputSchema: entry.outputSchema,

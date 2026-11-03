@@ -103,3 +103,4 @@ packages/coding-agent/bench/boot-baseline.json
 
 # Local scratch: release worktrees, PR checkouts, throwaway scripts
 /tmp/
+.semantex/

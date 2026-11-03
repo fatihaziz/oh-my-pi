@@ -68,6 +68,8 @@ export interface PerCallModelGrants {
 	/** Exact selector granted for one standalone spawn; hosted sessions never set this. */
 	standaloneSelector?: string;
 	standaloneInvocationKind?: "task" | "eval";
+	/** Selection made by a trusted automatic routing handler, not a model-facing per-call request. */
+	automaticSelection?: boolean;
 	assertAuthorization?: () => void;
 	/** Spawn-time selector preferences; unrelated later model usage cannot change a grant. */
 	matchPreferences?: ModelMatchPreferences;

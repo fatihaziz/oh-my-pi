@@ -4836,7 +4836,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 										const changed = effectiveThinkingLevel === "off"
 											? dispatchModel.reasoning && streamOptions?.disableReasoning !== true
 											: streamOptions?.reasoning !== effectiveThinkingLevel;
-										if (!kind || !perCallModelEnabled(settings, kind) || effectiveThinkingLevel === AUTO_THINKING || changed ||
+										if (!kind || (!perCallModelGrants.automaticSelection && !perCallModelEnabled(settings, kind)) || effectiveThinkingLevel === AUTO_THINKING || changed ||
 											clampThinkingLevelToCeiling(dispatchModel, effectiveThinkingLevel, ceiling) !== effectiveThinkingLevel) {
 											throw new PerCallModelError("The standalone worker's model authorization or effort was revoked.");
 										}
@@ -4948,6 +4948,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					}),
 				);
 				({ session } = await awaitAbortable(sessionPromise));
+				if (options.perCallModelGrants) {
+					if (!session.model) throw new PerCallModelError("The worker session has no approved model.");
+					assertPerCallModelApproved(session.model, options.perCallModelGrants, modelRegistry);
+				}
 				if (options.readScope) {
 					const key = (file: string) => process.platform === "win32" ? file.toLowerCase() : file;
 					const allowed = new Set(await Promise.all(options.readScope.map(async input => {
@@ -5109,6 +5113,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 							perCallThinkingLevel: session.configuredThinkingLevel() ?? null,
 							perCallStandaloneSelector: perCallModelGrants.standaloneSelector,
 							perCallStandaloneInvocationKind: perCallModelGrants.standaloneInvocationKind,
+							...(perCallModelGrants.standaloneSelector !== undefined ? {
+								standaloneAssignment: options.assignment,
+								standaloneContext: options.context,
+								standaloneAutomaticSelection: perCallModelGrants.automaticSelection === true,
+								standaloneDispatchId: id,
+							} : {}),
 						}
 					: {}),
 				// Deferred model resolution installs this role inside createAgentSession,

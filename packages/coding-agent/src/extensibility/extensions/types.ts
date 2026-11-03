@@ -1236,6 +1236,20 @@ export interface BeforeSubagentSpawnEvent {
 	requestedModel?: string;
 	/** Stable per-spawn key for deterministic selection, when the caller supplies one. */
 	spawnKey?: string;
+	/** Final resolved child input, absent when an old persisted session cannot supply it. */
+	readonly assignment?: string;
+	readonly context?: string;
+	/** Native child identity, stable through dispatch. */
+	readonly dispatchId?: string;
+	readonly parentToolCallId?: string;
+	readonly index?: number;
+	readonly effort?: "lo" | "med" | "hi";
+	readonly solutionSpace?: string;
+	readonly standalone?: boolean;
+	readonly prepared?: boolean;
+	/** Reauthorization of a persisted standalone worker, never a new model choice. */
+	readonly revival?: boolean;
+	readonly automaticSelection?: boolean;
 }
 
 export type {
@@ -1800,6 +1814,8 @@ export interface BeforeSubagentSpawnEventResult {
 	note?: string;
 	/** Recheck a standalone explicit selection immediately before every model request. */
 	assertAuthorization?: () => void;
+	/** Enforce this automatic standalone selection exactly on every provider dispatch. */
+	enforceExactModel?: boolean;
 }
 
 export type {
