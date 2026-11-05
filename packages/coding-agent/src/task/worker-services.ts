@@ -18,6 +18,7 @@ import { callSessionTool, type EvalBridgeValue } from "../eval/js/tool-bridge";
 import type { EvalPreludeDefinition } from "../eval/preludes";
 import pythonBackend from "../eval/py";
 import { disposeKernelSessionsByOwner } from "../eval/py/executor";
+import rustBackend from "../eval/rust";
 import { type EvalStateSnapshot, getEvalState } from "../eval/state";
 import { contextLocalProtocolOptions } from "../internal-urls/context";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
@@ -416,8 +417,12 @@ export async function serveWorkerEval(
 		owners.add(identity.kernelOwnerId);
 		workerEvalOwners.set(agentId, owners);
 	}
-	const backend =
-		owner.parentServices?.eval?.backend(cell.language) ?? (cell.language === "python" ? pythonBackend : jsBackend);
+	const fallbackBackends: Record<EvalLanguage, ExecutorBackend> = {
+		python: pythonBackend,
+		js: jsBackend,
+		rust: rustBackend,
+	};
+	const backend = owner.parentServices?.eval?.backend(cell.language) ?? fallbackBackends[cell.language];
 	if (!(await backend.isAvailable(view, { signal }))) {
 		throw new Error(`${backend.label} Eval is unavailable in the parent`);
 	}
