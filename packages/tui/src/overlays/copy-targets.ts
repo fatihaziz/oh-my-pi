@@ -165,7 +165,7 @@ function extractEvalCode(args: unknown): { code: string; language: string } | un
 		codeBlocks.push(code);
 		if (!languageResolved) {
 			const lang = (cell as { language?: unknown }).language;
-			language = lang === "js" ? "javascript" : "python";
+			language = lang === "js" ? "javascript" : lang === "rust" ? "rust" : "python";
 			languageResolved = true;
 		}
 	}

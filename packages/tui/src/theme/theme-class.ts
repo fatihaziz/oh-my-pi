@@ -124,13 +124,14 @@ const langMap: Record<string, SymbolKey> = {
 /**
  * Brand colors for language icons, keyed by the resolved `lang.*` SymbolKey.
  * Used by {@link Theme.getLangIconStyled} so eval-kernel cell headers tint each
- * language with its recognizable hue (JS yellow, Ruby red, Julia purple, Python
+ * language with its recognizable hue (JS yellow, Rust orange, Ruby red, Julia purple, Python
  * blue) instead of a flat muted gray. Applied as truecolor/256 per the active
  * color mode; languages without an entry fall back to the muted theme color.
  */
 const LANG_BRAND_COLORS: Partial<Record<SymbolKey, string>> = {
 	"lang.javascript": "#f7df1e",
 	"lang.python": "#3776ab",
+	"lang.rust": "#dea584",
 	"lang.ruby": "#cc342d",
 	"lang.julia": "#9558b2",
 };
