@@ -136,11 +136,6 @@ const LANG_BRAND_COLORS: Partial<Record<SymbolKey, string>> = {
 	"lang.julia": "#9558b2",
 };
 
-/** Eval cell headers show these as text instead of the glyph (Rust glyph is too small to read). */
-const LANG_TEXT_BADGES: Partial<Record<SymbolKey, string>> = {
-	"lang.rust": "RS",
-};
-
 const BACKGROUND_RESET_PATTERN = /\x1b\[(?:0|49)m/g;
 const FOREGROUND_RESET_PATTERN = /\x1b\[(?:0|39)m/g;
 
@@ -830,9 +825,9 @@ export class Theme {
 	 * icon when the active symbol preset has none.
 	 */
 	getLangIconStyled(lang: string | undefined): string {
-		const key = lang ? langMap[lang.toLowerCase()] : undefined;
-		const icon = (key && LANG_TEXT_BADGES[key]) || this.getLangIcon(lang);
+		const icon = this.getLangIcon(lang);
 		if (!icon) return icon;
+		const key = lang ? langMap[lang.toLowerCase()] : undefined;
 		const hex = key ? LANG_BRAND_COLORS[key] : undefined;
 		if (!hex) return this.fg("muted", icon);
 		return `${colorToAnsi(hex, this.mode)}${icon}\x1b[39m`;

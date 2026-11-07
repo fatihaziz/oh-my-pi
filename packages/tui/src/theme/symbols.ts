@@ -1065,7 +1065,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"lang.typescript": "\u{E628}",
 	"lang.javascript": "\u{E60C}",
 	"lang.python": "\u{E606}",
-	"lang.rust": "\u{E7A8}",
+	"lang.rust": "RS",
 	"lang.go": "\u{E627}",
 	"lang.java": "\u{E738}",
 	"lang.c": "\u{E61E}",
