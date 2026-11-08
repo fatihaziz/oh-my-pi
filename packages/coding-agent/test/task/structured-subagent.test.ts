@@ -1676,3 +1676,153 @@ describe("per-call model preflight", () => {
 		});
 	});
 });
+
+describe("scoped reviewer source files", () => {
+	let root: string;
+	let cwd: string;
+	let external: string;
+	let unlisted: string;
+	let rubric: string;
+	let agent: AgentDefinition;
+
+	beforeEach(async () => {
+		const tmp = path.resolve("tmp");
+		await fs.mkdir(tmp, { recursive: true });
+		root = await fs.mkdtemp(path.join(tmp, "reviewer-scope-"));
+		cwd = path.join(root, "workspace");
+		const extension = path.join(root, "decision-workflow");
+		const agentFile = path.join(extension, "agents", "egm-codebase-details.md");
+		rubric = path.join(extension, "egm", "resources", "rubric.md");
+		external = path.join(root, "external", "DESIGN.md");
+		unlisted = path.join(root, "external", "private.md");
+		await Promise.all([cwd, path.dirname(agentFile), path.dirname(rubric), path.dirname(external)]
+			.map(dir => fs.mkdir(dir, { recursive: true })));
+		await Promise.all([
+			fs.writeFile(agentFile, "persona"),
+			fs.writeFile(rubric, "trusted rubric"),
+			fs.writeFile(external, "declared source\nsecond line\n"),
+			fs.writeFile(unlisted, "unlisted secret\n"),
+		]);
+		agent = { ...AGENT, name: "egm-codebase-details", filePath: agentFile, output: undefined };
+		mockDiscovery(agent);
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(root);
+	});
+
+	function scopedRequest(assignment: string, invocationKind: "task" | "eval" = "task") {
+		const parent = session({ cwd, settings: Settings.isolated({
+			"task.maxRecursionDepth": 2,
+			"task.isolation.enabled": true,
+			"task.structured": false,
+			"task.completionProbe": false,
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			"advisor.enabled": false,
+			"autolearn.enabled": false,
+			"todo.enabled": false,
+		}) });
+		parent.effectiveExtensionRoots = () => ({ explicit: [path.join(root, "decision-workflow")], mode: "explicit-only", configured: [] });
+		return request({ session: parent, agent: agent.name, assignment, invocationKind,
+			isolation: { requested: true, apply: false }, structured: false });
+	}
+
+	it("accepts exact external files and selectors for every marker in task and eval", async () => {
+		for (const invocationKind of ["task", "eval"] as const) {
+			for (const marker of ["BOOTSTRAP_SOURCE", "BRAINSTORM_SOURCE", "REVIEW_TARGET", "REVIEW_SOURCE", "DRIFT_TARGET", "DRIFT_SOURCE"]) {
+				const policy = await resolveEffectiveSubagentPolicy(scopedRequest(`${marker}: ${external}:1-2:raw`, invocationKind));
+				expect(policy.effectiveAgent.tools).toEqual(["read"]);
+				expect(policy.effectiveAgent.spawns).toEqual([]);
+				expect(policy.applyChanges).toBe(false);
+			}
+			await expect(resolveEffectiveSubagentPolicy(scopedRequest(`REVIEW_RUBRIC: ${rubric}`, invocationKind))).resolves.toBeDefined();
+		}
+	});
+
+	it("applies the same external-file preflight to bootstrap scouts", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [{ ...agent, name: "scout" }], projectAgentsDir: null });
+		for (const invocationKind of ["task", "eval"] as const) {
+			const policy = await resolveEffectiveSubagentPolicy({ ...scopedRequest(`BOOTSTRAP_SOURCE: ${external}`, invocationKind), agent: "scout" });
+			expect(policy.effectiveAgent.tools).toEqual(["read"]);
+			expect(policy.applyChanges).toBe(false);
+		}
+	});
+
+	it("rejects invalid paths, directories and untrusted rubrics before dispatch", async () => {
+		const run = vi.spyOn(executorModule, "runSubprocess");
+		for (const invocationKind of ["task", "eval"] as const) {
+			for (const value of [path.join(root, "missing.md"), path.dirname(external)]) {
+				await expect(runStructuredSubagent(scopedRequest(`REVIEW_SOURCE: ${value}`, invocationKind)))
+					.rejects.toThrow(`Reviewer source is outside the permitted scope: ${value}`);
+			}
+			for (const value of ["https://example.com/file", `${external}?q=x`, `${external};${unlisted}`]) {
+				await expect(runStructuredSubagent(scopedRequest(`REVIEW_SOURCE: ${value}`, invocationKind)))
+					.rejects.toThrow("Reviewer reading lists must contain local file paths.");
+			}
+			await expect(runStructuredSubagent(scopedRequest(`REVIEW_RUBRIC: ${external}`, invocationKind)))
+				.rejects.toThrow(`Reviewer source is outside the permitted scope: ${external}`);
+		}
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	it("enforces the declared real files in the child executor after symlink retargeting", async () => {
+		const link = path.join(root, "external", "link.md");
+		await fs.symlink(external, link, "file");
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("mock", "test-key");
+		const sourceId = "reviewer-scoped-read-regression";
+		registerMockApi(sourceId);
+		const observations: string[] = [];
+		let turn = 0;
+		const model = createMockModel({
+			id: "reviewer-scoped-read",
+			handler: async context => {
+				const last = context.messages.at(-1);
+				if (last?.role === "toolResult") observations.push(last.content.map(part => part.type === "text" ? part.text : "").join(""));
+				if (turn++ === 0) return { content: [{ type: "toolCall", name: "read", arguments: { path: `${external}:1-2:raw` } }] };
+				if (turn === 2) return { content: [{ type: "toolCall", name: "read", arguments: { path: unlisted } }] };
+				if (turn === 3) {
+					await fs.unlink(link);
+					await fs.symlink(unlisted, link, "file");
+					return { content: [{ type: "toolCall", name: "read", arguments: { path: link } }] };
+				}
+				return { content: ["Finished checking the declared files."] };
+			},
+		});
+		const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
+		const find = modelRegistry.find.bind(modelRegistry);
+		modelRegistry.find = (provider, id) => provider === "mock" && id === model.id ? model : find(provider, id);
+		modelRegistry.getAvailable = () => [model];
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [{ ...agent, model: [`mock/${model.id}`] }], projectAgentsDir: null,
+		});
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: cwd } as never);
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(({ baseOptions }) => executorModule.runSubprocess(baseOptions));
+		const scoped = scopedRequest(`REVIEW_SOURCE: ${external}:1-2:raw\nREVIEW_TARGET: ${link}`);
+		Object.assign(scoped.session, { authStorage, modelRegistry, restrictToolNames: true, enableMCP: false, enableLsp: false, enableIrc: false });
+		const agentId = "ScopedReviewerRead";
+		let artifactsDir: string | undefined;
+		try {
+			const settled = await runStructuredSubagent({ ...scoped, identity: { id: agentId }, keepAlive: false, retainArtifacts: true });
+			artifactsDir = settled.artifactsDir;
+			expect(settled.result.exitCode).toBe(0);
+			expect(observations).toHaveLength(3);
+			expect(observations[0]).toContain("declared source");
+			expect(observations[1]).toContain("Reviewer read is outside its declared reading list.");
+			expect(observations[2]).toContain("Reviewer read is outside its declared reading list.");
+			const tools = model.calls[0]?.context.tools?.map(tool => tool.name) ?? [];
+			expect(tools).toContain("read");
+			expect(tools).not.toContain("write");
+			expect(tools).not.toContain("bash");
+			expect(await fs.readFile(external, "utf8")).toBe("declared source\nsecond line\n");
+			expect(await fs.readFile(unlisted, "utf8")).toBe("unlisted secret\n");
+		} finally {
+			await AgentRegistry.global().get(agentId)?.session?.dispose();
+			AgentRegistry.global().unregister(agentId);
+			if (artifactsDir) await fs.rm(artifactsDir, { recursive: true, force: true });
+			unregisterCustomApis(sourceId);
+			authStorage.close();
+		}
+	});
+});

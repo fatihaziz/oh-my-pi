@@ -406,7 +406,6 @@ function scopedReadPaths(assignment: string): string[] {
 }
 async function validateScopedReads(request: StructuredSubagentRequest, agent: AgentDefinition, goldfish: boolean): Promise<void> {
 	const cwd = request.session.cwd;
-	const workspace = await fs.realpath(cwd);
 	const rubricRoot = goldfish && agent.filePath
 		? await fs.realpath(path.join(path.dirname(path.dirname(agent.filePath)), "egm", "resources"))
 		: undefined;
@@ -415,10 +414,10 @@ async function validateScopedReads(request: StructuredSubagentRequest, agent: Ag
 			throw new StructuredSubagentError("preflight", "Reviewer reading lists must contain local file paths.");
 		const parsed = await splitPathAndSelPreferringLiteral(file, cwd);
 		const target = await fs.realpath(path.resolve(cwd, parsed.path)).catch(() => undefined);
-		const root = kind === "REVIEW_RUBRIC" ? rubricRoot : workspace;
-		const relative = target && root ? path.relative(root, target) : undefined;
-		if (!target || relative === undefined || relative === "" || relative === ".." ||
-			relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative) || !(await fs.stat(target)).isFile())
+		const relative = kind === "REVIEW_RUBRIC" && target && rubricRoot ? path.relative(rubricRoot, target) : undefined;
+		if (!target || !(await fs.stat(target)).isFile() || (kind === "REVIEW_RUBRIC" &&
+			(relative === undefined || relative === "" || relative === ".." ||
+			relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))))
 			throw new StructuredSubagentError("preflight", `Reviewer source is outside the permitted scope: ${file}`);
 	}
 }
