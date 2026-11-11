@@ -65,6 +65,14 @@ export interface PerCallModelGrants {
 	agentRemoved?: boolean;
 	/** The parent's model at spawn, or its live model on each cold-revival request, including any `@upstream` pin. */
 	parentModelPattern?: string;
+	/** Exact selector granted for one standalone spawn; hosted sessions never set this. */
+	standaloneSelector?: string;
+	standaloneInvocationKind?: "task" | "eval";
+	/** Selection made by a trusted automatic routing handler, not a model-facing per-call request. */
+	automaticSelection?: boolean;
+	/** Exact automatic selection already approved at dispatch, retained for this worker. */
+	approvedAutomaticIdentity?: string;
+	assertAuthorization?: () => void;
 	/** Spawn-time selector preferences; unrelated later model usage cannot change a grant. */
 	matchPreferences?: ModelMatchPreferences;
 }
@@ -110,6 +118,7 @@ export function parentModelGrantPattern(model: Model<Api>): string | undefined {
 export interface PerCallModelAdvertisement {
 	roles: { role: string; patterns: string[] }[];
 	allowlist: string[];
+	standalone?: boolean;
 	/**
 	 * True when the caller's live model cannot be written as one selector, or a non-empty allowlist does not list it,
 	 * so the own-model clause would name a model dispatch refuses.
@@ -296,6 +305,9 @@ function computeGranted(
 	catalog: Model<Api>[],
 ): boolean {
 	if (!allowlistsAdmitIdentity(perCallAllowlists(grants.settings), target)) return false;
+	if (grants.standaloneSelector !== undefined) {
+		return exactIdentity(grants.standaloneSelector, catalog) === target;
+	}
 	return perCallModelGrantPatterns(grants).some(pattern => {
 		// Full-catalog literals win even when unavailable, so :low and [1m] never broaden a grant.
 		const exact = exactIdentity(pattern, catalog);
@@ -323,7 +335,13 @@ export function assertPerCallModelApproved(
 	grants: PerCallModelGrants,
 	registry: ApprovalRegistry,
 ): void {
+	grants.assertAuthorization?.();
 	const target = formatModelStringWithRouting(model);
+	if (grants.automaticSelection && grants.approvedAutomaticIdentity !== undefined) {
+		if (target !== grants.approvedAutomaticIdentity)
+			throw new PerCallModelError("The automatic worker cannot change its selected model.");
+		return;
+	}
 	let cache = decisionCache.get(grants);
 	if (!cache || !isCurrent(cache, grants.settings, registry)) {
 		cache = {
@@ -335,16 +353,21 @@ export function assertPerCallModelApproved(
 		decisionCache.set(grants, cache);
 	}
 	let granted = cache.decisions.get(target);
-	if (granted === undefined) {
+	if (granted === undefined || grants.standaloneSelector !== undefined) {
 		const chat = registry.getAvailable("chat");
-		// Unavailability is never cached: a login can make the model available without a settings change.
+		// Availability can change without a settings revision.
 		if (!chat.some(candidate => candidate.provider === model.provider && candidate.id === model.id)) {
 			throw new PerCallModelUnavailableError(`Per-call model ${target} is not an available chat model.`);
 		}
-		granted = computeGranted(model, target, grants, chat, cache.catalog);
-		cache.decisions.set(target, granted);
+		if (granted === undefined) {
+			granted = computeGranted(model, target, grants, chat, cache.catalog);
+			cache.decisions.set(target, granted);
+		}
 	}
-	if (granted) return;
+	if (granted) {
+		if (grants.automaticSelection) grants.approvedAutomaticIdentity = target;
+		return;
+	}
 	const allowGuidance = perCallAllowlists(grants.settings).some(allow => allow.length > 0)
 		? " It must also be listed in task.perCallModelAllow."
 		: "";

@@ -5,6 +5,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { Settings } from "../config/settings";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
+import { taskRequirementsSchema } from "../task/types";
 import {
 	buildStructuredSubagentRecoveryHint,
 	invalidModelSelectorReason,
@@ -16,7 +17,12 @@ import {
 	type StructuredSubagentIsolationControls,
 	type StructuredSubagentResult,
 } from "../task/structured-subagent";
-import type { AgentProgress, SingleResult, StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type {
+	AgentProgress,
+	SingleResult,
+	StructuredSubagentSchemaMode,
+	TaskModelRequirements,
+} from "@oh-my-pi/pi-tui/tools/task";
 import type { NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -36,6 +42,7 @@ const agentArgsSchema = type({
 	"apply?": "boolean",
 	"merge?": "boolean",
 	"tools?": "string[]",
+	"requirements?": taskRequirementsSchema,
 	"+": "delete",
 });
 
@@ -50,6 +57,7 @@ interface EvalAgentArgs {
 	apply?: boolean;
 	merge?: boolean;
 	tools?: string[];
+	requirements?: TaskModelRequirements;
 }
 
 export interface EvalAgentBridgeOptions {
@@ -203,6 +211,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			session: options.session,
 			invocationKind: "eval",
 			assignment: parsed.prompt,
+			requirements: parsed.requirements,
 			...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
 			...(parsed.model !== undefined ? { perCallModel: parsed.model } : {}),
 			...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
@@ -227,6 +236,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 						session: options.session,
 						invocationKind: "eval",
 						assignment: parsed.prompt,
+						requirements: parsed.requirements,
 						...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
 						...(parsed.model !== undefined ? { perCallModel: parsed.model } : {}),
 						...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),

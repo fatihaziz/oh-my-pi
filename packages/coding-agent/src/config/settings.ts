@@ -4441,6 +4441,8 @@ export class Settings {
 			const isBaseRecord = typeof baseVal === "object" && baseVal !== null && !Array.isArray(baseVal);
 			if (
 				isOverrideRecord &&
+				// An explicit empty worker map clears inherited pins; other records still merge.
+				!(settingPath === "task.agentModelOverrides" && Object.keys(override).length === 0) &&
 				(isBaseRecord ||
 					(arrays === "layer" && baseVal === undefined && Object.hasOwn(settingsGroupOnlyPrefixes(), settingPath)))
 			) {

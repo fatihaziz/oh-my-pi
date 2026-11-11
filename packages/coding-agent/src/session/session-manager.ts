@@ -27,7 +27,11 @@ import {
 	toError,
 	withLoopPhase,
 } from "@oh-my-pi/pi-utils";
-import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import {
+	isTaskToolDetails,
+	type StructuredSubagentSchemaMode,
+	type TaskModelRequirements,
+} from "@oh-my-pi/pi-tui/tools/task";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
@@ -3706,6 +3710,13 @@ export class SessionManager {
 		perCallModel?: boolean;
 		perCallModelIdentity?: string;
 		perCallThinkingLevel?: ConfiguredThinkingLevel | null;
+		perCallStandaloneSelector?: string;
+		perCallStandaloneInvocationKind?: "task" | "eval";
+		standaloneAssignment?: string;
+		standaloneContext?: string;
+		standaloneRequirements?: TaskModelRequirements;
+		standaloneAutomaticSelection?: boolean;
+		standaloneDispatchId?: string;
 		retryFallback?: RetryFallbackRole;
 		readOnly?: boolean;
 		outputSchema?: unknown;
@@ -4776,6 +4787,13 @@ export interface PersistedSessionInit {
 	perCallModel?: boolean;
 	perCallModelIdentity?: string;
 	perCallThinkingLevel?: ConfiguredThinkingLevel | null;
+	perCallStandaloneSelector?: string;
+	perCallStandaloneInvocationKind?: "task" | "eval";
+	standaloneAssignment?: string;
+	standaloneContext?: string;
+	standaloneRequirements?: TaskModelRequirements;
+	standaloneAutomaticSelection?: boolean;
+	standaloneDispatchId?: string;
 	retryFallback?: RetryFallbackRole;
 	readOnly?: boolean;
 	outputSchema?: unknown;
@@ -4808,6 +4826,13 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			...(entry.perCallModel ? { perCallModel: true } : undefined),
 			perCallModelIdentity: entry.perCallModelIdentity,
 			perCallThinkingLevel: entry.perCallThinkingLevel,
+			perCallStandaloneSelector: entry.perCallStandaloneSelector,
+			perCallStandaloneInvocationKind: entry.perCallStandaloneInvocationKind,
+			standaloneAssignment: entry.standaloneAssignment,
+			standaloneContext: entry.standaloneContext,
+			standaloneRequirements: entry.standaloneRequirements,
+			standaloneAutomaticSelection: entry.standaloneAutomaticSelection,
+			standaloneDispatchId: entry.standaloneDispatchId,
 			retryFallback: entry.retryFallback,
 			readOnly: entry.readOnly,
 			outputSchema: entry.outputSchema,

@@ -50,6 +50,7 @@ Run one agent synchronously.
   - Volume of work does not widen it; NEVER mention sibling agents or coordination.
   - Examples: `one fix: rename, names given`; `one fix: slice end in paginate`; `single-flight cache load; races easy to miss`;
     `several retry API shapes; error classes to choose`; `deadlock cause open, no repro`
+- `requirements`: optional explicit model capabilities: `contextTokens`, `outputTokens`, `input` (modalities), `reasoning`, `tools`, `effort`. Declare only requirements known for this task; do not infer them from its prose.
 {{#if evalToolsEnabled}}
 - `tools`: eval-defined, run in your kernel.
 {{/if}}
