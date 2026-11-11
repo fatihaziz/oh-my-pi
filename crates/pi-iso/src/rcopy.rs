@@ -143,6 +143,32 @@ fn seed_dirty_state(lower: &Path, merged: &Path) -> IsoResult<()> {
 			.map_err(|err| IsoError::other(format!("untracked path is not valid UTF-8: {err}")))?;
 		let src = lower.join(rel);
 		let dst = merged.join(rel);
+		let mut ancestor = lower.to_path_buf();
+		if let Some(parent) = Path::new(rel).parent() {
+			for component in parent.components() {
+				let std::path::Component::Normal(part) = component else {
+					return Err(IsoError::other(format!("unsafe untracked path: {rel}")));
+				};
+				ancestor.push(part);
+				let meta = std::fs::symlink_metadata(&ancestor)
+					.map_err(|err| IsoError::other(format!("stat {}: {err}", ancestor.display())))?;
+				if meta.file_type().is_symlink() || !meta.is_dir() {
+					return Err(IsoError::other(format!("unsafe external link ancestor: {}", ancestor.display())));
+				}
+			}
+		}
+		let meta = std::fs::symlink_metadata(&src)
+			.map_err(|err| IsoError::other(format!("stat {}: {err}", src.display())))?;
+		if meta.file_type().is_symlink() {
+			let target = std::fs::canonicalize(&src)
+				.map_err(|err| IsoError::other(format!("resolve link {}: {err}", src.display())))?;
+			if !target.starts_with(lower) {
+				return Err(IsoError::other(format!("unsafe external link: {}", src.display())));
+			}
+		} else if meta.is_dir() && src.join(".git").exists() {
+			copy_nested_repository(&src, &dst)?;
+			continue;
+		}
 		if let Some(parent) = dst.parent() {
 			std::fs::create_dir_all(parent)
 				.map_err(|err| IsoError::other(format!("create {}: {err}", parent.display())))?;
@@ -151,6 +177,36 @@ fn seed_dirty_state(lower: &Path, merged: &Path) -> IsoResult<()> {
 	}
 
 	Ok(())
+}
+
+fn copy_nested_repository(source: &Path, destination: &Path) -> IsoResult<()> {
+	if let Some(parent) = destination.parent() {
+		std::fs::create_dir_all(parent)
+			.map_err(|err| IsoError::other(format!("create {}: {err}", parent.display())))?;
+	}
+	let source_arg = git_path(source);
+	let destination_arg = git_path(destination);
+	let output = run_git(
+		destination.parent().unwrap_or(destination),
+		&["-c", "core.hooksPath=/dev/null", "clone", "--shared", "--", source_arg.as_ref(), destination_arg.as_ref()],
+		None,
+	)?;
+	checked("git clone nested repository", output)?;
+	seed_dirty_state(source, destination)
+}
+
+fn git_path(path: &Path) -> std::borrow::Cow<'_, str> {
+	let value = path.to_string_lossy();
+	#[cfg(windows)]
+	{
+		if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+			return std::borrow::Cow::Owned(format!(r"\\{rest}"));
+		}
+		if value.starts_with(r"\\?\") {
+			return std::borrow::Cow::Owned(value[4..].to_owned());
+		}
+	}
+	value
 }
 
 fn git_capture(cwd: &Path, args: &[&str]) -> IsoResult<Vec<u8>> {

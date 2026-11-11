@@ -64,6 +64,156 @@ afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 describe("worktree isolation helpers", () => {
+	it("rejects an untracked external junction before a worker can access it", async () => {
+		const root = await createGitRepo();
+		await runGit(root, ["config", "user.email", "test@example.com"]);
+		await runGit(root, ["config", "user.name", "Test User"]);
+		await fs.writeFile(path.join(root, "tracked.txt"), "base\n");
+		await runGit(root, ["add", "tracked.txt"]);
+		await runGit(root, ["commit", "-qm", "base"]);
+		const outside = await fs.mkdtemp(path.join(os.tmpdir(), "omp-link-sentinel-"));
+		tempDirs.push(outside);
+		await fs.writeFile(path.join(outside, "sentinel"), "untouched\n");
+		await fs.symlink(outside, path.join(root, "outside"), process.platform === "win32" ? "junction" : "dir");
+		const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "omp-link-isolation-"));
+		tempDirs.push(workspace);
+		setWorktreesDir(workspace);
+		try {
+			await expect(ensureIsolation(root, "external-link", natives.IsoBackendKind.Rcopy)).rejects.toThrow(
+				/unsafe external link/i,
+			);
+			expect(await fs.readFile(path.join(outside, "sentinel"), "utf8")).toBe("untouched\n");
+			expect(await fs.realpath(path.join(root, "outside"))).toBe(await fs.realpath(outside));
+		} finally {
+			setWorktreesDir(undefined);
+		}
+	}, 60_000);
+	it("materializes an independent nested repository without ignored cache", async () => {
+		const root = await createGitRepo();
+		for (const [key, value] of [
+			["user.email", "test@example.com"],
+			["user.name", "Test User"],
+		]) {
+			await runGit(root, ["config", key!, value!]);
+		}
+		await fs.writeFile(path.join(root, "root.txt"), "root\n");
+		await runGit(root, ["add", "root.txt"]);
+		await runGit(root, ["commit", "-qm", "root"]);
+		const child = path.join(root, "nested");
+		await fs.mkdir(child);
+		await initRepo(child);
+		await runGit(child, ["config", "user.email", "test@example.com"]);
+		await runGit(child, ["config", "user.name", "Test User"]);
+		await fs.writeFile(path.join(child, ".gitignore"), "cache/\n");
+		await fs.mkdir(path.join(child, "cache"));
+		await fs.writeFile(path.join(child, "cache", "tracked.txt"), "tracked despite ignore\n");
+		await runGit(child, ["add", "-f", "cache/tracked.txt"]);
+		await fs.writeFile(path.join(child, "tracked.txt"), "base\n");
+		await fs.writeFile(path.join(child, "staged.txt"), "base\n");
+		await fs.writeFile(path.join(child, "deleted.txt"), "delete me\n");
+		await runGit(child, ["add", ".gitignore", "tracked.txt", "staged.txt", "deleted.txt"]);
+		await runGit(child, ["commit", "-qm", "child"]);
+		await fs.unlink(path.join(child, "deleted.txt"));
+		await fs.writeFile(path.join(child, "tracked.txt"), "dirty\n");
+		await fs.writeFile(path.join(child, "staged.txt"), "staged\n");
+		await runGit(child, ["add", "staged.txt"]);
+		await fs.writeFile(path.join(child, "untracked.txt"), "untracked\n");
+		await fs.writeFile(path.join(child, "cache", "ignored.bin"), "ignored\n");
+		const status = await runGit(child, ["status", "--porcelain=v1"]);
+		const indexBefore = await fs.readFile(path.join(child, ".git", "index"));
+		const baseline = await captureBaseline(root);
+		const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "omp-nested-isolation-"));
+		tempDirs.push(workspace);
+		setWorktreesDir(workspace);
+		try {
+			const direct = path.join(workspace, "direct-native");
+			await natives.isoStart(natives.IsoBackendKind.Rcopy, root, direct);
+			expect(await fs.readFile(path.join(direct, "nested", "tracked.txt"), "utf8")).toBe("dirty\n");
+			expect(await fs.readFile(path.join(direct, "nested", "untracked.txt"), "utf8")).toBe("untracked\n");
+			expect(await fs.stat(path.join(direct, "nested", "cache", "ignored.bin")).catch(() => null)).toBeNull();
+			await natives.isoStop(natives.IsoBackendKind.Rcopy, direct);
+			const isolated = await ensureIsolation(root, "nested-filter", natives.IsoBackendKind.Rcopy);
+			const copy = path.join(isolated.mergedDir, "nested");
+			expect(await runGit(copy, ["status", "--porcelain=v1"])).toBe(status);
+			expect(await fs.readFile(path.join(copy, "untracked.txt"), "utf8")).toBe("untracked\n");
+			expect(await fs.stat(path.join(copy, "deleted.txt")).catch(() => null)).toBeNull();
+			expect(await fs.readFile(path.join(copy, "cache", "tracked.txt"), "utf8")).toBe("tracked despite ignore\n");
+			expect(await fs.stat(path.join(copy, "cache", "ignored.bin")).catch(() => null)).toBeNull();
+			await fs.writeFile(path.join(copy, "tracked.txt"), "dirty\nworker\n");
+			const delta = await captureDeltaPatch(isolated.mergedDir, baseline);
+			expect(delta.nestedPatches[0]?.patch).toContain("+worker");
+			expect(await fs.readFile(path.join(child, ".git", "index"))).toEqual(indexBefore);
+			expect(await runGit(child, ["status", "--porcelain=v1"])).toBe(status);
+		} finally {
+			setWorktreesDir(undefined);
+		}
+	}, 60_000);
+	it("captures and integrates a junction-backed submodule without changing the parent gitlink", async () => {
+		const root = await createGitRepo();
+		const child = await createGitRepo();
+		for (const dir of [root, child]) {
+			await runGit(dir, ["config", "user.email", "test@example.com"]);
+			await runGit(dir, ["config", "user.name", "Test User"]);
+		}
+		await fs.writeFile(path.join(child, "owned.txt"), "base\n");
+		await fs.writeFile(path.join(child, ".gitignore"), "cache/\nexternal\n");
+		await fs.writeFile(path.join(child, "staged.txt"), "base\n");
+		await runGit(child, ["add", ".gitignore", "staged.txt"]);
+		await runGit(child, ["add", "owned.txt"]);
+		await runGit(child, ["commit", "-qm", "child"]);
+		const childHead = await runGit(child, ["rev-parse", "HEAD"]);
+		await fs.writeFile(path.join(root, ".gitmodules"), '[submodule "child"]\n\tpath = child\n\turl = ../child\n');
+		await runGit(root, ["add", ".gitmodules"]);
+		await runGit(root, ["update-index", "--add", "--cacheinfo", `160000,${childHead},child`]);
+		await runGit(root, ["commit", "-qm", "parent"]);
+		await fs.symlink(child, path.join(root, "child"), process.platform === "win32" ? "junction" : "dir");
+		await fs.writeFile(path.join(child, "staged.txt"), "staged\n");
+		await runGit(child, ["add", "staged.txt"]);
+		await fs.writeFile(path.join(child, "untracked.txt"), "untracked\n");
+		await fs.mkdir(path.join(child, "cache"));
+		await fs.writeFile(path.join(child, "cache", "large.bin"), "ignored\n");
+		const outside = await fs.mkdtemp(path.join(os.tmpdir(), "omp-external-"));
+		tempDirs.push(outside);
+		await fs.writeFile(path.join(outside, "sentinel"), "untouched\n");
+		await fs.symlink(outside, path.join(child, "external"), process.platform === "win32" ? "junction" : "dir");
+		await fs.writeFile(path.join(child, "owned.txt"), "user work\n");
+		const beforeStatus = await runGit(child, ["status", "--porcelain=v1"]);
+		const baseline = await captureBaseline(root);
+		expect(baseline.nested.map(entry => entry.relativePath)).toEqual(["child"]);
+		expect(baseline.root.unstaged).not.toContain("120000");
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "omp-child-isolation-"));
+		tempDirs.push(workspace);
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(workspace);
+		try {
+			const isolated = await ensureIsolation(root, "child-roundtrip", natives.IsoBackendKind.Rcopy);
+			const isolatedChild = path.join(isolated.mergedDir, "child");
+			expect(await fs.realpath(isolatedChild)).not.toBe(await fs.realpath(child));
+			expect(vcs.requireGit(isolatedChild).info().commonDir).not.toBe(vcs.requireGit(child).info().commonDir);
+			expect(await fs.readFile(path.join(isolatedChild, "owned.txt"), "utf8")).toBe("user work\n");
+			expect(await fs.readFile(path.join(isolatedChild, "staged.txt"), "utf8")).toBe("staged\n");
+			expect(await fs.readFile(path.join(isolatedChild, "untracked.txt"), "utf8")).toBe("untracked\n");
+			expect(await fs.stat(path.join(isolatedChild, "cache")).catch(() => null)).toBeNull();
+			expect(await fs.lstat(path.join(isolatedChild, "external")).catch(() => null)).toBeNull();
+			expect(await fs.readFile(path.join(outside, "sentinel"), "utf8")).toBe("untouched\n");
+			expect(await runGit(child, ["status", "--porcelain=v1"])).toBe(beforeStatus);
+			await fs.writeFile(path.join(isolatedChild, "owned.txt"), "user work\nworker work\n");
+			expect(await fs.readFile(path.join(child, "owned.txt"), "utf8")).toBe("user work\n");
+			const delta = await captureDeltaPatch(isolated.mergedDir, baseline);
+			expect(delta.rootPatch).toBe("");
+			expect(delta.nestedPatches).toHaveLength(1);
+			await vcs.requireGit(child).applyPatch(delta.nestedPatches[0]!.patch, {});
+			expect(await fs.readFile(path.join(child, "owned.txt"), "utf8")).toBe("user work\nworker work\n");
+			expect((await runGit(root, ["ls-files", "--stage", "child"])).startsWith("160000 ")).toBe(true);
+			expect(await fs.realpath(path.join(root, "child"))).toBe(await fs.realpath(child));
+		} finally {
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+			setWorktreesDir(undefined);
+		}
+	}, 60_000);
+
 	it("maps every isolation backend to the native backend contract", () => {
 		expect(parseIsolationBackend("auto")).toBeUndefined();
 		expect(parseIsolationBackend("apfs")).toBe(natives.IsoBackendKind.Apfs);
@@ -203,6 +353,22 @@ describe("worktree isolation helpers", () => {
 		expect(baseline.root.untrackedPatch).toContain(target);
 	});
 
+	it("captures visible nested repositories without opening ignored repository data", async () => {
+		const repo = await createGitRepo();
+		await fs.writeFile(path.join(repo, ".gitignore"), "ignored/\n");
+		const ignored = path.join(repo, "ignored", "broken");
+		const nested = path.join(repo, "nested");
+		await fs.mkdir(ignored, { recursive: true });
+		await fs.mkdir(nested);
+		await runGit(ignored, ["init", "-q"]);
+		await fs.writeFile(path.join(ignored, ".git", "config"), "[invalid\n");
+		await runGit(nested, ["init", "-q"]);
+		await fs.writeFile(path.join(nested, "draft.txt"), "nested draft\n");
+		const baseline = await captureBaseline(repo);
+		expect(baseline.nested.map(item => item.relativePath)).toEqual(["nested"]);
+		expect(baseline.nested[0]?.baseline.untrackedPatch).toContain("+nested draft");
+	});
+
 	// Real git worktree/stash/merge I/O is the contract under test and cannot be
 	// faked. One initialized fixture repo is built once in `beforeAll` (whose time
 	// is excluded from per-test body time) and shared: the costly `git init`,
@@ -245,6 +411,36 @@ describe("worktree isolation helpers", () => {
 			vi.restoreAllMocks();
 		});
 
+		it("creates concurrent rcopy isolations without exposing partial Git administration", async () => {
+			const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-concurrent-"));
+			try {
+				const fixture = path.resolve(import.meta.dir, "../fixtures/isolation-concurrent-probe.ts");
+				const processes = Array.from({ length: 6 }, (_, index) =>
+					Bun.spawn([process.execPath, fixture, repo, worktreeBase, `concurrent-${index}`], {
+						stdout: "pipe",
+						stderr: "pipe",
+						env: { ...process.env, OMP_WORKTREE_DIR: worktreeBase },
+						windowsHide: true,
+					}),
+				);
+				const results = await Promise.all(
+					processes.map(async proc => ({
+						out: await new Response(proc.stdout).text(),
+						err: await new Response(proc.stderr).text(),
+						exit: await proc.exited,
+					})),
+				);
+				for (const result of results) {
+					expect(result.err).toBe("");
+					expect(result.exit).toBe(0);
+					expect(result.out).toBe("base version\n");
+				}
+				expect(await runGit(repo, ["status", "--porcelain"])).toBe("");
+			} finally {
+				await removeWithRetries(worktreeBase);
+			}
+		}, 60_000);
+
 		it("retries isoResolve candidates when a backend is path-unavailable", async () => {
 			const unavailable = new Error("ISO_UNAVAILABLE: btrfs source is not a subvolume");
 			const isoResolve = vi.spyOn(natives, "isoResolve").mockResolvedValue({
@@ -256,7 +452,9 @@ describe("worktree isolation helpers", () => {
 			const isoStart = vi
 				.spyOn(natives, "isoStart")
 				.mockRejectedValueOnce(unavailable)
-				.mockResolvedValueOnce(undefined);
+				.mockImplementationOnce(async (_kind, _source, destination) => {
+					await fs.mkdir(destination, { recursive: true });
+				});
 			vi.spyOn(natives, "isoIsUnavailableError").mockImplementation(message =>
 				message.startsWith("ISO_UNAVAILABLE:"),
 			);
@@ -285,7 +483,9 @@ describe("worktree isolation helpers", () => {
 				fellBack: false,
 				reason: undefined,
 			});
-			vi.spyOn(natives, "isoStart").mockResolvedValue(undefined);
+			vi.spyOn(natives, "isoStart").mockImplementation(async (_kind, _source, destination) => {
+				await fs.mkdir(destination, { recursive: true });
+			});
 
 			try {
 				const longTaskId = "orchestrate-goal-execution.Test1-0982d2a";
@@ -609,6 +809,8 @@ describe("detachGitDir", () => {
 		await fs.writeFile(path.join(main, "file.txt"), "base\n");
 		await runGit(main, ["add", "file.txt"]);
 		await runGit(main, ["commit", "-q", "-m", "base"]);
+		await runGit(main, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
+		await runGit(main, ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
 		const wt = path.join(main, "..", `${path.basename(main)}-wt`);
 		tempDirs.push(wt);
 		await runGit(main, ["worktree", "add", "-q", wt, "-b", "feature/parent", "HEAD"]);
@@ -627,6 +829,24 @@ describe("detachGitDir", () => {
 		await fs.cp(source, iso, { recursive: true });
 		return iso;
 	}
+
+	it("detaches a linked worktree of an absorbed submodule without losing remote refs", async () => {
+		const { main } = await makeLinkedWorktree();
+		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "omp-detach-super-"));
+		tempDirs.push(parent);
+		await runGit(parent, ["init", "-q", "-b", "main"]);
+		await runGit(parent, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", main, "module"]);
+		const module = path.join(parent, "module");
+		const worktree = path.join(parent, "module-worktree");
+		await runGit(module, ["worktree", "add", "-q", "--detach", worktree, "HEAD"]);
+		const commonDir = vcs.requireGit(module).info().commonDir;
+		const sourceHead = await runGit(module, ["rev-parse", "HEAD"]);
+		const isolated = await copyTree(worktree);
+		expect(await vcs.detachGitDir(isolated, commonDir)).toBe("detached");
+		expect(vcs.requireGit(isolated).info().commonDir).not.toBe(commonDir);
+		expect(await runGit(isolated, ["rev-parse", "origin/HEAD"])).toBe(sourceHead);
+		expect(await runGit(module, ["rev-parse", "HEAD"])).toBe(sourceHead);
+	}, 30_000);
 
 	it("severs a copied linked-worktree from the parent so task git ops stay isolated", async () => {
 		const { wt, commonDir, baseSha } = await makeLinkedWorktree();
@@ -648,6 +868,7 @@ describe("detachGitDir", () => {
 			(await runGit(iso, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim(),
 		);
 		expect(isoCommon).not.toBe(commonDir);
+		expect(await runGit(iso, ["rev-parse", "origin/HEAD"])).toBe(baseSha);
 
 		// A task creates its own branch from the requested base and commits.
 		await runGit(iso, ["checkout", "-q", "-b", "feature/a", baseSha]);
@@ -797,12 +1018,14 @@ describe("detachGitDir", () => {
 		await runGit(clone, ["config", "core.fileMode", "false"]);
 		// Git's fsmonitor/split-index interaction can crash during fixture setup.
 		await runGit(clone, ["config", "core.fsmonitor", "false"]);
+		await runGit(clone, ["config", "index.skipHash", "false"]);
 		await runGit(clone, ["config", "core.splitIndex", "true"]);
 		const wt = path.join(origin, "..", `${path.basename(origin)}-shallow-wt`);
 		tempDirs.push(wt);
 		await runGit(clone, ["worktree", "add", "-q", wt, "-b", "feature/parent", "HEAD"]);
 		// Split the worktree's own index so it references a sharedindex.* file.
 		await runGit(wt, ["-c", "core.fsmonitor=false", "update-index", "--split-index"]);
+		expect(await runGit(wt, ["status", "--porcelain=v1"])).toBe("");
 		const commonDir = path.resolve(
 			(await runGit(clone, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim(),
 		);
@@ -1035,7 +1258,7 @@ describe("captureIsolationBaseline", () => {
 		const repo = await createGitRepo();
 		await runGit(repo, ["config", "user.email", "src@example.com"]);
 		await runGit(repo, ["config", "user.name", "Source User"]);
-		await fs.writeFile(path.join(repo, ".gitignore"), ".claude/worktrees/\nvendor/\n");
+		await fs.writeFile(path.join(repo, ".gitignore"), "\n");
 		await runGit(repo, ["add", ".gitignore"]);
 		await runGit(repo, ["commit", "-q", "-m", "base"]);
 		await runGit(repo, ["worktree", "add", "-q", ".claude/worktrees/wt", "-b", "wt"]);
