@@ -39,6 +39,38 @@ When authorized to create or edit a contributor-submitted PR, follow the checkli
 - For user-facing changes, MUST follow the [Changelog](#changelog) attribution rules. Internal issue fixes keep their issue links. For external contributions, add the PR link and contributor credit after GitHub assigns the number, then push the entry before marking the changelog checklist item complete.
 - MUST read back the published PR description after creating or editing it. Check only verified checklist items; explain skipped or inapplicable checks in `Testing`.
 
+## Fatih Fork
+
+This checkout is a fork. Local behavior lives **directly in the source tree** on the fork branch, applied on top of an upstream release tag. There is no patch file and no patch engine.
+
+Scope rule (owner decision, 2026-11): Foyer is retired, so the fork carries **only standalone patches** that upstream does not provide. Every other file matches the upstream tag; `git diff v<TAG> --stat` must list only the rows below and this section.
+
+Local behavior carried on top of upstream:
+
+| ID | Behavior | Files | Upstream plan |
+|---|---|---|---|
+| F5 | Codex first-output deadline: one deadline per request, cleared on the first delta or completed function call; a silent attempt surfaces a timeout instead of restarting | `packages/ai/src/providers/openai-codex-responses.ts`, `packages/ai/test/openai-codex-stream.test.ts` | retire when upstream bounds silent Codex attempts |
+| F6 | Rust eval cells (`language: "rust"` through rust-script, RS badge, copy targets) | `src/eval/{input,rust}.ts`, `src/tools/eval.ts`, `src/prompts/tools/eval.md`, `packages/tui/src/{tools/eval*,overlays/copy-targets.ts,theme/*}` | upstream PR candidate |
+| F8 | Standalone worker routing enforcement (`assertAuthorization`, `enforceExactModel` on `BeforeSubagentSpawnEventResult`; spawn authorization checks; task `requirements`) | `src/extensibility/extensions/{runner,types}.ts`, `src/task/{executor,structured-subagent,model-approval,persisted-revive,types,index}.ts`, `src/session/{session-entries,session-manager}.ts`, `src/config/settings.ts`, `src/sdk.ts`, `src/tools/index.ts`, `src/eval/{agent-bridge.ts,js/shared/prelude.txt,py/prelude.py}`, `src/prompts/tools/task.md`, `packages/tui/src/tools/task.ts`, `test/task/{dynamic-model,structured-subagent,model-approval,persisted-revive,task-batch}.test.ts`, `test/eval/{agent-bridge-policy,workpool-bridge}.test.ts`, `test/config/settings-reload.test.ts` | retire when upstream extensions can veto or pin a spawn |
+| F9 | Isolation hardening: serialized rcopy creation, nested-repository materialization, unsafe-link guards that retain an unsafe workspace | `src/task/worktree.ts`, `crates/pi-iso/src/rcopy.rs`, `test/task/worktree.test.ts`, `test/fixtures/isolation-concurrent-probe.ts` | upstream PR candidate |
+| F10 | VCS: non-UTF-8 binary diffs as git binary patches; nested-repo HEAD as a gitlink change in worktree diffs; test fixtures disable `commit.gpgSign` so a signing host does not hang them | `crates/pi-vcs/src/git/{diff,mutate,patch,read}.rs` | upstream PR candidate |
+| F11 | Legacy pi plugin compatibility: `omptype` bundled package; unavailable host coding-agent exports throw instead of falling back | `src/extensibility/plugins/legacy-pi-compat.ts`, `scripts/legacy-pi-virtual-module.ts`, `test/extensibility/legacy-pi-*.test.ts` | retire when upstream bundles `omptype` |
+| F13 | `installBinary` renames the loaded addon to a backup instead of unlinking it (Windows locks a loaded `.node`) | `packages/natives/scripts/build-bindings.ts` | upstream PR candidate |
+
+Retired, do not reintroduce: S1, P1, P3, P5-P13, P15-P19 (upstream-native, owner decision, or not worth the rebase cost); P20 (omitting the Antigravity `requestType`): bypassing Google's prompt fingerprint check risks the account ([#11809](https://github.com/can1357/oh-my-pi/issues/11809)); P21, P22 (not in scope); P14, P23, F1, F2, F4, F12 (Foyer retired 2026-11); F3 (the decision-workflow extension covers judge backups); F7 (upstream `ask` accepts only HTML forms; the extension presents questions through `ctx.ui.askDialog`); 826610f015 (upstream-native legacy-pi re-entry guard).
+
+### Updating to a new upstream release
+
+1. `git fetch origin main --tags`; create a port branch from the new tag in a separate worktree and re-apply each carried row. Resolve every conflict by reading both sides as one contract; never take ours or theirs wholesale, and never drop an upstream change.
+2. Refresh the native addon to the new release; the loader rejects a mismatched `.node`:
+   ```sh
+   mkdir -p "$HOME/.cache/omp"
+   npm pack @oh-my-pi/pi-natives-win32-x64@<NEW> --pack-destination "$HOME/.cache/omp" --ignore-scripts
+   # extract package/pi_natives.win32-x64-baseline.node into packages/natives/native/
+   ```
+3. `bun install --frozen-lockfile`, `bun run check:ts`, the carried tests in the table, `cargo test -p pi-vcs -p pi-iso`, and `bun packages/coding-agent/src/cli.ts --smoke-test`.
+4. The daily runtime is a verified versioned release installed by the vault's sync tooling, not this checkout. Do not run `bun add -g @oh-my-pi/pi-coding-agent`.
+
 ## Code Quality
 
 - No `any` unless absolutely necessary.
