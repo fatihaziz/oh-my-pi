@@ -736,6 +736,7 @@ interface CodexRequestSetup {
 	firstEventTimeoutMs: number | undefined;
 	websocketIdleTimeoutMs: number | undefined;
 	websocketFirstEventTimeoutMs: number | undefined;
+	clearFirstOutputDeadline?: () => void;
 }
 
 interface CodexOpenItem {
@@ -2109,6 +2110,13 @@ class CodexStreamProcessor {
 				let firstTokenTime = this.firstTokenTime;
 				for await (const rawEvent of this.runtime.eventStream) {
 					firstTokenTime = this.#handleStreamEvent(rawEvent, firstTokenTime);
+					if (
+						(typeof rawEvent.delta === "string" && rawEvent.delta.length > 0) ||
+						(rawEvent.type === "response.output_item.done" &&
+							(rawEvent.item as CodexEventItem | undefined)?.type === "function_call")
+					) {
+						this.requestSetup.clearFirstOutputDeadline?.();
+					}
 					if (this.runtime.sawTerminalEvent) break;
 				}
 				if (!this.runtime.sawTerminalEvent) {
@@ -2682,6 +2690,7 @@ class CodexStreamProcessor {
 	}
 
 	async #recoverStreamError(error: unknown): Promise<boolean> {
+		if (this.requestSetup.requestSignal.aborted) throw this.requestSetup.requestSignal.reason;
 		if (
 			error instanceof CodexSteerCommitError &&
 			this.runtime.websocketState &&
@@ -3206,7 +3215,17 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
-		const requestSetup = createRequestSetup(options);
+		// A silent retry is still the same request. Do not multiply its first-output
+		// deadline by the transport retry count; active output disarms this guard.
+		const firstOutput = armPreResponseTimeout(
+			options?.signal,
+			options?.streamFirstEventTimeoutMs ??
+				getOpenAIStreamFirstEventTimeoutMs(options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs()),
+		);
+		const requestSetup: CodexRequestSetup = {
+			...createRequestSetup({ ...options, signal: firstOutput.signal }),
+			clearFirstOutputDeadline: firstOutput.clear,
+		};
 		let processingContext: CodexStreamProcessor | undefined;
 		let requestContext: CodexRequestContext | undefined;
 
@@ -3237,7 +3256,17 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			const message = processingContext.finalize(completion);
 			stream.push({ type: "done", reason: message.stopReason as "stop" | "length" | "toolUse", message });
 			stream.end();
-		} catch (error) {
+		} catch (caughtError) {
+			const error =
+				!options?.signal?.aborted &&
+				firstOutput.signal?.aborted &&
+				firstOutput.signal.reason instanceof DOMException &&
+				firstOutput.signal.reason.name === "TimeoutError"
+					? new DOMException(
+							"Codex timed out at the first-output deadline across transport retries",
+							"TimeoutError",
+						)
+					: caughtError;
 			const failureContext =
 				processingContext ??
 				({
@@ -3280,6 +3309,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 			stream.end();
 		} finally {
+			firstOutput.clear();
 			requestContext?.isolatedTransportState?.close();
 		}
 	})();
