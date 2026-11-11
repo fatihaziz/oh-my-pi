@@ -9,6 +9,7 @@ import {
 
 /** The bundled packages as they ship on npm: scope directory name and published name. */
 const NPM_PACKAGES: readonly (readonly [npmDir: string, name: string])[] = [
+	["omptype", "@oh-my-pi/omptype"],
 	["pi-agent-core", "@oh-my-pi/pi-agent-core"],
 	["pi-ai", "@oh-my-pi/pi-ai"],
 	["pi-catalog", "@oh-my-pi/pi-catalog"],

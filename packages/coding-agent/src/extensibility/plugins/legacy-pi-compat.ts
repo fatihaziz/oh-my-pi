@@ -817,6 +817,7 @@ const PI_SCOPE_ALIASES = ["oh-my-pi", "mariozechner", "earendil-works"] as const
 
 // Internal host package basenames bundled inside the omp binary.
 const PI_PACKAGE_NAMES = [
+	"omptype",
 	"pi-agent-core",
 	"pi-ai",
 	"pi-catalog",
@@ -1165,9 +1166,9 @@ async function rewriteLegacyExtensionSource(
 		if (remappedSpecifier) {
 			try {
 				replacement = toImportSpecifier(resolveCanonicalPiSpecifier(remappedSpecifier));
-			} catch {
-				// Compiled fallback may be absent from a malformed build. Continue to
-				// the extension's on-disk peer dependency resolution below.
+			} catch (error) {
+				if (remappedSpecifier.startsWith(`${CANONICAL_PI_SCOPE}/pi-coding-agent/`))
+					throw new Error(`Host coding-agent export is unavailable: ${remappedSpecifier}`, { cause: error });
 			}
 		}
 		if (!replacement && TYPEBOX_SHIM_PATH && (specifier === "typebox" || specifier === "@sinclair/typebox")) {
@@ -1943,7 +1944,9 @@ async function resolveExtensionCommonJsRequire(
 		let resolved: string | null = null;
 		try {
 			resolved = resolveCanonicalPiSpecifier(remappedSpecifier);
-		} catch {
+		} catch (error) {
+			if (remappedSpecifier.startsWith(`${CANONICAL_PI_SCOPE}/pi-coding-agent/`))
+				throw new Error(`Host coding-agent export is unavailable: ${remappedSpecifier}`, { cause: error });
 			// A malformed compiled registry can still fall through to an
 			// extension-installed legacy peer dependency.
 		}
@@ -2822,7 +2825,9 @@ function resolveRemappedLegacyPiSpecifier(
 	// location. Works in dev mode and in source-link installs.
 	try {
 		return toLegacyPiResolveResult(resolveCanonicalPiSpecifier(remappedSpecifier));
-	} catch {
+	} catch (error) {
+		if (remappedSpecifier.startsWith(`${CANONICAL_PI_SCOPE}/pi-coding-agent/`))
+			throw new Error(`Host coding-agent export is unavailable: ${remappedSpecifier}`, { cause: error });
 		// Fallback for compiled binary mode: the bundled packages live inside
 		// /$bunfs/root and aren't reachable by filesystem resolution. Prefer the
 		// canonical specifier against the importing file's directory when the

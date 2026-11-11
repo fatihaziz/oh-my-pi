@@ -38,6 +38,25 @@ async function writePackage(files: Record<string, string>): Promise<string> {
 }
 
 describe("legacy-pi in-place module loading (issue #1674)", () => {
+	it("loads host omptype schemas and facades without extension-local dependencies", async () => {
+		const dir = await writePackage({
+			"index.ts": [
+				'import { type } from "@oh-my-pi/omptype";',
+				'import { z } from "@oh-my-pi/omptype/zod";',
+				'const schema = type({ name: "string" });',
+				'export const valid = schema({ name: "Foyer" });',
+				"export const rejected = schema({ name: 42 }) instanceof type.errors;",
+				"export const facadeRejected = !z.object({ name: z.string() }).safeParse({ name: 42 }).success;",
+			].join("\n"),
+		});
+
+		const loaded = await loadLegacyPiModule(path.join(dir, "index.ts"));
+		assert(isRecord(loaded));
+		expect(loaded.valid).toEqual({ name: "Foyer" });
+		expect(loaded.rejected).toBe(true);
+		expect(loaded.facadeRejected).toBe(true);
+	});
+
 	it("resolves package patterns by prefix specificity before suffix length", async () => {
 		const dir = await writePackage({
 			"package.json": JSON.stringify({
