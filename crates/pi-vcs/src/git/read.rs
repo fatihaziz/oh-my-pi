@@ -1381,6 +1381,7 @@ mod tests {
 		git(dir.path(), &["init", "-b", "main"])?;
 		git(dir.path(), &["config", "user.name", "Test User"])?;
 		git(dir.path(), &["config", "user.email", "test@example.com"])?;
+		git(dir.path(), &["config", "commit.gpgSign", "false"])?;
 		let repo = GitRepo::require(dir.path())?;
 		Ok((dir, repo))
 	}
@@ -1563,6 +1564,7 @@ mod tests {
 		}
 		git(root, &["config", "user.name", "Test User"])?;
 		git(root, &["config", "user.email", "test@example.com"])?;
+		git(root, &["config", "commit.gpgSign", "false"])?;
 		let repo = GitRepo::require(root)?;
 		assert!(repo.is_reftable(), "fixture must use reftable ref storage");
 		let expected = untracked_fixture(root, 60)?;

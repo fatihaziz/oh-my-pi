@@ -2125,6 +2125,8 @@ mod tests {
 		git(temp.path(), &["init", "-q", "-b", "main"]);
 		git(temp.path(), &["config", "user.name", "Test"]);
 		git(temp.path(), &["config", "user.email", "test@example.com"]);
+		// A global `commit.gpgSign=true` would make fixture commits wait on the signer.
+		git(temp.path(), &["config", "commit.gpgSign", "false"]);
 		// gix reads the developer's `~/.gitconfig`, where a global
 		// `core.hooksPath` would redirect hook lookup away from this fixture.
 		git(temp.path(), &["config", "core.hooksPath", ".git/hooks"]);

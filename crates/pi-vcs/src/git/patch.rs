@@ -1998,6 +1998,7 @@ mod tests {
 		git(temp.path(), &["init", "-q"]);
 		git(temp.path(), &["config", "user.name", "Patch Test"]);
 		git(temp.path(), &["config", "user.email", "patch@example.com"]);
+		git(temp.path(), &["config", "commit.gpgSign", "false"]);
 		// Assertions compare exact worktree bytes and stat-sensitive status;
 		// Git for Windows' system `core.autocrlf=true` would rewrite them as
 		// CRLF. `patch_apply_under_autocrlf_matches_git` covers conversion.
@@ -2332,6 +2333,7 @@ mod tests {
 		git(temp.path(), &["init", "-q"]);
 		git(temp.path(), &["config", "user.name", "Patch Test"]);
 		git(temp.path(), &["config", "user.email", "patch@example.com"]);
+		git(temp.path(), &["config", "commit.gpgSign", "false"]);
 		git(temp.path(), &["config", "core.autocrlf", "false"]);
 		for (path, bytes) in files {
 			fs::write(temp.path().join(path), bytes).expect("write fixture");
