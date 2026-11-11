@@ -13,6 +13,7 @@ import { resolveSpawnPolicy } from "../task/spawn-policy";
 export interface EvalToolDescriptionOptions {
 	py?: boolean;
 	js?: boolean;
+	rust?: boolean;
 	/**
 	 * Parent spawn policy (`getSessionSpawns`). `true`/omitted means unrestricted,
 	 * `false`/`""` hides `agent()`, and a comma list drives the advertised default.
@@ -53,6 +54,7 @@ export function evalTemplateContext(options: EvalToolDescriptionOptions) {
 	return {
 		py: options.py ?? true,
 		js: options.js ?? true,
+		rust: options.rust ?? Bun.which("rust-script") !== null,
 		evalTools: options.evalTools ?? true,
 		eagerDelegation: options.eagerDelegation ?? false,
 		waitTool: options.waitTool ?? true,

@@ -1,4 +1,4 @@
-One cell per call; top-level state persists, including across compaction.{{#if spawns}} Subagents have separate kernels.{{/if}}
+One cell per call; Python and JS retain top-level state, including across compaction.{{#if spawns}} Subagents have separate kernels.{{/if}}
 {{#if spawns}}
 {{#if eagerDelegation}}
 For 2+ independent items, use a named `workpool()`; results auto-deliver.
@@ -13,6 +13,7 @@ Magics like %pip, %load, %time and `!cmd` are rewritten to Python.
 Top-level `await` works; `asyncio.run(…)` fails.
 {{/if}}
 {{#if js}}JS: Bun (Bun.file, Bun.write, Bun.$); top-level `await`/`return` work.{{/if}}
+{{#if rust}}Rust: `language: "rust"` runs a fresh Rust expression or block through `rust-script`; variables do not persist across cells. Use `println!` for output.{{/if}}
 On error, retry only the failed step; earlier steps may have taken effect.
 Printing an image{{#if py}} or figure{{/if}} attaches it.
 
