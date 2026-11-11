@@ -19,7 +19,7 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { EventBus } from "../utils/event-bus";
 import { runSubprocess, runSubagentFollowUpTurn, type ExecutorOptions, type FollowUpTurnOptions } from "./executor";
-import { TASK_SUBAGENT_EVENT_CHANNEL, TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "./types";
+import { TASK_SUBAGENT_EVENT_CHANNEL, TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL, taskRequirementsSchema } from "./types";
 import { createExternalSubagentExecutor } from "./external-executor-client";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import { setModelRequestPolicy } from "@oh-my-pi/pi-ai/model-request-policy";
@@ -56,6 +56,7 @@ export type HostedExecutorOptions = Pick<
 	| "task"
 	| "assignment"
 	| "context"
+	| "requirements"
 	| "planReference"
 	| "description"
 	| "index"
@@ -154,6 +155,7 @@ const launchSchema = schema({
 	"worktree?": "string",
 	"assignment?": "string",
 	"context?": "string",
+	"requirements?": taskRequirementsSchema,
 	"description?": "string",
 	"parentToolCallId?": "string",
 	"solutionSpace?": "string",
@@ -1093,7 +1095,7 @@ export async function runExecutorHost(): Promise<void> {
 				running = context.with(
 					isRecord(frame.trace) ? propagation.extract(ROOT_CONTEXT, frame.trace) : context.active(),
 					async () => {
-						const execute = () =>
+						const execute = (deferIrcWakeRelease?: (release: () => void) => void) =>
 							runSubagentFollowUpTurn({
 								...followUpLaunch,
 								message: String(frame.message),
@@ -1103,6 +1105,7 @@ export async function runExecutorHost(): Promise<void> {
 								signal: followUpSignal,
 								eventBus: events,
 								subagentEventBus: events,
+								deferIrcWakeRelease,
 								onProgress: emitProgress,
 							});
 						const result = workspace ? await workspace.followUp(execute) : await execute();

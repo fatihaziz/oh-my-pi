@@ -45,7 +45,7 @@ import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
 import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
-import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
+import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 import {
@@ -282,7 +282,7 @@ export class ModelControls {
 	async setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
-		options?: { ephemeral?: boolean },
+		options?: { ephemeral?: boolean; prewalk?: boolean },
 		selection: "explicit" | "automatic" = "explicit",
 	): Promise<void> {
 		await this.#applyTemporaryModel(model, thinkingLevel, options, selection);
@@ -300,7 +300,7 @@ export class ModelControls {
 	async #applyTemporaryModel(
 		model: Model,
 		thinkingLevel: ConfiguredThinkingLevel | undefined,
-		options: { ephemeral?: boolean } | undefined,
+		options: { ephemeral?: boolean; prewalk?: boolean } | undefined,
 		selection: "explicit" | "automatic",
 		hosted?: { validatePolicy: () => Promise<void>; guard: () => boolean },
 	): Promise<"applied" | "unchanged" | "stale"> {
@@ -323,7 +323,7 @@ export class ModelControls {
 		if (!guard()) return "stale";
 		this.#host.sessionManager.appendModelChange(
 			`${targetModel.provider}/${targetModel.id}`,
-			options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
+			options?.prewalk ? PREWALK_MODEL_CHANGE_ROLE : options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
 		);
 		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
 		if (!guard()) return "stale";

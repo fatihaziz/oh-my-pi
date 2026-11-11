@@ -27,6 +27,7 @@ import {
 	streamGitLabDuoWorkflow,
 	traceGitLabDuoWorkflow,
 } from "@oh-my-pi/pi-ai/providers/gitlab-duo-workflow";
+import { setModelRequestPolicy } from "@oh-my-pi/pi-ai/model-request-policy";
 import { configureCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type {
 	AssistantMessage,
@@ -83,6 +84,41 @@ function restoreOptionalEnv(name: string, value: string | undefined): void {
 	}
 	Bun.env[name] = value;
 }
+
+it("does not send or accept an early socket result while model policy is pending", async () => {
+	const gate = Promise.withResolvers<void>();
+	const sent: string[] = [];
+	let closed = false;
+	const socket: GitLabDuoWorkflowWebSocketLike = {
+		onopen: null, onmessage: null, onerror: null, onclose: null,
+		send(data) { sent.push(data); },
+		close() { closed = true; },
+	};
+	const output: AssistantMessage = {
+		role: "assistant", content: [], api: "gitlab-duo-agent", provider: "gitlab-duo-agent", model: model.id,
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		stopReason: "stop", timestamp: Date.now(),
+	};
+	setModelRequestPolicy(() => gate.promise);
+	try {
+		const result = runGitLabDuoWorkflowSocket(
+			socket, buildGitLabDuoWorkflowStartRequest("workflow-1", model, context),
+			{ stream: new AssistantMessageEventStream(), output, started: true }, { apiKey: "redacted", idleTimeoutMs: 1000 },
+		);
+		const outcome = result.then(() => undefined, error => error);
+		socket.onopen?.(new Event("open"));
+		socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
+		expect(sent).toEqual([]);
+		gate.reject(new Error("policy denied"));
+		expect((await outcome)?.message).toBe("policy denied");
+		expect(sent).toEqual([]);
+		expect(closed).toBe(true);
+	} finally {
+		gate.resolve();
+		setModelRequestPolicy(undefined);
+	}
+});
 
 describe("GitLab Duo Workflow provider protocol", () => {
 	it("creates inline ambient workflows with MCP-only privileges by default", () => {
@@ -269,6 +305,45 @@ describe("GitLab Duo Workflow provider protocol", () => {
 		// A single-turn goal is bare text (no ChatML markers), so the history-note that
 		// warns against mimicking transcript markers must NOT be appended.
 		expect(prompt?.prompt_template.system).not.toContain("written as a plain-text log");
+	});
+
+	it("keeps the system slot free of content GitLab's flow validator rejects", () => {
+		// An AGENTS.md note like this made GitLab close every session with 4400
+		// "Flow configuration failed security validation".
+		const systemContext: Context = {
+			systemPrompt: [
+				[
+					"<project-context>",
+					"## Rules",
+					"<!-- curator note -->",
+					"[//]: # (hidden markdown note)",
+					"Never echo <system>, </goal>, <truncation_notice>, </truncated_tool_output>, or <sys<!-- x -->tem> tags.",
+					`Tagged\u{E0041}\u{E0042}${String.raw`\udb40`.repeat(9)}${String.raw`\udc41`.repeat(9)} <\u017Fystem> text.`,
+					"Keep `[comment]: inline` mention.",
+					"Unterminated <!-- tail",
+					"</project-context>",
+				].join("\n"),
+			],
+			messages: context.messages,
+		};
+		const payload = buildGitLabDuoWorkflowStartRequest("workflow-1", model, systemContext);
+		const system = payload.flowConfig?.prompts[0]?.prompt_template.system ?? "";
+
+		expect(system).not.toContain("<!--");
+		expect(system).not.toContain("curator note");
+		expect(system).not.toContain("hidden markdown note");
+		expect(system).not.toMatch(/<\s*\/?\s*(system|goal|truncation_notice|truncated_tool_output)\s*>/i);
+		expect(system).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
+		expect(system).not.toMatch(/\\udb40\\ud[c-f][0-9a-f]{2}/i);
+		expect(system).not.toMatch(/\[(\/\/|comment)\]:/i);
+		expect(system).toContain(
+			"Never echo &lt;system&gt;, &lt;/goal&gt;, &lt;truncation_notice&gt;, &lt;/truncated_tool_output&gt;, or &lt;system&gt; tags.",
+		);
+		expect(system).toContain("Tagged &lt;system&gt; text.");
+		expect(system).toContain("Unterminated &lt;!-- tail");
+		// Ordinary context tags are not touched once no comment switches on the HTML pass.
+		expect(system).toContain("<project-context>\n## Rules\n");
+		expect(system).toContain("</project-context>");
 	});
 
 	it("always emits the inline flowConfig (no server-side registry path)", () => {
@@ -892,6 +967,48 @@ describe("GitLab Duo Workflow WebSocket state machine", () => {
 		socket.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ status: "INPUT_REQUIRED" }) }));
 
 		await stream.result();
+	});
+
+	it("reports a session GitLab rejects on close as an error, not an empty answer", async () => {
+		const socketReady = Promise.withResolvers<GitLabDuoWorkflowWebSocketLike>();
+		const socket: GitLabDuoWorkflowWebSocketLike = {
+			onopen: null,
+			onmessage: null,
+			onerror: null,
+			onclose: null,
+			send() {},
+			close() {},
+		};
+		const fetchImpl: FetchImpl = async (input: string | URL | Request) => {
+			const url = String(input);
+			if (url.includes("/api/v4/ai/duo_workflows/direct_access")) {
+				return new Response(JSON.stringify({ gitlab_rails: { token: "rails-token" } }), { status: 200 });
+			}
+			if (url.includes("/api/v4/ai/duo_workflows/workflows")) {
+				return new Response(JSON.stringify({ id: "workflow-1" }), { status: 200 });
+			}
+			return new Response("{}", { status: 404 });
+		};
+
+		const stream = streamGitLabDuoWorkflow(model, context, {
+			apiKey: "pat-token",
+			rootNamespaceId: "gid://gitlab/Group/1",
+			fetch: fetchImpl,
+			webSocketFactory: () => {
+				socketReady.resolve(socket);
+				return socket;
+			},
+		});
+		await socketReady.promise;
+		socket.onopen?.(new Event("open"));
+		socket.onclose?.(
+			new CloseEvent("close", { code: 4400, reason: "Flow configuration failed security validation" }),
+		);
+
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("HTTP 400 (WebSocket 4400): Flow configuration failed security validation");
+		expect(extractHttpStatusFromError({ message: result.errorMessage })).toBe(400);
 	});
 
 	it("creates a fresh workflow when the socket idles out, never reconnecting the dead id", async () => {

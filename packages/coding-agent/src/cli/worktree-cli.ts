@@ -66,18 +66,7 @@ export interface ClearWorktreesOptions {
 	dryRun: boolean;
 	json: boolean;
 }
-/**
- * Run native teardown on a retained workspace before recursive removal.
- * Recursive `rm` through a live overlay mount destroys the preserved upper
- * layer entry by entry and then fails on the mountpoint itself (likewise a
- * Btrfs subvolume root, removable only via subvolume delete) — and mounts
- * survive the owning session, so the reclaim path (unlike teardown) cannot
- * rely on the creator to stop them. Side-effect-free without a retained-
- * backend sidecar (returns false); throws when the sidecar cannot be read
- * or teardown itself fails, so the caller skips removal instead of
- * traversing a possibly live mount — the entry is then reported failed
- * with the error, data intact.
- */
+/** Stop a retained native backend before removal; unknown state requires manual inspection. */
 export async function stopRetainedMount(dir: string): Promise<boolean> {
 	const backend = await readRetainedMountBackend(dir);
 	if (backend === undefined) return false;
@@ -93,7 +82,7 @@ export async function stopRetainedMount(dir: string): Promise<boolean> {
 			return true;
 		}
 	}
-	return false;
+	throw new Error(`Retained workspace ${dir} has native backend metadata but no mount directory; inspect it manually`);
 }
 
 export async function addWorktree(options: AddWorktreeOptions): Promise<void> {

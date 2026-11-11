@@ -10,6 +10,8 @@ import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } f
 import { cfgEditModelVariants } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { cfgCompactionEnabled } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgProvidersMaxInFlightRequests, cfgTemperature } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { cfgTaskAgentModelOverrides, cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 describe("Settings layer refresh", () => {
 	let state: SettingsTestState | undefined;
@@ -45,6 +47,41 @@ describe("Settings layer refresh", () => {
 		fs.writeFileSync(path.join(getProjectAgentDir(project), "settings.json"), JSON.stringify(settings));
 	}
 
+	it("clears only explicitly empty worker maps across config layers and runtime overrides", async () => {
+		await writeConfig({
+			task: { agentModelOverrides: { debugger: "provider/old", scout: "provider/other" }, maxConcurrency: 3 },
+			modelRoles: { default: "provider/primary", smol: "provider/small" },
+		});
+		const overlayPath = tempDir.join("routing.yml");
+		await Bun.write(overlayPath, YAML.stringify({
+			task: { agentModelOverrides: {} },
+			modelRoles: {},
+		}));
+		const settings = await Settings.loadIsolated({ cwd: startProject, agentDir, configFiles: [overlayPath] });
+		expect(cfgTaskAgentModelOverrides.get(settings)).toEqual({});
+		expect(cfgTaskMaxConcurrency.get(settings)).toBe(3);
+		expect(settings.getModelRole("default")).toBe("provider/primary");
+		expect(settings.getModelRole("smol")).toBe("provider/small");
+
+		await Bun.write(overlayPath, YAML.stringify({ task: { maxConcurrency: 5 } }));
+		await settings.reloadFromDisk();
+		expect(cfgTaskAgentModelOverrides.get(settings)).toEqual({ debugger: "provider/old", scout: "provider/other" });
+		cfgTaskAgentModelOverrides.override(settings, {});
+		expect(cfgTaskAgentModelOverrides.get(createSubagentSettings(settings))).toEqual({});
+		expect(cfgTaskAgentModelOverrides.get(settings)).toEqual({});
+		expect(cfgTaskAgentModelOverrides.get(settings.overlay())).toEqual({});
+		expect(cfgTaskMaxConcurrency.get(settings)).toBe(5);
+		cfgTaskAgentModelOverrides.clearOverride(settings);
+		expect(cfgTaskAgentModelOverrides.get(settings)).toEqual({ debugger: "provider/old", scout: "provider/other" });
+
+		cfgTaskAgentModelOverrides.override(settings, { debugger: "provider/new" });
+		expect(cfgTaskAgentModelOverrides.get(settings)).toEqual({ debugger: "provider/new", scout: "provider/other" });
+		const child = settings.overlay({ "task.agentModelOverrides": {} });
+		expect(cfgTaskAgentModelOverrides.get(child)).toEqual({});
+		cfgTaskAgentModelOverrides.clearOverride(child);
+		expect(cfgTaskAgentModelOverrides.get(child)).toEqual({ debugger: "provider/new", scout: "provider/other" });
+	});
+
 	it("rejects an on-disk value that fails validation and keeps the previous layers", async () => {
 		await writeConfig({ providers: { maxInFlightRequests: { openai: 2 } } });
 		const settings = await Settings.init({ cwd: startProject, agentDir });
@@ -52,6 +89,21 @@ describe("Settings layer refresh", () => {
 		await writeConfig({ providers: { maxInFlightRequests: { openai: 0 } } });
 		await expect(settings.reloadFromDisk()).rejects.toThrow("Provider request limits must be positive numbers");
 		expect(cfgProvidersMaxInFlightRequests.get(settings)).toEqual({ openai: 2 });
+	});
+
+	it("reloads the persisted layers behind an overlay only when asked, keeping its own overrides", async () => {
+		await writeConfig({ modelRoles: { review: "mock/target" }, temperature: 0.1 });
+		const settings = await Settings.loadIsolated({ cwd: startProject, agentDir });
+		const overlay = settings.overlay({ temperature: 0.7 });
+		expect(overlay.getModelRole("review")).toBe("mock/target");
+
+		await writeConfig({ temperature: 0.2 });
+		await overlay.reloadFromDisk();
+		expect(overlay.getModelRole("review")).toBe("mock/target");
+		await overlay.reloadFromDisk({ includeParents: true });
+		expect(overlay.getModelRole("review")).toBeUndefined();
+		expect(cfgTemperature.get(settings)).toBe(0.2);
+		expect(cfgTemperature.get(overlay)).toBe(0.7);
 	});
 
 	it("never adopts an invalid on-disk value through the save that merges external edits", async () => {

@@ -141,7 +141,7 @@ export async function openCoordinatorRuntime(cwd: string, input: Record<string, 
 					const selected = registry.find(candidate.selector.slice(0, slash), candidate.selector.slice(slash + 1));
 					if (!selected || !getSupportedEfforts(selected).includes(candidate.thinking) ||
 						(index > 0 && (!selected.reasoning || !selected.input.includes("text") || selected.supportsTools === false ||
-							selected.contextWindow < promptBound + 4096 || selected.maxTokens < 4096))) {
+							(selected.contextWindow ?? 0) < promptBound + 4096 || (selected.maxTokens ?? 0) < 4096))) {
 						failures.push(`${candidate.selector}: incompatible coordinator model`);
 						continue;
 					}

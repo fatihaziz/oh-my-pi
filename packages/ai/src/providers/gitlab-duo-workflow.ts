@@ -5,7 +5,7 @@ import {
 	type GitLabDuoWorkflowNamespaceSelection,
 } from "@oh-my-pi/pi-catalog/discovery/gitlab-duo-workflow";
 import * as AIError from "../error";
-import { checkModelRequestPolicy } from "../model-request-policy";
+import { checkModelRequestPolicy, hasModelRequestPolicy } from "../model-request-policy";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
@@ -584,10 +584,72 @@ export function buildGitLabDuoWorkflowInlineFlowConfig(systemPrompt: string): Gi
 				name: GITLAB_DUO_WORKFLOW_INLINE_PROMPT_ID,
 				prompt_id: GITLAB_DUO_WORKFLOW_INLINE_PROMPT_ID,
 				unit_primitives: ["duo_agent_platform"],
-				prompt_template: { system: systemPrompt, user: "{{goal}}", placeholder: "history" },
+				prompt_template: {
+					system: sanitizeGitLabDuoWorkflowFlowPrompt(systemPrompt),
+					user: "{{goal}}",
+					placeholder: "history",
+				},
 			},
 		],
 	};
+}
+
+const GITLAB_DUO_WORKFLOW_MARKDOWN_COMMENT =
+	/(^|\\n|\n)\s*\[(?:\/\/|comment)\]:\s*(?:<[^>]*>|#|\S*)\s*\((?:[^)\\]|\\.)*\)/gi;
+// Python `\s` on `str` patterns also covers \x1c-\x1f and \x85; `re.IGNORECASE` folds ſ→s and ı/İ→i.
+const GITLAB_DUO_WORKFLOW_TAG_WS = String.raw`[\s\x1c-\x1f\x85]`;
+const GITLAB_DUO_WORKFLOW_DANGEROUS_TAGS = ["goal", "system", "truncated_tool_output", "truncation_notice"] as const;
+const GITLAB_DUO_WORKFLOW_TAG_PATTERNS = GITLAB_DUO_WORKFLOW_DANGEROUS_TAGS.map(tag => {
+	const name = tag.replace(/s/g, "[sſ]").replace(/i/g, "[iıİ]");
+	return {
+		tag,
+		plain: new RegExp(
+			String.raw`<${GITLAB_DUO_WORKFLOW_TAG_WS}*(\/?)${GITLAB_DUO_WORKFLOW_TAG_WS}*${name}${GITLAB_DUO_WORKFLOW_TAG_WS}*>`,
+			"giu",
+		),
+		escaped: new RegExp(
+			String.raw`\\{1,2}u003c${GITLAB_DUO_WORKFLOW_TAG_WS}*(\/?)${GITLAB_DUO_WORKFLOW_TAG_WS}*${name}${GITLAB_DUO_WORKFLOW_TAG_WS}*\\{1,2}u003e`,
+			"giu",
+		),
+	};
+});
+
+/**
+ * The Duo Workflow Service refuses an inline flow whose prompt text its
+ * `flow_config_prompts` sanitizers would change (ai-assist
+ * `duo_workflow_service/workflows/registry.py` runs `PromptSecurity` validate-only):
+ * the WebSocket closes with 4400 "Flow configuration failed security validation".
+ * The system prompt carries context files verbatim, so one HTML comment in an
+ * AGENTS.md fails every request — and any `<!--` also switches on a bleach pass that
+ * would escape every other tag in the prompt. Apply the service's rewrites first
+ * (removals before tag encoding, iterated to a fixed point) so its validator finds
+ * nothing to change.
+ */
+function sanitizeGitLabDuoWorkflowFlowPrompt(prompt: string): string {
+	let text = prompt.toWellFormed();
+	const maxPasses = text.length + 2;
+	for (let pass = 0; pass < maxPasses; pass++) {
+		let next = text
+			// Unicode tag characters (U+E0000–U+E007F) and Variation Selectors Supplement (U+E0100–U+E01EF), as UTF-16 surrogate pairs.
+			.replace(/\uDB40[\uDC00-\uDC7F\uDD00-\uDDEF]/g, "")
+			.replace(/\\udb40\\ud[c-f][0-9a-f]{2}/gi, "")
+			.replace(/<!--[\s\S]*?-->/g, "")
+			.replace(/\\+u003c!--|<!--/gi, "&lt;!--");
+		if (/\[(?:\/\/|comment)\]:/i.test(next)) {
+			// A marker left mid-line still makes the service decode `\u003c` escapes; a
+			// zero-width space keeps it readable but out of the service's pattern.
+			next = next
+				.replace(GITLAB_DUO_WORKFLOW_MARKDOWN_COMMENT, "$1")
+				.replace(/\[(\/\/|comment)\]:/gi, "[$1]\u200b:");
+		}
+		for (const { tag, plain, escaped } of GITLAB_DUO_WORKFLOW_TAG_PATTERNS) {
+			next = next.replace(plain, (_m, slash: string) => `&lt;${slash}${tag}&gt;`);
+			next = next.replace(escaped, (_m, slash: string) => `&lt;${slash}${tag}&gt;`);
+		}
+		if (next === text) return text;
+		text = next;
+	}
+	throw new Error("GitLab Duo flow prompt sanitization did not converge");
 }
 
 function buildGitLabDuoWorkflowStartMetadata(
@@ -1859,6 +1921,7 @@ export function runGitLabDuoWorkflowSocket(
 	const { promise, resolve, reject } = Promise.withResolvers<GitLabDuoWorkflowSocketResult>();
 	let settled = false;
 	let idleTimer: NodeJS.Timeout | undefined;
+	let pendingSend: Promise<void> | undefined;
 	const clearIdleTimer = (): void => {
 		if (idleTimer !== undefined) {
 			clearTimeout(idleTimer);
@@ -1945,7 +2008,32 @@ export function runGitLabDuoWorkflowSocket(
 	};
 	ws.onclose = event => {
 		traceGitLabDuoWorkflow("websocket.close", { code: event.code, reason: event.reason });
+		// GitLab closes with 4000 + an HTTP-like status when it rejects the session
+		// (4400 "Flow configuration failed security validation"); without this the
+		// rejection ended the turn as an empty stop and the agent retried it blindly.
+		if (event.code >= 4000 && event.code < 5000) {
+			const httpStatus = event.code - 4000;
+			const reasonSuffix = event.reason ? `: ${event.reason}` : "";
+			const error =
+				httpStatus >= 100 && httpStatus <= 599
+					? new AIError.ProviderHttpError(
+							`GitLab Duo Workflow closed the session with HTTP ${httpStatus} (WebSocket ${event.code})${reasonSuffix}`,
+							httpStatus,
+						)
+					: new AIError.ProviderResponseError(
+							`GitLab Duo Workflow closed the session (WebSocket ${event.code})${reasonSuffix}`,
+							{ provider: "gitlab-duo-agent", kind: "runtime" },
+						);
+			settle("closed", error);
+			return;
+		}
 		settle(state.lastApprovalStatus ? "approval" : "closed");
+	};
+	const processMessage = (data: unknown): void => {
+		void handleGitLabDuoWorkflowSocketMessage(data, state).then(
+			result => { handleSocketResult(result, data, []); },
+			error => settle("closed", error),
+		);
 	};
 	ws.onmessage = event => {
 		resetIdleTimer();
@@ -1954,12 +2042,27 @@ export function runGitLabDuoWorkflowSocket(
 			active.pauseBuffer.push(event.data);
 			return;
 		}
-		void handleGitLabDuoWorkflowSocketMessage(event.data, state).then(
-			result => {
-				handleSocketResult(result, event.data, []);
-			},
-			error => settle("closed", error),
-		);
+		const data = event.data;
+		if (pendingSend) void pendingSend.then(() => { if (!settled) processMessage(data); });
+		else processMessage(data);
+	};
+	const sendFrames = (frames: readonly unknown[]): void => {
+		const fail = (error: unknown) => { settle("closed", error); close(); };
+		if (!hasModelRequestPolicy()) {
+			try {
+				options.signal?.throwIfAborted();
+				for (const frame of frames) if (!settled) ws.send(JSON.stringify(frame));
+			} catch (error) { fail(error); }
+			return;
+		}
+		const pending = (async () => {
+			for (const frame of frames) {
+				await checkModelRequestPolicy(`${state.output.provider}/${state.output.model}`, options.signal);
+				if (!settled) ws.send(JSON.stringify(frame));
+			}
+		})().catch(fail);
+		pendingSend = pending;
+		void pending.finally(() => { if (pendingSend === pending) pendingSend = undefined; });
 	};
 	if (replayMessages && replayMessages.length > 0) {
 		ws.onopen = null;
@@ -2006,12 +2109,7 @@ export function runGitLabDuoWorkflowSocket(
 		// inline flow only ever has one.) DWS matches it by requestID to the awaiting
 		// outbox future and the workflow continues on the same connection.
 		const responses = Array.isArray(resumeResponse) ? resumeResponse : [resumeResponse];
-		void (async () => {
-			for (const response of responses) {
-				await checkModelRequestPolicy(`${state.output.provider}/${state.output.model}`, options.signal);
-				if (!settled) ws.send(JSON.stringify(response));
-			}
-		})().catch(error => settle("closed", error));
+		sendFrames(responses);
 	} else {
 		ws.onopen = () => {
 			traceGitLabDuoWorkflow("websocket.open", {
@@ -2023,11 +2121,7 @@ export function runGitLabDuoWorkflowSocket(
 				mcpTools: startPayload.mcpTools.length,
 				preapprovedTools: startPayload.preapproved_tools.length,
 			});
-			void checkModelRequestPolicy(`${state.output.provider}/${state.output.model}`, options.signal)
-				.then(() => {
-					if (!settled) ws.send(JSON.stringify({ startRequest: startPayload }));
-				})
-				.catch(error => settle("closed", error));
+			sendFrames([{ startRequest: startPayload }]);
 		};
 	}
 	resetIdleTimer();

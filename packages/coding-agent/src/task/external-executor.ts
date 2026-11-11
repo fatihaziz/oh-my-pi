@@ -77,6 +77,12 @@ export function externalExecutorForSession(
 	return selected;
 }
 
+/** Standalone selection never applies to a hosted or disconnected lifecycle owner. */
+export function standaloneModelSelection(sessionFile: string | null | undefined): boolean {
+	return process.env.PI_FOYER !== "true" && !process.env.FOYER_VERSION &&
+		!process.env.FOYER_COMPANION_OBSERVER_URL && !externalExecutorForSession(sessionFile);
+}
+
 export function externalExecutorForAgent(id: string): ExternalSubagentExecutor | undefined {
 	return externalExecutorForSession(AgentRegistry.global().get(id)?.sessionFile, false);
 }

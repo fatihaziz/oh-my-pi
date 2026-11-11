@@ -150,7 +150,7 @@ function validateRegistryFrontmatter(frontmatter: Record<string, unknown>): Regi
 // Ignore rules (gitignore subset)
 // ---------------------------------------------------------------------------
 
-interface IgnoreRule {
+export interface IgnoreRule {
 	regex: RegExp;
 	negate: boolean;
 	dirOnly: boolean;

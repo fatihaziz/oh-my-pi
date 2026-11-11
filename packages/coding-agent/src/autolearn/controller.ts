@@ -24,8 +24,8 @@ import { cfgAutolearnAutoContinue, cfgAutolearnEnabled, cfgAutolearnMinToolCalls
 const AUTOLEARN_NUDGE_AUTOCONTINUE = autolearnNudgeAutoContinue.trim();
 
 /**
- * Build the standing auto-learn guidance for the system prompt from the tools
- * actually present in the active set, or null when `manage_skill` is absent.
+ * Build standing auto-learn guidance from tools actually present in the active
+ * set, or return null when neither learning tool is available.
  *
  * Driven by tool presence rather than settings: keying the guidance on
  * `autolearn.enabled` would let a subagent that filtered the tools out — or a
@@ -34,7 +34,7 @@ const AUTOLEARN_NUDGE_AUTOCONTINUE = autolearnNudgeAutoContinue.trim();
  * the `learn` tool is present (it requires a memory backend).
  */
 export function buildAutoLearnInstructions(available: { manageSkill: boolean; learn: boolean }): string | null {
-	if (!available.manageSkill) return null;
+	if (!available.manageSkill) return available.learn ? "Capture durable facts and project conventions with `learn`." : null;
 	const parts = [autolearnGuidance.trim()];
 	if (available.learn) parts.push(autolearnGuidanceLearn.trim());
 	return parts.join("\n\n");

@@ -2,10 +2,13 @@
  * Host-side handler for the eval `agent()` helper.
  */
 import { type } from "@oh-my-pi/omptype";
+import type { Settings } from "../config/settings";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
+import { taskRequirementsSchema } from "../task/types";
 import {
 	buildStructuredSubagentRecoveryHint,
+	invalidModelSelectorReason,
 	reserveStructuredSubagentId,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
@@ -13,7 +16,7 @@ import {
 	type StructuredSubagentIsolationControls,
 	type StructuredSubagentResult,
 } from "../task/structured-subagent";
-import type { AgentProgress, SingleResult, StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress, SingleResult, StructuredSubagentSchemaMode, TaskModelRequirements } from "@oh-my-pi/pi-tui/tools/task";
 import type { NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -25,6 +28,7 @@ export const EVAL_AGENT_BRIDGE_NAME = "__agent__";
 const agentArgsSchema = type({
 	prompt: "string>0",
 	"agent?": "string>0",
+	"model?": "string",
 	"label?": "string",
 	"schema?": "unknown",
 	"schemaMode?": "'permissive' | 'strict'",
@@ -32,12 +36,14 @@ const agentArgsSchema = type({
 	"apply?": "boolean",
 	"merge?": "boolean",
 	"tools?": "string[]",
+	"requirements?": taskRequirementsSchema,
 	"+": "delete",
 });
 
 interface EvalAgentArgs {
 	prompt: string;
 	agent?: string;
+	model?: string;
 	label?: string;
 	schema?: unknown;
 	schemaMode?: StructuredSubagentSchemaMode;
@@ -45,6 +51,7 @@ interface EvalAgentArgs {
 	apply?: boolean;
 	merge?: boolean;
 	tools?: string[];
+	requirements?: TaskModelRequirements;
 }
 
 export interface EvalAgentBridgeOptions {
@@ -84,11 +91,13 @@ export interface EvalAgentResult {
 	};
 }
 
-function parseAgentArgs(args: unknown): EvalAgentArgs {
+function parseAgentArgs(args: unknown, settings: Settings): EvalAgentArgs {
 	const result = agentArgsSchema(args);
 	if (result instanceof type.errors) {
 		throw new ToolError(`agent() received invalid arguments: ${result.summary}`);
 	}
+	const selectorProblem = invalidModelSelectorReason(result.model, "agent()", { settings, invocationKind: "eval" });
+	if (selectorProblem) throw new ToolError(selectorProblem);
 	return result;
 }
 
@@ -167,7 +176,7 @@ async function buildEvalAgentResult(execution: StructuredSubagentResult): Promis
 
 /** Register a background subagent and return its handle immediately. */
 export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentHandleResult> {
-	const parsed = parseAgentArgs(args);
+	const parsed = parseAgentArgs(args, options.session.settings);
 	const turnBudget = options.session.getTurnBudget?.();
 	if (turnBudget?.hard && turnBudget.total !== null && turnBudget.spent >= turnBudget.total) {
 		throw new ToolError(
@@ -195,7 +204,9 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			session: options.session,
 			invocationKind: "eval",
 			assignment: parsed.prompt,
+			requirements: parsed.requirements,
 			...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
+			...(parsed.model !== undefined ? { perCallModel: parsed.model } : {}),
 			...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
 			...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
 			...(isolation ? { isolation } : {}),
@@ -218,7 +229,9 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 						session: options.session,
 						invocationKind: "eval",
 						assignment: parsed.prompt,
+						requirements: parsed.requirements,
 						...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
+						...(parsed.model !== undefined ? { perCallModel: parsed.model } : {}),
 						...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
 						...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
 						identity: { id, label: parsed.label },

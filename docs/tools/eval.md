@@ -5,6 +5,7 @@
 > **Notice:** Do not shell out to `python -c`, `bun -e`, or `node -e` through `bash` for ad-hoc code. `eval` provides retained state, rich `print` rendering, tool/subagent bridges, streaming, cancellation, and artifact-backed truncation.
 
 ## Source
+
 - Entry and dynamic schema: `packages/coding-agent/src/tools/eval.ts`
 - Backend enablement: `packages/coding-agent/src/tools/eval-backends.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/eval.md`
@@ -25,21 +26,21 @@ The params object is one cell. There is no `cells` array, header parser, languag
 | `language` | `"py" \| "js" \| "rust"` | Yes | Explicit backend token. The live schema includes only enabled runtimes. |
 | `code` | `string` | Yes | Inline code, or one standalone `%load` / `%pip install` (py) / `%bun add` / `%environment` (js) command. Rust accepts statements or an expression. |
 | `title` | `string` | No | Short transcript label. |
-| `timeout` | `number` | No | Active-runtime timeout window in seconds. Default 30; `0` disables it. Nonzero values are clamped by the tool timeout policy (`TOOL_TIMEOUTS.eval`: 1–3600 s) and `tools.maxTimeout`. Paused host waits resume with a fresh window, not the unused remainder. |
-| `reset` | `boolean` | No | Recreate the Python or JavaScript retained runtime before execution. Rust cells are always fresh. Default `false`. |
+| `timeout` | `number` | No | Active-runtime timeout in seconds; default 30, `0` disables it. Nonzero values are clamped by `TOOL_TIMEOUTS.eval` and `tools.maxTimeout`. Changes are disclosed at admission, in progress, and in the final result and `details.notice`. Paused host waits resume with a fresh window. |
+| `reset` | `boolean` | No | Recreate the Python or JavaScript retained runtime. Rust cells are always fresh. Default `false`. |
 
 Example across three calls:
 
 ```json
-{"language":"py","title":"imports","code":"import json\nfrom pathlib import Path"}
+{ "language": "py", "title": "imports", "code": "import json\nfrom pathlib import Path" }
 ```
 
 ```json
-{"language":"py","title":"load config","code":"data = json.loads(read('package.json'))\nprint(data)"}
+{ "language": "py", "title": "load config", "code": "data = json.loads(read('package.json'))\nprint(data)" }
 ```
 
 ```json
-{"language":"py","title":"reuse state","code":"print(sorted(data['dependencies']))"}
+{ "language": "py", "title": "reuse state", "code": "print(sorted(data['dependencies']))" }
 ```
 
 Rust uses `rust-script` from `PATH`. Every cell is independent, with no Python or JavaScript helpers or persistent variables. Example: `{"language":"rust","code":"println!(\"{}\", 42);"}`.
@@ -49,7 +50,7 @@ Rust uses `rust-script` from `PATH`. Every cell is independent, with no Python o
 Save reusable setup in a file, then load it once:
 
 ```json
-{"language":"py","code":"%load ./analysis.py"}
+{ "language": "py", "code": "%load ./analysis.py" }
 ```
 
 Later cells reuse its definitions. Calling `%load` again executes the current file again; editing it alone does not reload it. The host reads the file (quote paths containing spaces; `local://` files are supported) and runs it with its filename: Python sets `__file__`, puts the script directory on `sys.path`, and reports tracebacks against the script; JavaScript/TypeScript resolves relative imports from the script while eval keeps its working directory.
@@ -70,11 +71,13 @@ Compaction receives a bounded live-kernel snapshot with environment and successf
 
 | Token | Runtime | Setting/default | Environment override | Additional prerequisite |
 | --- | --- | --- | --- | --- |
-| `py` | retained IPython-style Python kernel | `eval.py=true` | `PI_PY` | usable configured Python interpreter/kernel |
+| `py` | retained IPython-style Python kernel | `eval.py=true` | `PI_PY` | working Python 3.8+ on PATH or configured with `python.interpreter` |
 | `js` | retained Bun worker VM | `eval.js=true` | `PI_JS` | bundled JS runtime |
 | `rust` | independent `rust-script` expression | available while eval is enabled | none | `rust-script` on `PATH` |
 
-When at least one runtime is enabled, disabled runtimes are removed from the session-scoped wire schema and model prompt. A requested unavailable runtime raises `ToolError`; the tool never substitutes another language. `eval.tools.enabled=true` (default) independently controls whether kernel-defined tools and the `tools` subagent fields are advertised and usable.
+Disabled runtimes are removed from the session-scoped wire schema and model prompt. After a definitive failed local Python probe, the next schema, description, and prelude omit `py`; hosted workers use their parent-owned kernel instead. A successful explicit availability refresh restores Python. Changes to PATH, active environment, cwd, or the configured interpreter invalidate the advertised snapshot. Cancelled or deadline-limited probes do not establish permanent unavailability. Explicit Python calls retry failed probes.
+
+A requested unavailable runtime raises `ToolError` with the bounded, sanitized probe reason and a remedy: provide a working Python 3.8+ on PATH or set `python.interpreter`. The tool never substitutes another language. `eval.tools.enabled=true` (default) independently controls whether kernel-defined tools and the `tools` subagent fields are advertised and usable.
 
 `eval.autoProvision=true` lets the first `%bun add` create the managed JavaScript package environment; turning it off requires an existing environment or `%environment project`. Package installation pauses the compute watchdog but has its own ten-minute deadline and remains cancellable.
 
@@ -106,8 +109,8 @@ The renderer merges call and result inline, syntax-highlights from the declared 
 ## Execution flow
 
 1. `EvalTool` builds a session-specific schema from enabled languages. It is essential, strict, `approval="exec"`, and `concurrency="exclusive"` within one agent session.
-2. `execute()` maps `py/js` to `python/js`, resolves availability, reads file-backed source once, and wraps the input in the renderer-compatible cell list. Runtime probing is bounded by the requested timeout and abort signal. The JS backend installs requested packages inside the cancellation/background lifecycle.
-3. It obtains the retained executor id from `session.getEvalSessionId?.()` or `defaultEvalSessionId(session)`, allocates the output sink/artifact, and registers the run through `trackEvalExecution?.(...)`.
+2. `execute()` maps `py/js/rust` to `python/js/rust`, resolves availability, reads file-backed source once, and wraps the input in the renderer-compatible cell list. Runtime probing is bounded by the requested timeout and abort signal. The JS backend installs requested packages inside the cancellation/background lifecycle.
+3. Python and JavaScript obtain a retained executor id from `session.getEvalSessionId?.()` or `defaultEvalSessionId(session)`; Rust starts an independent process. The tool allocates the output sink/artifact and registers the run through `trackEvalExecution?.(...)`.
 4. The timeout defaults to 30 seconds. `0` creates no watchdog. Otherwise `IdleTimeout` is combined with tool and session abort signals.
 5. Agent/completion handle waits, `judge()`, judgment-batch drains, package installation, delegated `tool.task()`/`tool.wait()`, and browser/computer preludes pause the watchdog. Resuming starts a fresh timeout window. Compute, output, status helpers, and ordinary `tool.*` calls, including MCP tools that report progress, count against it.
 6. The selected backend receives cwd, retained session id, session file, kernel owner, reset flag, callbacks, and cancellation signal.
@@ -157,6 +160,10 @@ All enabled runtimes expose equivalent helpers where the language permits:
 
 JS helpers are asynchronous; Python file helpers are synchronous while `tool.<name>()` is a coroutine. `read()` delegates non-`local://` schemes to the registered read tool, resolves `local://` through injected roots, and reads regular paths relative to cwd. A bare `read("artifact://<id>")` returns the artifact file's full text, with `offset`/`limit` selecting lines, whichever session's artifacts dir holds it; selector forms such as `artifact://<id>:raw:5-9` go to the read tool. `write()` accepts regular and `local://` paths but rejects other protocol URLs.
 
+The prelude lists accepted session tool names, including unambiguous wire aliases such as `tool.apply_patch({ input: "..." })` for an enabled `edit` tool in apply-patch mode. Exact registered names shadow aliases; ambiguous aliases are unavailable. Both canonical and wire calls check the resolved tool's enablement and use its ordinary approval/ACP gate.
+
+Bridge restrictions and bookkeeping use the resolved canonical tool, not the requested wire spelling. Aliases of `checkpoint` and `rewind` are omitted and rejected because those tools need direct result events; aliases of `todo` retain branch persistence, and aliases of `task`/`wait` pause the cell watchdog like their canonical calls.
+
 Printing an image or figure attaches it to the result for both the model and the user. Printed data frames, `console.table`, Markdown objects, and large structured values also carry a pretty view for the user; the model sees the printed text.
 
 Enabled extension preludes add globals (such as `browser`) with documentation at `xd://eval/<name>`. Their host calls resolve approval and availability against the live session; disabling a prelude also prevents previously captured functions from retaining host access.
@@ -168,7 +175,6 @@ Enabled extension preludes add globals (such as `browser`) with documentation at
 For many states, Python's `await judge_batch(states, questions, concurrency=32, retries=1, min_ok=1, intent=None)` or JS's `await judgeBatch(states, questions, { concurrency?, retries?, minOk?, intent? })` creates a host-owned batch. States are a list/array (index keys) or keyed object. `await b.drain(...)` pulls newly settled `(key, item)` pairs with `item.answers` or `item.error`; Python takes `timeout` directly, JS takes `{ timeout }`. Item failures are retained, while whole-run failure raises after the drain cursor is exhausted. `status()`, `results()`, `failed()`, `cancel()`, and `close()` inspect/control the batch. Batches outlive cells and kernel resets; `judge_batch.attach(id)` / `judgeBatch.attach(id)` reconnects an owning session until close or owner disposal. Completion and judgment requests share a process-wide 32-request semaphore.
 
 The full helper reference is `xd://eval/judge`.
-
 
 ### MCP structured results
 
@@ -212,9 +218,9 @@ A stateless, tool-free one-shot model call that returns a `CompletionHandle` imm
 
 Registers one background subagent job and returns an `AgentHandle` immediately:
 
-- JS: `await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?, tools? })`; Python uses keyword arguments (`schema_mode`).
+- JS: `await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?, tools?, model? })`; Python uses keyword arguments (`schema_mode`).
 - Preflight (spawn policy, unknown agent, `task.maxRecursionDepth`, hard turn budget, plan-mode isolation controls, unknown `tools` names) fails handle allocation; Python raises directly, JS's pending handle rejects when awaited/used. Execution failures surface from `.wait()`.
-- `agent` defaults from the current spawn policy; the selected agent's frontmatter model and settings always apply (no per-call `model`). `schema` overrides agent/session schemas; `schemaMode`/`schema_mode` chooses `permissive` or `strict`.
+- `agent` defaults from the current spawn policy; `model` is the [per-call model](../task-agent-discovery.md#per-call-model): one exact operator-approved `provider/model-id[@upstream][:level]`, accepted when `task.perCallModel` is `eval` or `on`, rejected for an agent with a `task.agentModelOverrides` entry. `@upstream` pins an aggregator route and is part of the model identity. A workpool applies it to each worker's first turn (including every fresh worker); follow-up turns reuse that session. `schema` overrides agent/session schemas; `schemaMode`/`schema_mode` chooses `permissive` or `strict`.
 - `isolated` requests isolation. `apply` controls whether captured changes are integrated; `merge=false` selects patch mode while the normal setting controls branch mode.
 - `tools`: names of kernel-defined tools (see below) the child may call; each call executes inside the caller's kernel.
 - Handle surface: `.id`, `.agent`, `.handle` (`agent://<id>`), `.status`, `.done()`, `.wait(timeout?)`, `.send(message)`, `.cancel()`, `.output()`. Python handles are awaitable; JavaScript uses `await handle.wait()`.
@@ -226,7 +232,7 @@ Registers one background subagent job and returns an `AgentHandle` immediately:
 
 ### `workpool()`
 
-`workpool(agent=None, name=None, context=None, tools=None)` creates a pool of keep-alive subagents bounded by the live `task.maxConcurrency`:
+`workpool(agent=None, name=None, context=None, tools=None, model=None)` creates a pool of keep-alive subagents bounded by the live `task.maxConcurrency`:
 
 - `.push(*items)` returns item ids (`<pool>#<seq>`). An item goes to the idle worker with the lowest context usage, spawns a new worker while the pool has room, or is queued round-robin onto a busy worker and handed over as one batch when that worker's turn ends. `eval.workpool.freshAgents=true` instead queues for a fresh agent whenever capacity frees, so every item gets a new context and no follow-up batching occurs.
 - A worker submits each batch item separately through `yield({ key: <1-based number>, data: {...} })` or `yield({ key, error })`; each response names the remaining keys, and the final key ends the turn automatically.
@@ -250,6 +256,7 @@ With `eval.tools.enabled` (default on), a cell can turn a function into a tool o
 - Python uses a retained subprocess kernel speaking framed local IPC. JavaScript uses an isolated subprocess, with a Bun Worker fallback; if both fail to start, the call fails without executing code on the host thread.
 - Retained runtimes have no heartbeat or idle timer; they survive calls until reset, owner disposal (`EvalRunner.disposeKernels()` calls `disposeKernelSessionsByOwner` and `disposeVmContextsByOwner` keyed by `kernelOwnerId`, in `packages/coding-agent/src/session/eval-runner.ts`), or process exit.
 - Cancellation is destructive when needed: JS terminates its worker; managed kernels interrupt and may escalate to shutdown. A reset is likewise destructive to concurrent work sharing that backend session.
+- A retained runtime that dies between cells (crash, kill, out-of-memory, or a cancel/timeout that ended it) is replaced on the next call; the first cell to run on the replacement opens with `Kernel restarted: the previous Python kernel is dead; state is unavailable. …` (`JS worker` for JavaScript), once per replacement. A `reset` or owner disposal gives no notice.
 - Eval-driven `agent()` children stay registered as keep-alive agents; owner teardown cancels their jobs, releases completion handles/judgment batches, and closes the owner's work pools.
 
 ## Limits and errors

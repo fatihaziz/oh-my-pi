@@ -1,15 +1,16 @@
 import { type NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
+import { constants as fsConstants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { acquireFileLock, formatBytes, getWorktreeDir, isEnoent, logger, Snowflake, type FileLockHandle } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
-import { writeIsolationOwner } from "./isolation-ownership";
+import { needsNativeTeardown, writeIsolationOwner, writeRetainedBackend } from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
 import type { cfgIsolationBackend } from "./settings";
 
@@ -130,7 +131,7 @@ async function discoverNestedRepos(repoRoot: string, ownRepos: readonly string[]
 				const commonDir = await realCommonDir(full);
 				if (commonDir && ownCommonDirs.has(commonDir)) continue;
 				result.push(rel);
-				// Don't recurse into nested repos — they manage their own tree
+				await walk(full);
 				continue;
 			}
 			await walk(full);
@@ -618,43 +619,128 @@ export function getTaskIsolationPath(repoRoot: string, id: string): string {
 	return path.join(getWorktreeDir(`${TASK_ISOLATION_DIR_PREFIX}${digest}`), TASK_ISOLATION_MOUNT_DIR);
 }
 
-/**
- * Submodule pointers in copied checkouts may target the source admin directory
- * or one under the root `.git` that detach removes. Materialize missing trees
- * from parents down, then detach admin state from leaves up.
- */
+async function assertSafeParents(root: string, target: string): Promise<void> {
+	const relative = path.relative(root, path.dirname(target));
+	if (relative === ".." || path.isAbsolute(relative) || relative.startsWith(`..${path.sep}`))
+		throw new Error(`Isolation path escapes workspace: ${target}`);
+	let current = root;
+	for (const part of relative.split(path.sep).filter(Boolean)) {
+		current = path.join(current, part);
+		const stat = await fs.lstat(current).catch(error => {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		});
+		if (!stat) return;
+		if (stat.isSymbolicLink() || !stat.isDirectory())
+			throw new Error(`Unsafe isolation ancestor: ${current}`);
+	}
+}
+
+async function assertSafeIsolationLinks(root: string, dir = root): Promise<void> {
+	for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+		const current = path.join(dir, entry.name);
+		const stat = await fs.lstat(current);
+		if (entry.name === ".git") {
+			if (stat.isSymbolicLink()) throw new Error(`Unsafe isolation Git link: ${current}`);
+			continue;
+		}
+		if (stat.isSymbolicLink()) {
+			const target = await fs.realpath(current).catch(() => undefined);
+			const relative = target === undefined ? ".." : path.relative(root, target);
+			if (relative === ".." || path.isAbsolute(relative) || relative.startsWith(`..${path.sep}`))
+				throw new Error(`Unsafe isolation link: ${current}`);
+		} else if (stat.isDirectory()) {
+			await assertSafeIsolationLinks(root, current);
+		}
+	}
+}
+
+async function materializeRepository(source: string, destination: string): Promise<void> {
+	const repo = vcs.requireGit(source);
+	const info = repo.info();
+	const submodules = new Set((await repo.submodulePaths()).map(value => path.normalize(value)));
+	const tracked = new Set(await repo.lsFiles(false, false));
+	const untracked = new Set(await repo.lsFiles(true, true));
+	const entries = new Set([...tracked, ...untracked]);
+	await fs.mkdir(destination, { recursive: true });
+	// Detach the index before copying files so no operation can modify the source repository.
+	await fs.writeFile(path.join(destination, ".git"), `gitdir: ${info.gitDir}\n`);
+	await vcs.detachGitDir(destination, info.commonDir);
+	for (const entry of entries) {
+		const relative = path.normalize(entry);
+		if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) {
+			throw new Error(`Unsafe repository path: ${entry}`);
+		}
+		if (submodules.has(relative)) continue;
+		const parts = relative.split(path.sep);
+		let parent = source;
+		for (const part of parts.slice(0, -1)) {
+			parent = path.join(parent, part);
+			const stat = await fs.lstat(parent).catch(error => {
+				if (isEnoent(error)) return undefined;
+				throw error;
+			});
+			if (!stat) break;
+			if (stat.isSymbolicLink() || !stat.isDirectory()) {
+				throw new Error(`Unsafe repository path through link or non-directory: ${entry}`);
+			}
+		}
+		const from = path.join(source, relative);
+		const stat = await fs.lstat(from).catch(error => {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		});
+		if (!stat) {
+			if (untracked.has(entry)) throw new Error(`Untracked repository entry disappeared: ${from}`);
+			continue;
+		}
+		if (stat.isDirectory()) {
+			const nestedGit = await fs.lstat(path.join(from, ".git")).then(() => true, error => {
+				if (isEnoent(error)) return false;
+				throw error;
+			});
+			if (nestedGit) continue;
+		}
+		const to = path.join(destination, relative);
+		await fs.mkdir(path.dirname(to), { recursive: true });
+		if (stat.isSymbolicLink()) {
+			const target = await fs.readlink(from);
+			const resolved = await fs.realpath(from).catch(() => undefined);
+			const relTarget = resolved === undefined ? ".." : path.relative(source, resolved);
+			if (path.isAbsolute(target) || relTarget === ".." || path.isAbsolute(relTarget) || relTarget.startsWith(`..${path.sep}`)) {
+				throw new Error(`Unsafe repository link: ${entry}`);
+			}
+			await fs.symlink(target, to);
+		} else if (stat.isFile()) {
+			await fs.copyFile(from, to, fsConstants.COPYFILE_FICLONE);
+		} else {
+			throw new Error(`Unsupported repository entry: ${entry}`);
+		}
+	}
+}
+
 async function detachSubmodules(sourceRoot: string, isolationRoot: string): Promise<void> {
-	const paths = await vcs.requireGit(sourceRoot).submodulePaths();
-	const initialized: Array<{ sourceDir: string; isolatedDir: string; isFile: boolean }> = [];
+	const paths = (await vcs.requireGit(sourceRoot).submodulePaths()).map(value => path.normalize(value));
 	for (const relativePath of paths) {
+		if (paths.some(parent => parent !== relativePath && relativePath.startsWith(`${parent}${path.sep}`))) continue;
 		const sourceDir = path.join(sourceRoot, relativePath);
 		const isolatedDir = path.join(isolationRoot, relativePath);
+		await assertSafeParents(isolationRoot, isolatedDir);
 		try {
-			// Junction-backed submodules are independently materialized below.
-			if ((await fs.lstat(sourceDir)).isSymbolicLink()) continue;
 			await fs.lstat(path.join(sourceDir, ".git"));
 		} catch (error) {
 			if (isEnoent(error)) continue;
 			throw error;
 		}
-		let isolatedEntry;
-		try {
-			isolatedEntry = await fs.lstat(path.join(isolatedDir, ".git"));
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-			// `git worktree add` (rcopy) checks out gitlinks but not their trees.
-			await fs.cp(sourceDir, isolatedDir, { recursive: true });
-			isolatedEntry = await fs.lstat(path.join(isolatedDir, ".git"));
-		}
-		initialized.push({ sourceDir, isolatedDir, isFile: isolatedEntry.isFile() });
-	}
-	for (const { sourceDir, isolatedDir, isFile } of initialized.reverse()) {
-		if (!isFile) continue;
-		const info = vcs.requireGit(sourceDir).info();
-		// A relative pointer into the copied root `.git/modules` becomes
-		// dangling after root detach; read from the source until detached.
-		await fs.writeFile(path.join(isolatedDir, ".git"), `gitdir: ${info.gitDir}\n`);
-		await vcs.detachGitDir(isolatedDir, info.commonDir);
+		const existing = await fs.lstat(isolatedDir).catch(error => {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		});
+		if (existing?.isSymbolicLink()) await fs.unlink(isolatedDir);
+		else if (existing) await fs.rm(isolatedDir, { recursive: true });
+		const source = await fs.realpath(sourceDir);
+		await materializeRepository(source, isolatedDir);
+		await detachSubmodules(source, isolatedDir);
 	}
 }
 
@@ -662,52 +748,61 @@ export async function ensureIsolation(
 	baseCwd: string,
 	id: string,
 	preferred?: IsoBackendKind,
-	exclusive = false,
+	_exclusive = false,
 ): Promise<IsolationHandle> {
 	const repoRoot = await getRepoRoot(baseCwd);
 	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
 	const mergedDir = getTaskIsolationPath(repoRoot, id);
 	const baseDir = path.dirname(mergedDir);
 	const resolution = await natives.isoResolve(preferred ?? null);
-	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
+	const hasNested = (await vcs.requireGit(repoRoot).submodulePaths()).length > 0 ||
+		(await discoverNestedRepos(repoRoot)).length > 0;
+	const candidates = hasNested ? [IsoBackendKind.Rcopy] :
+		resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
 	let fallbackReason = resolution.reason ?? null;
 
 	for (const candidate of candidates) {
-		if (exclusive) {
-			await fs.mkdir(path.dirname(baseDir), { recursive: true });
-			await fs.mkdir(baseDir);
-		} else {
-			await fs.rm(baseDir, { recursive: true, force: true });
-			await fs.mkdir(baseDir, { recursive: true });
-		}
+		await fs.mkdir(path.dirname(baseDir), { recursive: true });
+		await fs.mkdir(baseDir);
 		// Claim ownership before the backend materialises `m`. Backends only
 		// create/replace `mergedDir` (and overlay upper/work), never the base
 		// dir, so the marker survives `isoStart` — and a concurrent
 		// `omp worktree clear` never sees this sandbox without a live owner,
 		// even while a large clone is still in progress.
 		await writeIsolationOwner(baseDir, id);
+		await writeRetainedBackend(baseDir, candidate);
+		let started = false;
 		let isolationSource = repoRoot;
+		let gitLock: FileLockHandle | undefined;
 		try {
+			if (candidate === IsoBackendKind.Rcopy) {
+				const common = await fs.realpath(sourceCommonDir);
+				const key = process.platform === "win32" ? common.toLowerCase() : common;
+				gitLock = await acquireFileLock(path.join(key, "omp-task-isolation"), { retries: 6000, retryDelayMs: 100 });
+			}
 			await natives.isoStart(candidate, repoRoot, mergedDir);
-			// Sever the isolation's git metadata from the source checkout. Copy
-			// backends duplicate `repoRoot`'s `.git` verbatim — a linked-worktree
-			// pointer file (or the rcopy `git worktree add` registration) leaves
-			// the isolation sharing the source's HEAD/index/ref namespace, so a
-			// task's git operations would mutate the parent checkout and stack
-			// parallel task branches. Detaching gives each isolation a private,
-			// frozen repo that still borrows the source object DB via alternates.
+			started = true;
 			await detachSubmodules(repoRoot, mergedDir);
 			await vcs.detachGitDir(mergedDir, sourceCommonDir);
 			// Child repositories need their own private Git metadata and file tree.
 			// Copy backends can omit ignored submodules or retain a junction to the source.
+			const submodulePaths = new Set((await vcs.requireGit(repoRoot).submodulePaths()).map(value => path.normalize(value)));
 			for (const relativePath of await discoverNestedRepos(repoRoot)) {
+				if (submodulePaths.has(relativePath)) continue;
 				const source = await fs.realpath(path.join(repoRoot, relativePath));
 				isolationSource = source;
 				const destination = path.join(mergedDir, relativePath);
-				await fs.rm(destination, { recursive: true, force: true });
-				await natives.isoStart(candidate, source, destination);
-				await vcs.detachGitDir(destination, vcs.requireGit(source).info().commonDir);
+				await assertSafeParents(mergedDir, destination);
+				const existing = await fs.lstat(destination).catch(error => {
+					if (isEnoent(error)) return undefined;
+					throw error;
+				});
+				if (existing?.isSymbolicLink()) await fs.unlink(destination);
+				else if (existing) await fs.rm(destination, { recursive: true });
+				await materializeRepository(source, destination);
+				await detachSubmodules(source, destination);
 			}
+			await assertSafeIsolationLinks(await fs.realpath(mergedDir));
 			return {
 				mergedDir,
 				backend: candidate,
@@ -715,22 +810,65 @@ export async function ensureIsolation(
 				fallbackReason,
 			};
 		} catch (err) {
-			await fs.rm(baseDir, { recursive: true, force: true });
+			const materialized = await fs.lstat(mergedDir).then(() => true, error => {
+				if (isEnoent(error)) return false;
+				throw error;
+			});
+			if (materialized) {
+				try {
+					await assertSafeIsolationLinks(await fs.realpath(mergedDir));
+				} catch (unsafe) {
+					throw new Error(`Isolation setup failed; unsafe workspace retained at ${mergedDir}`, { cause: unsafe });
+				}
+			}
+			if (started) {
+				try {
+					await cleanupIsolation({ mergedDir, backend: candidate, fellBack: false, fallbackReason: null });
+				} catch (cleanupError) {
+					throw new Error(`Isolation setup failed; workspace retained at ${mergedDir}`, { cause: cleanupError });
+				}
+			} else {
+				if (materialized) {
+					throw new Error(`Isolation failed for ${isolationSource}: ${errorMessage(err)}; workspace retained at ${mergedDir}`, { cause: err });
+				}
+				await fs.rm(baseDir, { recursive: true, force: true });
+			}
 			const message = errorMessage(err);
 			if (!natives.isoIsUnavailableError(message)) {
 				throw new Error(`Isolation failed for ${isolationSource}: ${message}`, { cause: err });
 			}
 			fallbackReason ??= message;
+		} finally {
+			gitLock?.release();
 		}
 	}
 
 	throw new Error(fallbackReason ?? "No isolation backend is available.");
 }
 
-/** Tear down a handle returned by {@link ensureIsolation}. */
+/**
+ * Tear down a handle returned by {@link ensureIsolation}. When native teardown fails for a mount or
+ * subvolume backend, the workspace is kept with a retained-backend sidecar (recursive `rm` would
+ * traverse the live mount); `omp worktree clear` retries the teardown later.
+ */
 export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
-	await natives.isoStop(handle.backend, handle.mergedDir);
-	await fs.rm(path.dirname(handle.mergedDir), { recursive: true, force: true });
+	const baseDir = path.dirname(handle.mergedDir);
+	try {
+		await natives.isoStop(handle.backend, handle.mergedDir);
+	} catch (err) {
+		if (needsNativeTeardown(handle.backend)) {
+			try {
+				await writeRetainedBackend(baseDir, handle.backend);
+			} catch (writeErr) {
+				logger.warn("retained-backend record write failed; unmount the workspace manually", {
+					mergedDir: handle.mergedDir,
+					error: writeErr instanceof Error ? writeErr.message : String(writeErr),
+				});
+			}
+		}
+		throw err;
+	}
+	await fs.rm(baseDir, { recursive: true, force: true });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -891,9 +1029,19 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 
 	for (const commitSha of agentCommits) {
 		const taskStatePatch = await diffTreeOrEmpty(isolationRepo, dirtyBaselineTree, `${commitSha}^{tree}`);
-		const currentFilteredTree = await writeSyntheticTree(opts.repoRoot, baselineSha, [taskStatePatch], {
-			threeWay: true,
-		});
+		// The delta is captured against `HEAD + baseline WIP`, so synthesise the
+		// filtered tree through `patchTree` with that WIP context: hunks that
+		// touch WIP paths — including deletions of untracked WIP the agent never
+		// committed — replay against the WIP state and are rewound afterwards
+		// instead of failing against the clean baseline tree with
+		// "patch does not apply: … does not exist".
+		const currentFilteredTree = await patchTree(
+			opts.repoRoot,
+			baselineSha,
+			opts.taskId,
+			taskStatePatch,
+			opts.baseline.root,
+		);
 		const commitPatchText = await diffTreeOrEmpty(repo, previousFilteredTree, currentFilteredTree);
 		if (commitPatchText.trim()) {
 			const details = await isolationRepo.commitDetails(commitSha);
@@ -920,10 +1068,17 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 		return commitPatch(opts.repoRoot, tip, opts.taskId, opts.rootPatch, msg, undefined, opts.baseline.root);
 	}
 	// Reconstruct the final HEAD-derived tree with the same dirty-side blobs
-	// and 3-way synthesis used above; anything left is uncommitted work.
-	const finalFilteredTree = await writeSyntheticTree(opts.repoRoot, baselineSha, [opts.rootPatch], {
-		threeWay: true,
-	});
+	// and 3-way synthesis used above; anything left is uncommitted work. The
+	// same WIP context applies: `rootPatch` is captured against `HEAD + WIP`,
+	// so synthesise through `patchTree` or hunks touching WIP paths fail on the
+	// clean baseline tree ("patch does not apply: … does not exist").
+	const finalFilteredTree = await patchTree(
+		opts.repoRoot,
+		baselineSha,
+		opts.taskId,
+		opts.rootPatch,
+		opts.baseline.root,
+	);
 	const leftoverPatch = await diffTreeOrEmpty(repo, previousFilteredTree, finalFilteredTree);
 	if (!leftoverPatch.trim()) return tip;
 	const msg = (opts.commitMessage && (await opts.commitMessage(leftoverPatch))) || opts.fallbackMessage;

@@ -10,6 +10,10 @@ export function setModelRequestPolicy(
 	requestPolicy = policy;
 }
 
+export function hasModelRequestPolicy(): boolean {
+	return requestPolicy !== undefined;
+}
+
 export async function checkModelRequestPolicy(selector: string, signal?: AbortSignal, policyFingerprint?: string): Promise<void> {
 	signal?.throwIfAborted();
 	await requestPolicy?.(selector, signal, policyFingerprint);

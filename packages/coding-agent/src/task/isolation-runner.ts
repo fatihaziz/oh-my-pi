@@ -31,7 +31,7 @@ import type { ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
-import { needsNativeTeardown, writeRetainedBackend } from "./isolation-ownership";
+import { readRetainedMountBackend } from "./isolation-ownership";
 import type { NestedRepoPatch, SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	applyNestedPatches,
@@ -301,27 +301,11 @@ async function writeIsolationPatch(
 	};
 }
 
-/**
- * Move a retained isolation workspace out of its deterministic
- * (`repoRoot` + agent id) slot into a globally unique sibling, so a later
- * isolated run with the same id cannot wipe it: `ensureIsolation`
- * unconditionally removes the deterministic base dir before writing its
- * owner marker. The owner marker, `m` mount, and backend sidecar move along,
- * so `omp worktree clear` still classifies and reclaims the workspace with
- * native teardown. Backends needing it (mounts, Btrfs subvolumes) record the
- * sidecar BEFORE the move so it travels atomically — a crash between rename
- * and a later write would leave a mounted workspace with a dead owner and
- * no metadata, and cleanup would traverse the live mount.
- */
+/** Retain the original path so native mounts remain discoverable for safe teardown. */
 export interface RetainedWorkspace {
-	/** Workspace path to report (unique sibling on success, original dir when the move fails). */
+	/** Original workspace path; it is not moved while a native mount may exist. */
 	dir: string;
-	/**
-	 * False when cleanup metadata is missing that `clear` would need: the
-	 * sidecar could not be written (plausible under the same disk pressure
-	 * that forced retention). The error must then say the mount needs a
-	 * manual unmount instead of advertising plain `worktree clear`.
-	 */
+	/** False when backend metadata cannot be verified for safe cleanup. */
 	sidecarOk: boolean;
 }
 
@@ -329,30 +313,12 @@ export async function retainIsolationWorkspace(
 	isolationDir: string,
 	backend?: natives.IsoBackendKind,
 ): Promise<RetainedWorkspace> {
-	const baseDir = path.dirname(isolationDir);
-	const retainedBase = `${baseDir}.retained-${Date.now().toString(36)}-${Math.floor(Math.random() * 2 ** 32).toString(16)}`;
-	const needsSidecar = backend !== undefined && needsNativeTeardown(backend);
-	let sidecarOk = !needsSidecar;
-	if (needsSidecar && backend !== undefined) {
-		try {
-			await writeRetainedBackend(baseDir, backend);
-			sidecarOk = true;
-		} catch {
-			sidecarOk = false;
-		}
+	try {
+		const recorded = await readRetainedMountBackend(path.dirname(isolationDir));
+		return { dir: isolationDir, sidecarOk: backend !== undefined && (recorded === undefined || recorded === backend) };
+	} catch {
+		return { dir: isolationDir, sidecarOk: false };
 	}
-	// A valid move can still fail transiently (Windows AV/indexer locks);
-	// retry briefly before conceding the deterministic slot.
-	for (let attempt = 0; attempt < 3; attempt++) {
-		try {
-			await fs.rename(baseDir, retainedBase);
-			return { dir: path.join(retainedBase, path.basename(isolationDir)), sidecarOk };
-		} catch {
-			if (attempt === 2) return { dir: isolationDir, sidecarOk };
-			await Bun.sleep(25);
-		}
-	}
-	return { dir: isolationDir, sidecarOk };
 }
 /** Context for `isolation-error.md`: the `result.error` text for a run whose changes could not be captured or landed. */
 interface IsolationErrorContext {
@@ -410,9 +376,9 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	let cleanupPromise: Promise<void> | undefined;
 	let releasePromise: Promise<void> | undefined;
 	let releasedArtifacts: (IsolationPatchArtifacts & { branchName?: string; branchBaseSha?: string }) | undefined;
-	const preserveUnsettled = (error: unknown): never => {
+	const preserveUnsettled = async (error: unknown): Promise<never> => {
 		retainWorkspace = true;
-		if (handle) opts.onRetained?.({ dir: handle.mergedDir, sidecarOk: false });
+		if (handle) opts.onRetained?.(await retainIsolationWorkspace(handle.mergedDir, handle.backend));
 		throw new Error(
 			`Worker cleanup did not complete; workspace retained at ${handle?.mergedDir}: ${error instanceof Error ? error.message : String(error)}`,
 			{ cause: error },
@@ -423,9 +389,11 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		try {
 			await deferredCleanup;
 		} catch (error) {
-			preserveUnsettled(error);
+			await preserveUnsettled(error);
 		}
 	};
+	/** The run's IRC wake hold, released only once the run-end capture is done. */
+	let releaseIrcWakes: (() => void) | undefined;
 	const releaseBase = (): Promise<void> => {
 		baseReleasePromise ??= opts.baseOptions.onRelease?.() ?? Promise.resolve();
 		return baseReleasePromise;
@@ -435,13 +403,13 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			try {
 				await releaseBase();
 			} catch (error) {
-				preserveUnsettled(error);
+				await preserveUnsettled(error);
 			}
 			if (handle && !retainWorkspace) {
 				try {
 					await cleanupIsolation(handle);
 				} catch (error) {
-					preserveUnsettled(error);
+					await preserveUnsettled(error);
 				}
 			}
 		})();
@@ -503,13 +471,21 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		return releasePromise;
 	};
 	try {
+		const relativeCwd = path.relative(opts.context.repoRoot, opts.baseOptions.cwd);
+		if (relativeCwd === ".." || relativeCwd.startsWith(`..${path.sep}`) || path.isAbsolute(relativeCwd)) {
+			throw new Error("The worker working directory is outside its isolation repository.");
+		}
 		handle = await ensureIsolation(opts.context.repoRoot, isolationId, opts.preferredBackend, opts.exclusive);
 		const isolationDir = handle.mergedDir;
+		const isolatedCwd = path.resolve(isolationDir, relativeCwd);
 		taskBaseline = await captureIsolationBaseline(isolationDir, opts.context.repoRoot);
+		if (relativeCwd && !(await fs.stat(isolatedCwd)).isDirectory()) {
+			throw new Error("The worker working directory is absent from the isolated workspace.");
+		}
 		await opts.onPrepared?.(handle, { repoRoot: opts.context.repoRoot, baseline: taskBaseline });
 		const result = await runSubprocess({
 			...opts.baseOptions,
-			worktree: isolationDir,
+			worktree: isolatedCwd,
 			preloadedExtensionPaths: undefined,
 			preloadedPreparedExtensions: undefined,
 			preloadedCustomToolPaths: undefined,
@@ -523,6 +499,9 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			// below cleans it up. Only kept-alive runs hand full capture+cleanup
 			// (`releaseIsolation`) to the agent lifecycle.
 			onRelease: opts.baseOptions.keepAlive === false ? releaseBase : releaseIsolation,
+			deferIrcWakeRelease: release => {
+				releaseIrcWakes = release;
+			},
 		});
 		opts.onSubprocessResult?.(result);
 		if (releasePromise) {
@@ -564,13 +543,19 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		}
 		return captured.result;
 	} finally {
-		if (
-			handle &&
-			!retainWorkspace &&
-			!releasePromise &&
-			!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId))
-		) {
-			await cleanupHandle();
+		try {
+			if (
+				handle &&
+				!retainWorkspace &&
+				!releasePromise &&
+				!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId))
+			) {
+				await cleanupHandle();
+			}
+		} finally {
+			if (releaseIrcWakes && opts.baseOptions.deferIrcWakeRelease)
+				opts.baseOptions.deferIrcWakeRelease(releaseIrcWakes);
+			else releaseIrcWakes?.();
 		}
 	}
 }

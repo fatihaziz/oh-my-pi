@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { getManagedSkillsDir } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgSkillsEnabled } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { resetActiveSkillsForTests, type Skill, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import type { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
 import type { MnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
@@ -50,6 +51,14 @@ describe("autolearn tool gating", () => {
 		// loadMode "essential" is what keeps them active under tools.discoveryMode "all".
 		expect(learn?.loadMode).toBe("essential");
 		expect(manage?.loadMode).toBe("essential");
+	});
+
+	it("keeps learning available without managed skills when skill discovery is disabled", async () => {
+		const names = (await createTools(makeSession({
+			"autolearn.enabled": true, "memory.backend": "mnemopi", "skills.enabled": false,
+		}), ["read"])).map(tool => tool.name);
+		expect(names).toContain("learn");
+		expect(names).not.toContain("manage_skill");
 	});
 
 	it("force-includes the tools into an explicit restricted toolNames list", async () => {
@@ -232,11 +241,55 @@ describe("learn execute", () => {
 		expect(await fs.readdir(getManagedSkillsDir()).catch(() => [])).toHaveLength(0);
 	});
 
-	it("stores a lesson AND mints a managed skill when a skill payload is given", async () => {
-		await new LearnTool(learnSession()).execute("2", {
-			memory: "Use the worker host entry pattern.",
-			skill: { action: "create", name: "worker-host", description: "Spawn workers.", body: "# Worker host" },
+	it("retains lessons but rejects a skill payload before writing when skills are disabled", async () => {
+		const session = learnSession();
+		cfgSkillsEnabled.override(session.settings, false);
+		const tool = new LearnTool(session);
+		await tool.execute("memory", { memory: "Keep the durable lesson." });
+		await expect(tool.execute("skill", {
+			memory: "Do not store this partial request.",
+			skill: { action: "create", name: "blocked", description: "Blocked", body: "# Blocked" },
+		})).rejects.toThrow();
+		expect(remembered).toEqual(["Keep the durable lesson."]);
+		expect(await Bun.file(path.join(getManagedSkillsDir(), "blocked", "SKILL.md")).exists()).toBe(false);
+	});
+
+	it("also mints a managed skill when skill payload is supplied", async () => {
+		const tool = LearnTool.createIf(learnSession())!;
+		await tool.execute("l2", {
+			memory: "To debug worker crashes, inspect stderr on the host.",
+			skill: {
+				action: "create",
+				name: "worker-host",
+				description: "Debug worker crashes via host stderr.",
+				body: "# Worker Host Debug\n\n1. Check stderr.",
+			},
 		});
+		expect(remembered).toHaveLength(1);
+		expect(await Bun.file(path.join(getManagedSkillsDir(), "worker-host", "SKILL.md")).exists()).toBe(true);
+	});
+
+	it("reports both the committed memory and managed skill when refreshing session skills fails", async () => {
+		const session: ToolSession = {
+			...learnSession(),
+			refreshSkills: async () => {
+				throw new Error("prompt rebuild failed");
+			},
+		};
+		const tool = LearnTool.createIf(session)!;
+		await expect(
+			tool.execute("l-refresh-err", {
+				memory: "To debug worker crashes, inspect stderr on the host.",
+				skill: {
+					action: "create",
+					name: "worker-host",
+					description: "Debug worker crashes via host stderr.",
+					body: "# Worker Host Debug\n\n1. Check stderr.",
+				},
+			}),
+		).rejects.toThrow(
+			/Lesson stored\. Created managed skill "worker-host", but refreshing session skills failed: prompt rebuild failed/,
+		);
 		expect(remembered).toHaveLength(1);
 		expect(await Bun.file(path.join(getManagedSkillsDir(), "worker-host", "SKILL.md")).exists()).toBe(true);
 	});

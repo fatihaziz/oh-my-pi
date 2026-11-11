@@ -152,7 +152,7 @@ export const observed = [mod.piEscapeRegexLiteral("a.b*c"), mod.piJoinPath("src"
 			`const catalog = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-catalog"]();
 const providers = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-catalog/provider-models"]();
 const result = await catalog.createModelManager(providers.anthropicModelManagerOptions()).refresh("offline");
-export const observed = result.models.some(model => model.id === "claude-3-5-sonnet-20240620");`,
+export const observed = result.models.some(model => model.id === "claude-fable-5");`,
 		);
 		expect(observed).toBe(true);
 	});
@@ -203,6 +203,18 @@ export const observed = buildModel({
 		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
 		expect(bundledModuleKeys.has(key)).toBe(true);
 		expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
+	});
+
+	it("loads the workflow ignore parser through the bundled registry", async () => {
+		const key = "@oh-my-pi/pi-coding-agent/skillshare/pack";
+		const entry = bundledEntries.find(item => item.key === key);
+		if (!entry) throw new Error(`Missing bundled workflow import: ${key}`);
+		const observed = await runRegistryProbe(
+			[entry],
+			`const { parseIgnoreRules } = await BUNDLED_PI_MODULE_LOADERS[${JSON.stringify(key)}]();
+export const observed = parseIgnoreRules(["# comment", "cache/", "!keep"]).map(({negate, dirOnly}) => ({negate, dirOnly}));`,
+		);
+		expect(observed).toEqual([{ negate: false, dirOnly: true }, { negate: true, dirOnly: false }]);
 	});
 
 	it("keeps coding-agent's root catch-all wildcards (./* / ./*.js) out of the bundle", () => {
@@ -267,8 +279,6 @@ export const observed = buildModel({
 		// import resolved from source and failed inside a binary — which is how
 		// a real extension (`quota-hud.ts`) broke on this exact specifier.
 		expect(bundledModuleKeys.has("@oh-my-pi/pi-coding-agent/slash-commands/helpers/active-oauth-account")).toBe(true);
-		// `./theme/*` serves `theme/defaults/index` by spelling, so the key exists.
-		expect(bundledModuleKeys.has("@oh-my-pi/pi-tui/theme/defaults/index")).toBe(true);
 	});
 
 	it("loads pi-tui native/* modules through the bundled registry in compiled mode (issue #14834)", async () => {

@@ -1,9 +1,13 @@
-import { expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setModelRequestPolicy } from "@oh-my-pi/pi-ai/model-request-policy";
 import { openCoordinatorRuntime } from "../src/task/coordinator-runtime";
 import { refreshDirsFromEnv } from "@oh-my-pi/pi-utils";
+import { resetSettingsForTest } from "../src/config/settings";
+
+beforeEach(() => resetSettingsForTest());
+afterEach(() => resetSettingsForTest());
 
 for (const scenario of ["fallback", "primary", "schema", "denied", "cancelled", "exhausted"] as const) {
 	test(`coordinator thinker ${scenario}`, async () => {
@@ -102,7 +106,7 @@ test("coordinator falls back from a rate-limited configured judge to an availabl
 		closeRuntime = () => runtime.close();
 		const result = await runtime.judge({ state: { task: "repair" }, questions: { ready: { type: "choice", instructions: "Choose yes", criteria: { yes: "Ready", no: "Not ready" } } } }, controller.signal);
 		expect(result.provider).toBe("typesafe");
-		expect(result.answers.ready.choice).toBe("yes");
+		expect(result.answers.ready).toMatchObject({ choice: "yes" });
 		expect(calls[0]).toBe("/v1/chat/completions");
 		expect(calls.at(-1)).toBe("/v1/systemone");
 	} finally {

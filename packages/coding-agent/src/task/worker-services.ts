@@ -171,7 +171,7 @@ export function createWorkerServiceClients(
 			label: local.label,
 			highlightLang: local.highlightLang,
 			// The kernel runs in the parent, which reports unavailability on the first cell.
-			isAvailable: async () => true,
+			checkAvailability: async () => ({ ok: true }),
 			async execute(code, opts) {
 				const cellId = `cell-${++nextCell}`;
 				const pending: PendingCell = {
@@ -423,7 +423,7 @@ export async function serveWorkerEval(
 		rust: rustBackend,
 	};
 	const backend = owner.parentServices?.eval?.backend(cell.language) ?? fallbackBackends[cell.language];
-	if (!(await backend.isAvailable(view, { signal }))) {
+	if (!(await backend.checkAvailability(view, { signal })).ok) {
 		throw new Error(`${backend.label} Eval is unavailable in the parent`);
 	}
 	let events = Promise.resolve();

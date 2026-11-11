@@ -154,7 +154,33 @@ fn seed_dirty_state(lower: &Path, merged: &Path) -> IsoResult<()> {
 		}
 		let rel = std::str::from_utf8(path_bytes)
 			.map_err(|err| IsoError::other(format!("untracked path is not valid UTF-8: {err}")))?;
+		let mut ancestor = lower.to_path_buf();
+		if let Some(parent) = Path::new(rel).parent() {
+			for component in parent.components() {
+				let std::path::Component::Normal(part) = component else {
+					return Err(IsoError::other(format!("unsafe untracked path: {rel}")));
+				};
+				ancestor.push(part);
+				let meta = std::fs::symlink_metadata(&ancestor)
+					.map_err(|err| IsoError::other(format!("stat {}: {err}", ancestor.display())))?;
+				if meta.file_type().is_symlink() || !meta.is_dir() {
+					return Err(IsoError::other(format!("unsafe external link ancestor: {}", ancestor.display())));
+				}
+			}
+		}
 		let src = lower.join(rel);
+		let meta = std::fs::symlink_metadata(&src)
+			.map_err(|err| IsoError::other(format!("stat {}: {err}", src.display())))?;
+		if meta.file_type().is_symlink() {
+			let target = std::fs::canonicalize(&src)
+				.map_err(|err| IsoError::other(format!("resolve link {}: {err}", src.display())))?;
+			if !target.starts_with(lower) {
+				return Err(IsoError::other(format!("unsafe external link: {}", src.display())));
+			}
+		} else if meta.is_dir() && src.join(".git").exists() {
+			copy_nested_repository(&src, &merged.join(rel))?;
+			continue;
+		}
 		let dst = merged.join(rel);
 		if let Some(parent) = dst.parent() {
 			std::fs::create_dir_all(parent)
@@ -164,6 +190,38 @@ fn seed_dirty_state(lower: &Path, merged: &Path) -> IsoResult<()> {
 	}
 
 	Ok(())
+}
+
+fn copy_nested_repository(source: &Path, destination: &Path) -> IsoResult<()> {
+	if let Some(parent) = destination.parent() {
+		std::fs::create_dir_all(parent)
+			.map_err(|err| IsoError::other(format!("create {}: {err}", parent.display())))?;
+	}
+	let output = std::process::Command::new("git")
+		.args(["-c", "core.hooksPath=/dev/null", "clone", "--shared", "--"])
+		.arg(git_path(source).as_ref())
+		.arg(destination)
+		.stdin(std::process::Stdio::null())
+		.output()
+		.map_err(|err| IsoError::other(format!("clone nested repository {}: {err}", source.display())))?;
+	if !output.status.success() {
+		return Err(command_failed("git clone nested repository", output.status.code().unwrap_or(-1), &output.stderr));
+	}
+	seed_dirty_state(source, destination)
+}
+
+fn git_path(path: &Path) -> std::borrow::Cow<'_, str> {
+	let value = path.to_string_lossy();
+	#[cfg(windows)]
+	{
+		if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+			return std::borrow::Cow::Owned(format!(r"\\{rest}"));
+		}
+		if value.starts_with(r"\\?\") {
+			return std::borrow::Cow::Owned(value[4..].to_owned());
+		}
+	}
+	value
 }
 
 fn git_capture(cwd: &Path, args: &[&str]) -> IsoResult<Vec<u8>> {
@@ -316,50 +374,24 @@ fn copy_mtime(src: &Path, dst: &Path) {
 	let _ = set_mtime(dst, mtime);
 }
 
-/// One path-based `utimensat`: rcopy holds no handle to `dst`
+/// One path-based time update: rcopy holds no handle to `dst`
 /// (`std::fs::copy` closes it), so opening one for `futimens` would add an
-/// open and a close per copied entry. `dst` is never a symlink here, but
-/// `AT_SYMLINK_NOFOLLOW` keeps a swapped-in link from redirecting the write.
+/// open and a close per copied entry. `dst` is never a symlink here, but not
+/// following keeps a swapped-in link from redirecting the write. Pre-epoch
+/// times are not mirrored.
 #[cfg(unix)]
 fn set_mtime(path: &Path, mtime: std::time::SystemTime) -> std::io::Result<()> {
-	use std::os::unix::ffi::OsStrExt;
-
-	let dur = mtime
+	mtime
 		.duration_since(std::time::UNIX_EPOCH)
 		.map_err(std::io::Error::other)?;
-	let times = [libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT }, libc::timespec {
-		tv_sec:  dur.as_secs() as _,
-		tv_nsec: dur.subsec_nanos() as libc::c_long,
-	}];
-	let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
-	// SAFETY: `c_path` and `times` outlive the syscall; the kernel does
-	// not retain the pointers.
-	let rc = unsafe {
-		libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW)
-	};
-	if rc == 0 {
-		Ok(())
-	} else {
-		Err(std::io::Error::last_os_error())
-	}
+	std::fs::set_times_nofollow(path, std::fs::FileTimes::new().set_modified(mtime))
 }
 
-/// Windows has no path-based time setter, so open `path` with just enough
-/// access: backup semantics to open a directory, and write-attributes access,
-/// which works on readonly files.
+/// `fs::set_times` opens `path` with just write-attributes access and backup
+/// semantics, so it works on readonly files and directories.
 #[cfg(windows)]
 fn set_mtime(path: &Path, mtime: std::time::SystemTime) -> std::io::Result<()> {
-	use std::os::windows::fs::OpenOptionsExt;
-
-	use windows_sys::Win32::Storage::FileSystem::{
-		FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
-	};
-
-	std::fs::OpenOptions::new()
-		.access_mode(FILE_WRITE_ATTRIBUTES)
-		.custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-		.open(path)?
-		.set_modified(mtime)
+	std::fs::set_times(path, std::fs::FileTimes::new().set_modified(mtime))
 }
 
 #[cfg(not(any(unix, windows)))]

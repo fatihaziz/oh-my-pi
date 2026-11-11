@@ -6,13 +6,20 @@ import { loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/ag
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { getTaskSchema } from "@oh-my-pi/pi-coding-agent/task/types";
 import { isBundledSeance, seanceTaskSchemaFields } from "@oh-my-pi/pi-coding-agent/task/seance";
+import * as seanceModule from "@oh-my-pi/pi-coding-agent/task/seance";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { isRecord } from "@oh-my-pi/pi-utils";
 
 let taskSchemaSessionIndex = 0;
 
 function createSession(
-	options: { parentSpawns?: string; disabledAgents?: string[]; planMode?: boolean } = {},
+	options: {
+		parentSpawns?: string;
+		disabledAgents?: string[];
+		planMode?: boolean;
+		settings?: Record<string, unknown>;
+	} = {},
 ): ToolSession {
 	return {
 		cwd: `/tmp/task-schema-${taskSchemaSessionIndex++}`,
@@ -21,6 +28,7 @@ function createSession(
 			"task.isolation.enabled": false,
 			"task.batch": false,
 			"task.disabledAgents": options.disabledAgents ?? [],
+			...options.settings,
 		}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => options.parentSpawns ?? "*",
@@ -39,6 +47,37 @@ describe("task schema (single-spawn)", () => {
 	it("requires task", () => {
 		const parsed = taskSchema({ agent: "scout", solutionSpace: "c" });
 		expect(parsed instanceof type.errors).toBe(true);
+	});
+
+	it.each([false, true])("advertises taskFile only while task.file is on (batch=%s)", batchEnabled => {
+		// Enabled first: the disabled schema must not reuse the enabled one from the cache.
+		for (const file of [true, false]) {
+			const schema = getTaskSchema({ batchEnabled, isolationEnabled: false, structured: false, file });
+			const item = {
+				taskFile: "local://assignment.md",
+				model: "mock/file-worker",
+				solutionSpace: "one defined change",
+			};
+			const parsed = schema(batchEnabled ? { context: "shared context", tasks: [item] } : item);
+			const wire = schema.toJsonSchema();
+			const tasks = isRecord(wire.properties) ? wire.properties.tasks : undefined;
+			const itemWire = batchEnabled && isRecord(tasks) ? tasks.items : wire;
+			if (!isRecord(itemWire)) throw new Error("Expected an object schema for task input");
+			if (file) {
+				if (parsed instanceof type.errors) throw new Error(parsed.summary);
+				expect(parsed).toMatchObject(
+					batchEnabled
+						? { tasks: [{ taskFile: item.taskFile, model: item.model }] }
+						: { taskFile: item.taskFile, model: item.model },
+				);
+				expect(itemWire.required).not.toContain("task");
+				expect(itemWire.properties).toHaveProperty("model");
+			} else {
+				expect(parsed instanceof type.errors).toBe(true);
+				expect(itemWire.properties).not.toHaveProperty("taskFile");
+				expect(itemWire.required).toContain("task");
+			}
+		}
 	});
 
 	it("removes eval tool names from the wire shape when eval.tools.enabled is off", () => {
@@ -133,7 +172,8 @@ describe("task schema seance fields", () => {
 				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
 				const wireSchema = JSON.stringify(schema.toJsonSchema());
 				expect(wireSchema).not.toContain('"sourceSession"');
-				expect(wireSchema).not.toContain('"model"');
+				// Only the per-call `model` remains: one string, never the seance selector list.
+				expect(wireSchema).toContain('"model":{"type":"string"}');
 			}
 		}
 	});
@@ -182,7 +222,7 @@ Custom prompt.`,
 		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
 		expect(planSchema).not.toContain('"sourceSession"');
 		expect(planSchema).not.toContain("seance");
-		expect(planSchema).not.toContain('"model"');
+		expect(planSchema).toContain('"model":{"type":"string"}');
 		expect(planMode.description).not.toContain("seance");
 		expect(planMode.description).not.toContain("Historical consults");
 
@@ -219,7 +259,7 @@ describe("task spawn validation", () => {
 		const text = await executeText({ agent: "scout" });
 		expect(text).toContain("Missing `task`");
 	});
-	it("rejects a model override for an ordinary task after the enabled schema accepts it", async () => {
+	it("rejects a model override for an ordinary task while task.perCallModel is off", async () => {
 		const schema = getTaskSchema({
 			isolationEnabled: false,
 			batchEnabled: false,
@@ -232,6 +272,38 @@ describe("task spawn validation", () => {
 			model: "anthropic/claude-sonnet-4-5",
 		};
 		expect(schema(params) instanceof type.errors).toBe(false);
-		expect(await executeText(params, [bundledSeance])).toContain("`model` is only accepted for the `seance` agent.");
+		const scout = loadBundledAgents().find(agent => agent.name === "scout");
+		if (!scout) throw new Error("Expected the bundled scout agent");
+		expect(await executeText(params, [bundledSeance, scout])).toContain("task.perCallModel: off");
+	});
+
+	it("keys the seance model exemption on the resolved agent, not the raw `agent` value", async () => {
+		const seen: unknown[] = [];
+		vi.spyOn(seanceModule, "prepareSeance").mockImplementation(async context => {
+			seen.push(context.model);
+			throw new Error("stop after seance received its selectors");
+		});
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [bundledSeance],
+			projectAgentsDir: null,
+		});
+		const selectors = ["anthropic/claude-sonnet-4-5", "openai/gpt-5"];
+		const run = async (batch: boolean, params: Record<string, unknown>) => {
+			const tool = await TaskTool.create(
+				createSession({ parentSpawns: "seance", settings: { "task.perCallModel": "off", "task.batch": batch } }),
+			);
+			const result = await tool.execute("tool-call", params);
+			return result.content.find(part => part.type === "text")?.text ?? "";
+		};
+		const flat = { task: "What was decided?", sourceSession: "/tmp/source.jsonl", model: selectors };
+		const item = { task: "What was decided?", sourceSession: "/tmp/source.jsonl", model: selectors };
+		const texts = [
+			await run(false, flat),
+			await run(false, { ...flat, agent: " seance " }),
+			await run(true, { context: "c", tasks: [item] }),
+			await run(true, { context: "c", tasks: [{ ...item, agent: " seance " }] }),
+		];
+		for (const text of texts) expect(text).not.toContain("invalid `model` value");
+		expect(seen).toEqual([selectors, selectors, selectors, selectors]);
 	});
 });

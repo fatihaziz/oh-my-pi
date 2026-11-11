@@ -371,7 +371,7 @@ export class ExecutorWorkspace {
 		return integration;
 	}
 
-	async followUp(operation: () => Promise<SingleResult>): Promise<SingleResult> {
+	async followUp(operation: (deferIrcWakeRelease: (release: () => void) => void) => Promise<SingleResult>): Promise<SingleResult> {
 		if (this.#phase !== "settled" || !this.#integration || !this.#context || !this.#handle || !this.#options)
 			throw new Error("Settle and integrate the previous turn before a follow-up");
 		if (this.#integration.changesApplied === false)
@@ -390,25 +390,30 @@ export class ExecutorWorkspace {
 		await this.#persist();
 		this.#execution = (async () => {
 			const startedAt = Date.now();
-			let result: SingleResult;
+			let releaseIrcWakes: (() => void) | undefined;
 			try {
-				result = await operation();
-			} catch (error) {
-				result = this.#options!.buildFailureResult(error);
-				result.durationMs = Date.now() - startedAt;
+				let result: SingleResult;
+				try {
+					result = await operation(release => { releaseIrcWakes = release; });
+				} catch (error) {
+					result = this.#options!.buildFailureResult(error);
+					result.durationMs = Date.now() - startedAt;
+				}
+				try {
+					await this.#cleanup;
+				} catch (error) {
+					this.#retained = { dir: this.cwd, sidecarOk: false };
+					throw error;
+				}
+				const captured = await captureIsolationResult(this.#options!, this.#handle!, this.#context!.baseline, result);
+				this.#result = captured.result;
+				this.#retained = captured.retained;
+				this.#phase = captured.retained ? "retained" : "settled";
+				await this.#persist();
+				return captured.result;
+			} finally {
+				releaseIrcWakes?.();
 			}
-			try {
-				await this.#cleanup;
-			} catch (error) {
-				this.#retained = { dir: this.cwd, sidecarOk: false };
-				throw error;
-			}
-			const captured = await captureIsolationResult(this.#options!, this.#handle!, this.#context!.baseline, result);
-			this.#result = captured.result;
-			this.#retained = captured.retained;
-			this.#phase = captured.retained ? "retained" : "settled";
-			await this.#persist();
-			return captured.result;
 		})();
 		try {
 			return await this.#execution;
