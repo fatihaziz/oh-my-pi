@@ -28,7 +28,7 @@ import { type DescribeContext, type NativeNode, type NativeUiEvent, rootToggleEx
 import { Memo } from "../native/memo";
 import type { DynamicBorder } from "../chrome/dynamic-border";
 
-export type EvalExecutionLanguage = "python" | "js";
+export type EvalExecutionLanguage = "python" | "js" | "rust";
 
 export class EvalExecutionComponent extends Container {
 	#status: ExecutionStatus = "running";
@@ -54,7 +54,8 @@ export class EvalExecutionComponent extends Container {
 	#outputVersion = 0;
 	readonly #native = new Memo();
 
-	#highlightLang(): "python" | "javascript" {
+	#highlightLang(): "python" | "javascript" | "rust" {
+		if (this.#language === "rust") return "rust";
 		return this.#language === "js" ? "javascript" : "python";
 	}
 
@@ -134,7 +135,7 @@ export class EvalExecutionComponent extends Container {
 		const dataFirst = cx?.supports("tool") === true;
 		const key = [dataFirst, this.#outputVersion, this.#status, this.#expanded];
 		return this.#native.get(key, () => {
-			const title = this.#language === "js" ? "JavaScript" : "Python";
+			const title = this.#language === "rust" ? "Rust" : this.#language === "js" ? "JavaScript" : "Python";
 			const common = {
 				role: "omp.eval",
 				status: this.#status,
