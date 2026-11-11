@@ -8,6 +8,7 @@
  * - Interact with the user via UI primitives
  */
 
+import type { TaskModelRequirements } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	type ExtensionUiComponent,
 	type ExtensionUiComponentFactory,
@@ -1227,8 +1228,25 @@ export interface BeforeSubagentSpawnEvent {
 	modelRole?: string;
 	/** Expanded model patterns core would spawn with, in attempt order. */
 	patterns: string[];
+	/** Exact model and effort requested for this standalone spawn, if supplied. */
+	requestedModel?: string;
 	/** Stable per-spawn key for deterministic selection, when the caller supplies one. */
 	spawnKey?: string;
+	/** Final resolved child input, absent when an old persisted session cannot supply it. */
+	readonly assignment?: string;
+	readonly context?: string;
+	/** Native child identity, stable through dispatch. */
+	readonly dispatchId?: string;
+	readonly parentToolCallId?: string;
+	readonly index?: number;
+	readonly requirements?: Readonly<TaskModelRequirements>;
+	readonly effort?: "lo" | "med" | "hi";
+	readonly solutionSpace?: string;
+	readonly standalone?: boolean;
+	readonly prepared?: boolean;
+	/** Reauthorization of a persisted standalone worker, never a new model choice. */
+	readonly revival?: boolean;
+	readonly automaticSelection?: boolean;
 }
 
 export type {
@@ -1791,6 +1809,10 @@ export interface BeforeSubagentSpawnEventResult {
 	reason?: string;
 	/** Human-readable routing explanation surfaced with the resolved model. */
 	note?: string;
+	/** Recheck a standalone explicit selection immediately before every model request. */
+	assertAuthorization?: () => void;
+	/** Enforce this automatic standalone selection exactly on every provider dispatch. */
+	enforceExactModel?: boolean;
 }
 
 export type {

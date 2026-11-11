@@ -4,13 +4,15 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import { validateAgentAccountPools } from "../config/account-pools";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { assertModelSupportsEffortCeiling } from "@oh-my-pi/pi-tui/thinking";
+import { assertModelSupportsEffortCeiling, clampThinkingLevelToCeiling } from "@oh-my-pi/pi-tui/thinking";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	resolveAgentAdvisorRolePattern,
 	resolveExactModelIdentity,
+	resolveModelOverride,
 } from "../config/model-resolver";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
@@ -23,6 +25,7 @@ import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-r
 import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
+import type { ExtensionRunner } from "../extensibility/extensions/runner";
 import type { ArtifactManagerApi } from "../session/artifacts";
 import type { CostGateApi } from "../session/cost-gate";
 import { installRetryFallbackRole } from "../session/retry-fallback-chains";
@@ -54,7 +57,7 @@ import {
 	PerCallModelUnavailableError,
 	type PerCallModelGrants,
 } from "./model-approval";
-import { cfgTaskAgentAccountPools, cfgTaskMaxEffort } from "./settings";
+import { cfgTaskAgentAccountPools, cfgTaskMaxEffort, perCallModelEnabled } from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
 import { seanceIsolationOptions } from "./seance-policy";
 import type { AgentDefinition } from "./types";
@@ -276,8 +279,11 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	const resolveParentSession = () =>
 		ref.parentId === spec.rootAgentId ? spec.root : registry.get(ref.parentId ?? "")?.session;
 	const parentSession = resolveParentSession();
+	// Peer handles carry no runner, so a standalone revival under one fails closed.
+	const parentRunner = (parentSession as { readonly extensionRunner?: ExtensionRunner } | undefined)?.extensionRunner;
 	let perCallModel: Model | undefined;
 	let assertApprovedModel: ((model: Model) => void) | undefined;
+	let standaloneAuthorization: (() => void) | undefined;
 	if (init.perCallModel) {
 		try {
 			if (!init.perCallModelIdentity || init.perCallThinkingLevel === undefined) {
@@ -291,6 +297,88 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 				throw new PerCallModelError(
 					`Cannot revive subagent "${ref.id}": its per-call model ${init.perCallModelIdentity} is no longer available. A per-call worker revives only on its exact saved model.`,
 				);
+			}
+			if (init.perCallStandaloneSelector) {
+				if (!parentRunner?.hasHandlers("before_subagent_spawn")) {
+					throw new PerCallModelError(
+						"A standalone per-call worker requires its live, authorized standalone parent to revive.",
+					);
+				}
+				if (
+					typeof init.standaloneAssignment !== "string" ||
+					!init.standaloneAssignment.trim() ||
+					typeof init.standaloneAutomaticSelection !== "boolean" ||
+					!init.standaloneDispatchId
+				) {
+					throw new PerCallModelError(
+						`Cannot revive subagent "${ref.id}": its original standalone assignment or selection provenance was not recorded. The agent was not revived.`,
+					);
+				}
+				if (init.standaloneDispatchId !== ref.id) {
+					throw new PerCallModelError(
+						`Cannot revive subagent "${ref.id}": the persisted dispatch identity does not match. The agent was not revived.`,
+					);
+				}
+				const automatic = init.standaloneAutomaticSelection;
+				const resolution = resolveModelOverride(
+					[init.perCallStandaloneSelector],
+					automatic ? { getAvailable: () => spec.modelRegistry.getAll() } : spec.modelRegistry,
+					spec.settings,
+					{ exactOnly: true },
+				);
+				const level = resolution.thinkingLevel;
+				const ceiling = cfgTaskMaxEffort.get(spec.settings);
+				if (
+					!resolution.model ||
+					formatModelStringWithRouting(resolution.model) !== init.perCallModelIdentity ||
+					!resolution.explicitThinkingLevel ||
+					!level ||
+					level === "auto" ||
+					level !== init.perCallThinkingLevel ||
+					(!automatic && clampThinkingLevelToCeiling(perCallModel, level, ceiling) !== level) ||
+					(level === "off"
+						? !!perCallModel.thinking?.requiresEffort
+						: !getSupportedEfforts(perCallModel).some(effort => effort === level)) ||
+					!perCallModel.input.includes("text") ||
+					perCallModel.supportsTools === false ||
+					!init.perCallStandaloneInvocationKind ||
+					(!automatic && !perCallModelEnabled(spec.settings, init.perCallStandaloneInvocationKind))
+				) {
+					throw new PerCallModelError("The saved standalone model or effort no longer meets the current policy.");
+				}
+				const admitted = await parentRunner.emitBeforeSubagentSpawn({
+					type: "before_subagent_spawn",
+					agent: init.agent ?? ref.displayName,
+					invocationKind: init.perCallStandaloneInvocationKind,
+					patterns: [init.perCallStandaloneSelector],
+					requestedModel: init.perCallStandaloneSelector,
+					spawnKey: ref.id,
+					assignment: init.standaloneAssignment.trim(),
+					context: init.standaloneContext?.trim() || undefined,
+					requirements:
+						init.standaloneRequirements === undefined
+							? undefined
+							: Object.freeze({
+									...init.standaloneRequirements,
+									...(init.standaloneRequirements.input === undefined
+										? {}
+										: {
+												input: Object.freeze([...init.standaloneRequirements.input]) as unknown as string[],
+											}),
+								}),
+					dispatchId: ref.id,
+					standalone: true,
+					prepared: false,
+					revival: true,
+					automaticSelection: automatic,
+				});
+				if (admitted?.block || admitted?.model !== undefined || !admitted?.assertAuthorization) {
+					throw new PerCallModelError(
+						admitted?.reason ?? "The parent refused or replaced the saved standalone model.",
+					);
+				}
+				standaloneAuthorization = admitted.assertAuthorization;
+				admitted.assertAuthorization();
 			}
 			// File definitions follow the live parent's discovery scope; a missing parent
 			// can use current root file discovery, never unrelated root-local pseudonyms.
@@ -323,6 +411,11 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 						agentSource: configuredAgent?.source,
 						agentRemoved: configuredAgent === undefined,
 						parentModelPattern,
+						standaloneSelector: init.perCallStandaloneSelector,
+						standaloneInvocationKind: init.perCallStandaloneInvocationKind,
+						automaticSelection: init.standaloneAutomaticSelection,
+						approvedAutomaticIdentity: init.standaloneAutomaticSelection ? init.perCallModelIdentity : undefined,
+						assertAuthorization: standaloneAuthorization,
 						matchPreferences,
 					};
 					grantsByParentModel.set(parentModelPattern, grants);
@@ -333,6 +426,17 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 				// Parent models grant only while the real parent is live, including
 				// after this revival; transcript metadata never substitutes for it.
 				const liveParentSession = resolveParentSession();
+				if (
+					init.perCallStandaloneSelector &&
+					(!liveParentSession ||
+						!init.perCallStandaloneInvocationKind ||
+						(!init.standaloneAutomaticSelection &&
+							!perCallModelEnabled(spec.settings, init.perCallStandaloneInvocationKind)))
+				) {
+					throw new PerCallModelError(
+						"The standalone worker's parent or model authorization is no longer available.",
+					);
+				}
 				const parentModel = liveParentSession?.model;
 				try {
 					assertPerCallModelApproved(
@@ -354,7 +458,8 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 				}
 			};
 			assertApprovedModel(perCallModel);
-			assertModelSupportsEffortCeiling(perCallModel, cfgTaskMaxEffort.get(spec.settings));
+			if (!init.standaloneAutomaticSelection)
+				assertModelSupportsEffortCeiling(perCallModel, cfgTaskMaxEffort.get(spec.settings));
 		} catch (error) {
 			await reopened.close();
 			throw error;
@@ -458,12 +563,31 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			// never switches models, and keeps the live task.maxEffort ceiling the spawn ran under.
 			...(assertApprovedModel
 				? {
-						thinkingLevelCeiling: cfgTaskMaxEffort.get(spec.settings),
+						thinkingLevelCeiling: init.standaloneAutomaticSelection
+							? undefined
+							: cfgTaskMaxEffort.get(spec.settings),
 						disableModelFallback: true,
 						disableServerSideFallback: true,
-						assertDispatchModel: (model: Model) => {
+						assertDispatchModel: (model: Model, streamOptions) => {
 							assertApprovedModel(model);
-							assertModelSupportsEffortCeiling(model, cfgTaskMaxEffort.get(spec.settings));
+							if (init.perCallStandaloneSelector) {
+								const level = init.perCallThinkingLevel;
+								const changed =
+									level === "off"
+										? model.reasoning && streamOptions?.disableReasoning !== true
+										: streamOptions?.reasoning !== level;
+								if (
+									!level ||
+									level === "auto" ||
+									changed ||
+									(!init.standaloneAutomaticSelection &&
+										clampThinkingLevelToCeiling(model, level, cfgTaskMaxEffort.get(spec.settings)) !== level)
+								) {
+									throw new PerCallModelError("The revived worker's model effort was changed or revoked.");
+								}
+							}
+							if (!init.standaloneAutomaticSelection)
+								assertModelSupportsEffortCeiling(model, cfgTaskMaxEffort.get(spec.settings));
 						},
 					}
 				: {}),

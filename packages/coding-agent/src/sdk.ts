@@ -660,7 +660,7 @@ export interface CreateAgentSessionOptions {
 	 * refuse it. Per-call `model` subagents use it so no switch reaches a model the
 	 * operator did not approve.
 	 */
-	assertDispatchModel?: (model: Model) => void;
+	assertDispatchModel?: (model: Model, options?: Pick<SimpleStreamOptions, "reasoning" | "disableReasoning">) => void;
 	/**
 	 * Disable retry fallback, context promotion and usage-aware fallback: the turn retries on, or fails
 	 * with, its own model instead. Startup model selection, and the return to the primary after a
@@ -3059,6 +3059,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// rebuild their own session-scoped extensions.
 		toolSession.extensionPaths = extensionPaths;
 		toolSession.effectiveExtensionRoots = buildSessionExtensionRoots;
+		toolSession.expectsSubagentRouting = () => {
+			const roots = buildSessionExtensionRoots();
+			const paths = roots.mode === "explicit-only" ? roots.explicit : [...roots.explicit, ...roots.configured];
+			if (
+				roots.mode !== "explicit-only" &&
+				cfgDisabledExtensions.get(settings).includes("extension-module:decision-workflow")
+			)
+				return false;
+			return paths.some(extensionPath => /(?:^|[\\/])decision-workflow(?:[\\/]|$)/i.test(extensionPath));
+		};
 
 		// Inline source ids must remain stable when caller factories are rebound in
 		// child sessions. Start after any prepared inline sources so SDK-provided
@@ -4872,7 +4882,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getApiKey: effectiveGetApiKey,
 			streamFn: (streamModel, context, streamOptions) => {
 				mainRequestProvider = undefined;
-				options.assertDispatchModel?.(streamModel);
+				options.assertDispatchModel?.(streamModel, streamOptions);
 				// The loop checks the cap before each request, but a side request can finish
 				// in between: refuse here, as this run's refusal, before announcing a dispatch.
 				const refusal = currentCostGate()?.check();

@@ -11,6 +11,7 @@ import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import {
 	isRecord,
@@ -153,6 +154,7 @@ import {
 	type StructuredSubagentSchemaMode,
 	type StructuredSubagentSchemaSource,
 	type TaskToolDetails,
+	type TaskModelRequirements,
 	type YieldItem,
 } from "@oh-my-pi/pi-tui/tools/task";
 import { yieldSectionShapes } from "./yield-assembly";
@@ -162,6 +164,7 @@ import {
 	cfgTaskPrewalk,
 	cfgTaskAgentPrewalk,
 	cfgTaskMaxEffort,
+	perCallModelEnabled,
 	cfgTaskSoftRequestBudgetNotice,
 	cfgTaskSoftRequestBudget,
 	cfgTaskAgentSoftRequestBudget,
@@ -484,6 +487,9 @@ export interface ExecutorOptions {
 	parentActiveModelPattern?: string;
 	/** Set for a per-call `model`; every model the child sends to must stay approved by these grants. */
 	perCallModelGrants?: PerCallModelGrants;
+	/** Live authorization re-checked before the child's model is dispatched. */
+	assertSpawnAuthorization?: () => void;
+	requirements?: TaskModelRequirements;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
 	effort?: TaskEffort;
@@ -4423,6 +4429,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
  * read from `options.settings`; a call without settings runs here.
  */
 export async function runSubprocess(options: ExecutorOptions): Promise<SingleResult> {
+	options.assertSpawnAuthorization?.();
 	const pool = isMainThread() && options.settings ? subagentWorkerPool(options.settings) : undefined;
 	return pool ? runSubprocessPlaced(pool, options, runSubprocessOnThisThread) : runSubprocessOnThisThread(options);
 }
@@ -4761,6 +4768,18 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					`Requested exact model ${JSON.stringify(modelPatterns)} is unavailable. Use an exact provider/model[:level] selector; do not substitute another model.`,
 				);
 			}
+			if (options.perCallModelGrants?.standaloneSelector !== undefined && authFallbackUsed) {
+				throw new PerCallModelError(
+					"The requested standalone model has no available credentials; fallback is forbidden.",
+				);
+			}
+			if (
+				options.perCallModelGrants?.standaloneSelector !== undefined &&
+				model &&
+				(!model.input.includes("text") || model.supportsTools === false)
+			) {
+				throw new PerCallModelError("The requested standalone model must support text input and tools.");
+			}
 			if (modelResolutionWarning) {
 				logger.warn("Subagent model resolution warning", {
 					warning: modelResolutionWarning,
@@ -4832,6 +4851,22 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				explicitThinkingLevel && resolvedThinkingLevel !== AUTO_THINKING
 					? clampThinkingLevelToCeiling(model, resolvedThinkingLevel, spawnEffortCeiling)
 					: resolvedThinkingLevel;
+			if (options.perCallModelGrants?.standaloneSelector !== undefined) {
+				if (
+					!model ||
+					!explicitThinkingLevel ||
+					!resolvedThinkingLevel ||
+					resolvedThinkingLevel === AUTO_THINKING ||
+					explicitLevel !== resolvedThinkingLevel ||
+					(resolvedThinkingLevel === "off"
+						? !!model.thinking?.requiresEffort
+						: !getSupportedEfforts(model).some(level => level === resolvedThinkingLevel))
+				) {
+					throw new PerCallModelError(
+						"The requested standalone model must include a supported effort within task.maxEffort.",
+					);
+				}
+			}
 			if (model) {
 				const displayLevel = effortLevel ?? (explicitThinkingLevel ? explicitLevel : undefined);
 				progress.resolvedModelIdentity = formatModelStringWithRouting(model);
@@ -4974,8 +5009,30 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					...(perCallModelGrants
 						? {
 								// Every request stays on an approved model that can run at or below the spawn's effort ceiling.
-								assertDispatchModel: (dispatchModel: Model) => {
+								assertDispatchModel: (dispatchModel: Model, streamOptions) => {
 									assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
+									if (perCallModelGrants.standaloneSelector !== undefined) {
+										const kind = perCallModelGrants.standaloneInvocationKind;
+										const ceiling = perCallModelGrants.automaticSelection
+											? spawnEffortCeiling!
+											: cfgTaskMaxEffort.get(settings);
+										const changed =
+											effectiveThinkingLevel === "off"
+												? dispatchModel.reasoning && streamOptions?.disableReasoning !== true
+												: streamOptions?.reasoning !== effectiveThinkingLevel;
+										if (
+											!kind ||
+											(!perCallModelGrants.automaticSelection && !perCallModelEnabled(settings, kind)) ||
+											effectiveThinkingLevel === AUTO_THINKING ||
+											changed ||
+											clampThinkingLevelToCeiling(dispatchModel, effectiveThinkingLevel, ceiling) !==
+												effectiveThinkingLevel
+										) {
+											throw new PerCallModelError(
+												"The standalone worker's model authorization or effort was revoked.",
+											);
+										}
+									}
 									if (spawnEffortCeiling) assertModelSupportsEffortCeiling(dispatchModel, spawnEffortCeiling);
 								},
 								disableModelFallback: true,
@@ -5085,6 +5142,10 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					}),
 				);
 				({ session } = await awaitAbortable(sessionPromise));
+				if (options.perCallModelGrants) {
+					if (!session.model) throw new PerCallModelError("The worker session has no approved model.");
+					assertPerCallModelApproved(session.model, options.perCallModelGrants, modelRegistry);
+				}
 				if (preparedSession) untrackedSession = session;
 				// Stash the sibling family candidate once the child session exists,
 				// independent of its initial model, so a later model change (retry
@@ -5218,6 +5279,17 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 							// Display selectors can conflate literal :level ids with effort, so revival records each separately.
 							perCallModelIdentity: formatModelStringWithRouting(session.model!),
 							perCallThinkingLevel: session.configuredThinkingLevel() ?? null,
+							perCallStandaloneSelector: perCallModelGrants.standaloneSelector,
+							perCallStandaloneInvocationKind: perCallModelGrants.standaloneInvocationKind,
+							...(perCallModelGrants.standaloneSelector !== undefined
+								? {
+										standaloneAssignment: options.assignment,
+										standaloneContext: options.context,
+										standaloneRequirements: options.requirements,
+										standaloneAutomaticSelection: perCallModelGrants.automaticSelection === true,
+										standaloneDispatchId: id,
+									}
+								: {}),
 						}
 					: {}),
 				// Deferred model resolution installs this role inside createAgentSession,
