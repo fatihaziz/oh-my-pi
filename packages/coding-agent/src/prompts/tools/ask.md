@@ -8,7 +8,7 @@ Ask only for materially different tradeoffs the user must decide. Default: act u
 - One-of: `<input type="radio">`; many-of: `type="checkbox"`; long lists: `<select>`. Wrap each control in a `<label>`; group a question in a `<fieldset>` with a `<legend>`, or put it in a `<p>` right before the group.
 - Radio and checkbox groups automatically get an "Other" free-text answer: its text arrives as the radio's value, or as an extra checkbox array entry. NEVER add your own "Other" option or a text field for it.
 - Free input: `<input type="text|number|date|email|url">`, `<textarea>`; `placeholder`, `min`/`max`, `pattern`, `required` are enforced.
-- Preselect your recommendation with `checked`/`selected`/`value`. If the user does not answer in time, those values are submitted.
+- Preselect your recommendation with `checked`/`selected`/`value`. If the user does not answer in time, those values are submitted; a radio group you leave unchecked gets a judge-picked recommendation first.
 - Context the user needs to decide (findings, tradeoffs, diffs, drafts) goes inside the form: `<p>`, `<ul>`, `<table>`, `<pre>`.
 - Pictures: `<img src="…" alt="…">` (an http(s) URL, a `data:` URI, or a file path relative to the working directory) and inline `<svg>` diagrams, as their own blocks; inside a `<label>` an image shows only its `alt`.
 - NEVER add buttons (`<button>`, `type="submit"`): the UI supplies Submit and Cancel.

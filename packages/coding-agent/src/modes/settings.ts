@@ -1457,6 +1457,31 @@ export function askTimeoutMs(settings: Settings): number | undefined {
 	return timeoutSeconds === 0 ? undefined : timeoutSeconds * 1000;
 }
 
+export const cfgAskRecommendedTimeout = register({
+	id: "ask.recommendedTimeout",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "interaction",
+		group: "Notifications",
+		label: "Ask Recommended Timeout",
+		description:
+			"Submit the ask tool's recommended answers after this many seconds, plan mode included (0 disables). A radio question without a preselected option gets a judge-picked recommendation first; when no judge answers, the form waits for the user. Does not bound cfg:// approval prompts",
+		options: [
+			{ value: "0", label: "Disabled" },
+			{ value: "10", label: "10 seconds" },
+			{ value: "30", label: "30 seconds" },
+			{ value: "60", label: "60 seconds" },
+		],
+	},
+});
+
+/** `ask.recommendedTimeout` in milliseconds, or `undefined` for no deadline. Used only by the ask tool. */
+export function askRecommendedTimeoutMs(settings: Settings): number | undefined {
+	const timeoutSeconds = cfgAskRecommendedTimeout.get(settings);
+	return timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined;
+}
+
 export const cfgAskNotify = register({
 	id: "ask.notify",
 	type: "enum",

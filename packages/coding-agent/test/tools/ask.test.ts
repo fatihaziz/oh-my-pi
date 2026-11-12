@@ -10,9 +10,16 @@ import type {
 	ExtensionUISelectItem,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { AskTool, recoverAskHtml } from "@oh-my-pi/pi-coding-agent/tools/ask";
+import {
+	AskTool,
+	checkRadioValues,
+	judgeRecommendation,
+	recoverAskHtml,
+	unrecommendedRadios,
+} from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
@@ -501,5 +508,99 @@ describe("recoverAskHtml", () => {
 		expect(recoverAskHtml({ html: DB_FORM })).toBe(DB_FORM);
 		expect(recoverAskHtml({ questions: [{ id: "q", question: "Q?", options: [] }] })).toBeUndefined();
 		expect(recoverAskHtml("<form></form>")).toBeUndefined();
+	});
+});
+
+const OPEN_FORM = `<form>
+  <p>Sessions live in memory.</p>
+  <fieldset>
+    <legend>Session store</legend>
+    <label><input type="radio" name="store" value="sqlite"> SQLite</label>
+    <label><input type="radio" name="store" value="redis"> Redis</label>
+  </fieldset>
+</form>`;
+
+describe("ask.recommendedTimeout", () => {
+	it("arms the deadline in plan mode, and ask.timeout wins outside it", async () => {
+		const timeouts: (number | undefined)[] = [];
+		const formDialog: FormDialog = async (_html, options) => {
+			timeouts.push(options?.timeout);
+			return { data: { store: "sqlite" } };
+		};
+		const plan = () => ({ enabled: true, planFilePath: "/tmp/plan.md" });
+		const recommended = Settings.isolated({ "ask.recommendedTimeout": 10, "ask.notify": "off" });
+		const both = Settings.isolated({ "ask.recommendedTimeout": 10, "ask.timeout": 30, "ask.notify": "off" });
+		const run = (session: ToolSession) =>
+			new AskTool(session).execute("t", { html: DB_FORM }, undefined, undefined, createContext({ formDialog }));
+		await run(createSession({ settings: recommended, getPlanModeState: plan }));
+		await run(createSession({ settings: recommended }));
+		await run(createSession({ settings: both }));
+		await run(createSession({ settings: both, getPlanModeState: plan }));
+		await run(createSession({ settings: Settings.isolated({ "ask.timeout": 30 }), getPlanModeState: plan }));
+
+		expect(timeouts).toEqual([10_000, 10_000, 30_000, 10_000, undefined]);
+	});
+
+	it("waits for the user instead of submitting an unchecked radio group when no judge answers", async () => {
+		const calls: { html: string; timeout: number | undefined }[] = [];
+		const formDialog: FormDialog = async (html, options) => {
+			calls.push({ html, timeout: options?.timeout });
+			return { data: { store: "redis" } };
+		};
+		await new AskTool(
+			createSession({ settings: Settings.isolated({ "ask.recommendedTimeout": 10, "ask.notify": "off" }) }),
+		).execute("t", { html: OPEN_FORM }, undefined, undefined, createContext({ formDialog }));
+
+		expect(calls).toEqual([{ html: OPEN_FORM, timeout: undefined }]);
+	});
+
+	it("finds only named radio groups with nothing preselected", () => {
+		const form = parseHtmlForm(`<form>
+			<label><input type="radio" name="a" value="1"> One</label>
+			<label><input type="radio" name="a" value="2"> Two</label>
+			<label><input type="radio" name="b" value="1" checked> One</label>
+			<label><input type="checkbox" name="c" value="1"> One</label>
+			<select name="d"><option>x</option><option>y</option></select>
+		</form>`);
+		expect(unrecommendedRadios(form).map(field => field.name)).toEqual(["a"]);
+	});
+
+	it("checks the picked radio value and leaves the HTML alone without picks", () => {
+		expect(checkRadioValues(OPEN_FORM, new Map())).toBe(OPEN_FORM);
+		const html = checkRadioValues(OPEN_FORM, new Map([["store", "redis"]]));
+		const store = parseHtmlForm(html).fields[0];
+		if (store?.kind !== "choice") throw new Error("store is not a choice field");
+		expect(store.options.map(option => option.checked)).toEqual([false, true]);
+	});
+
+	it("takes a confident first pick, and runs a decisive round after needs_evidence", async () => {
+		const field = unrecommendedRadios(parseHtmlForm(OPEN_FORM))[0]!;
+		const stub = (answers: { choice: string; confidence: number }[]) => {
+			const seen: string[][] = [];
+			return {
+				seen,
+				judge: {
+					judge: async (request: { questions: Record<string, { criteria: object }> }) => {
+						seen.push(Object.keys(request.questions.recommend!.criteria));
+						const answer = answers.shift()!;
+						return { answers: { recommend: { type: "choice", probabilities: {}, ...answer } } };
+					},
+				} as never,
+			};
+		};
+
+		const confident = stub([{ choice: "o0", confidence: 0.8 }]);
+		expect(await judgeRecommendation(confident.judge, "ctx", "Session store", field)).toBe(0);
+		expect(confident.seen).toEqual([["o0", "o1", "needs_evidence"]]);
+
+		const unsure = stub([
+			{ choice: "needs_evidence", confidence: 0.9 },
+			{ choice: "o1", confidence: 0.6 },
+		]);
+		expect(await judgeRecommendation(unsure.judge, "ctx", "Session store", field)).toBe(1);
+		expect(unsure.seen).toEqual([
+			["o0", "o1", "needs_evidence"],
+			["o0", "o1"],
+		]);
 	});
 });
