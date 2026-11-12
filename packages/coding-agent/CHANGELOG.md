@@ -359,6 +359,9 @@
 - Language servers now recognize edits made shortly after a file is created, including on macOS.
 - Bash commands displayed in the Pseudo shell view now remain accurate while streaming through heredocs, substitutions, loops, continuations, arithmetic expressions, and background execution.
 - Resuming a session or reviving a subagent after a retry fallback with a thinking suffix (e.g. `:xhigh`) now restores the primary model's own thinking level instead of keeping the fallback's ([#19273](https://github.com/can1357/oh-my-pi/issues/19273)).
+### Added
+
+- Added `ask.recommendedTimeout` (seconds, 0 disables): the `ask` tool submits its recommended answers after the deadline, in plan mode too. A radio group without a preselected option gets a judge-picked recommendation first (a second, decisive round when the first asks for more evidence); when no judge answers, the form waits for the user instead of submitting the question unanswered. `ask.timeout` and `cfg://` approval prompts are unchanged
 
 ## [18.20.0] - 2026-11-12
 

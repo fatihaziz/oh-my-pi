@@ -39,6 +39,7 @@ When authorized to create or edit a contributor-submitted PR, follow the checkli
 - For user-facing changes, MUST follow the [Changelog](#changelog) attribution rules. Internal issue fixes keep their issue links. For external contributions, add the PR link and contributor credit after GitHub assigns the number, then push the entry before marking the changelog checklist item complete.
 - MUST read back the published PR description after creating or editing it. Check only verified checklist items; explain skipped or inapplicable checks in `Testing`.
 
+
 ## Code Quality
 
 - No `any` unless absolutely necessary.
