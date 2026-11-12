@@ -11,7 +11,7 @@ Several viable choices: pick conservative/standard, proceed, state choice.
 - One-of: `<input type="radio">`; many-of: type="checkbox"; long lists: <select>.
 - Wrap each control in a <label>; group a question in a <fieldset> with a <legend>, or put it in a <p> right before the group.
 - Radio and checkbox groups automatically get an "Other" free-text answer. NEVER add your own "Other" option or a text field for it.
-- Preselect your recommendation with checked/selected/value: those values are submitted if the user does not answer in time.
+- Preselect your recommendation with checked/selected/value: those values are submitted if the user does not answer in time; a radio group left unchecked gets a judge-picked recommendation first.
 - Context the user needs to decide (findings, tradeoffs, diffs, drafts) goes inside the form: <p>, <ul>, <table>, <pre>.
 - Keep forms short: a few questions, 2–5 options each; ask follow-ups in a later call.
 - Answer values:

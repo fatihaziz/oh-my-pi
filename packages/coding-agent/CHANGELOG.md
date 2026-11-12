@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ask.recommendedTimeout` (seconds, 0 disables): the `ask` tool submits its recommended answers after the deadline, in plan mode too. A radio group without a preselected option gets a judge-picked recommendation first (a second, decisive round when the first asks for more evidence); when no judge answers, the form waits for the user instead of submitting the question unanswered. `ask.timeout` and `cfg://` approval prompts are unchanged
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes

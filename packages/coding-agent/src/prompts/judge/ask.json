@@ -1,0 +1,6 @@
+{
+	"recommend": {
+		"instructions": "The state holds a form an AI coding agent shows its user: `context` is the form's text, `question` is one single-choice question in it, and `options` maps each option key to its label. Pick the option a careful senior engineer would recommend for the user's goal as the form describes it. Prefer the conservative, reversible, standard choice that keeps existing behavior and data safe. {{#if decisive}}`round1` shows that an earlier pass asked for more evidence; no more evidence exists, so choose the best option now.{{else}}Choose `needs_evidence` only when the context gives no basis to prefer any option.{{/if}}",
+		"criteria": {}
+	}
+}

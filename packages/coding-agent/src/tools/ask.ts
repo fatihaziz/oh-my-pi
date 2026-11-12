@@ -6,11 +6,14 @@
  * through `select`/`input`/`editor`, each prompt titled with the form text
  * around its field and then its question. The model receives the submitted form data
  * as JSON. Outside plan mode a configurable timeout submits the form's
- * preselected values.
+ * preselected values. `ask.recommendedTimeout` arms a deadline in plan mode
+ * too, after a judge preselects a recommendation for every radio group the
+ * model left unchecked; without a judge answer the form waits for the user.
  */
 
 import { type as arkType } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import { type Judge, judgeQuestions, renderQuestion } from "@oh-my-pi/pi-ai";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { editorKey, editorKeys } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
@@ -28,6 +31,7 @@ import {
 } from "@oh-my-pi/pi-tui/html-form/data";
 import {
 	type ChoiceField,
+	type FormField,
 	type HtmlForm,
 	parseHtmlForm,
 	spansText,
@@ -37,9 +41,12 @@ import { disambiguateDisplayLabels } from "@oh-my-pi/pi-tui/render/render-utils"
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { type Element, parseHTML } from "@oh-my-pi/pi-utils/dom";
 import type { ExtensionUIContext, ExtensionUIDialogOptions, ExtensionUISelectItem } from "../extensibility/extensions";
-import { askTimeoutMs, cfgAskNotify } from "../modes/settings";
+import { journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
+import { askRecommendedTimeoutMs, askTimeoutMs, cfgAskNotify } from "../modes/settings";
+import askJudgeFile from "../prompts/judge/ask.json" with { type: "json" };
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
 import askHeadlessForkMessage from "../prompts/tools/ask-headless-fork.md" with { type: "text" };
 import askResultTemplate from "../prompts/tools/ask-result.md" with { type: "text" };
@@ -345,6 +352,101 @@ async function askFieldByField(
 }
 
 // =============================================================================
+// Judged recommendations
+// =============================================================================
+
+const ASK_QUESTIONS = judgeQuestions(askJudgeFile);
+
+/** First-round label for "the form gives no basis to prefer an option". */
+const NEEDS_EVIDENCE = "needs_evidence";
+
+/** First-round confidence at or above which the pick stands without the decisive round. */
+const FIRST_ROUND_CONFIDENCE = 0.5;
+
+/** Leading characters of the form's text the judge sees. */
+const CONTEXT_CHARS = 4000;
+
+/** Named radio groups with no preselected option: a deadline would submit them unanswered. */
+export function unrecommendedRadios(form: HtmlForm): ChoiceField[] {
+	return form.fields.filter(
+		(field): field is ChoiceField =>
+			field.kind === "choice" &&
+			field.name !== "" &&
+			!field.multi &&
+			!field.select &&
+			field.options.some(option => !option.disabled) &&
+			!field.options.some(option => option.checked),
+	);
+}
+
+/**
+ * Index of the option a judge recommends for one radio group. Round 1 may
+ * answer `needs_evidence` or a low-confidence pick; round 2 sees that result
+ * and must choose an option.
+ */
+export async function judgeRecommendation(
+	judge: Pick<Judge, "judge">,
+	context: string,
+	question: string,
+	field: ChoiceField,
+	signal?: AbortSignal,
+): Promise<number> {
+	const indexByKey = new Map<string, number>();
+	const options: Record<string, string> = {};
+	field.options.forEach((option, index) => {
+		if (option.disabled) return;
+		const key = `o${index}`;
+		indexByKey.set(key, index);
+		options[key] = spansText(option.label).replace(/\s+/g, " ").trim() || option.value;
+	});
+	const optionKeys = [...indexByKey.keys()];
+	const state = { context, question, options };
+	const ask = async (
+		decisive: boolean,
+		labels: string[],
+		roundState: typeof state & { round1?: { choice: string; confidence: number } },
+	) => {
+		const recommend = {
+			...renderQuestion(ASK_QUESTIONS.recommend, { decisive }),
+			criteria: Object.fromEntries(labels.map(label => [label, null])),
+		};
+		const { answers } = await judge.judge({ state: roundState, questions: { recommend } }, { signal });
+		return answers.recommend;
+	};
+	const first = await ask(false, [...optionKeys, NEEDS_EVIDENCE], state);
+	const firstPick = indexByKey.get(first.choice);
+	if (firstPick !== undefined && first.confidence >= FIRST_ROUND_CONFIDENCE) return firstPick;
+	const second = await ask(true, optionKeys, {
+		...state,
+		round1: { choice: first.choice, confidence: first.confidence },
+	});
+	const pick = indexByKey.get(second.choice);
+	if (pick === undefined) throw new Error(`judge chose an unknown option: ${second.choice}`);
+	return pick;
+}
+
+/** The `<form>` element of agent HTML, wrapping loose controls in one when the HTML has none. */
+function formRoot(html: string): Element {
+	const form = parseHTML(html).document.querySelector("form");
+	return form ?? parseHTML(`<form>${html}</form>`).document.querySelector("form")!;
+}
+
+/** Form HTML with each named radio group's picked value checked; unchanged when nothing is picked. */
+export function checkRadioValues(html: string, picks: ReadonlyMap<string, string>): string {
+	if (picks.size === 0) return html;
+	const root = formRoot(html);
+	const done = new Set<string>();
+	for (const input of root.querySelectorAll("input")) {
+		if ((input.getAttribute("type") ?? "").toLowerCase() !== "radio") continue;
+		const name = input.getAttribute("name") ?? "";
+		if (done.has(name) || picks.get(name) !== (input.getAttribute("value") ?? "on")) continue;
+		input.setAttribute("checked", "");
+		done.add(name);
+	}
+	return root.outerHTML;
+}
+
+// =============================================================================
 // Tool Class
 // =============================================================================
 
@@ -387,6 +489,62 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		});
 	}
 
+	/**
+	 * Judged value for each unpreselected radio group, by field name; `undefined`
+	 * when any group gets no recommendation, so the caller drops the deadline.
+	 */
+	async #recommend(
+		form: HtmlForm,
+		fields: readonly ChoiceField[],
+		questions: ReadonlyMap<FormField, string>,
+		signal: AbortSignal,
+	): Promise<Map<string, string> | undefined> {
+		const registry = this.session.modelRegistry;
+		if (!registry) {
+			logger.debug("ask: no model registry for a judged recommendation; waiting for the user");
+			return undefined;
+		}
+		try {
+			const judge = resolveJudge({
+				settings: this.session.settings,
+				registry,
+				sessionId: this.session.getSessionId?.() ?? undefined,
+				purpose: "ask",
+				onUsage: journalJudgmentUsage(this.session.sessionManager),
+				telemetry: this.session.getTelemetry?.(),
+				cache: sharedJudgmentCache(),
+				costGate: this.session.costGate,
+			});
+			const context = form.sections
+				.flatMap(section => [
+					spansText(section.title),
+					...section.blocks.flatMap(block =>
+						block.kind === "text" ? [spansText(block.spans)] : block.kind === "pre" ? [block.text] : [],
+					),
+				])
+				.filter(line => line.trim() !== "")
+				.join("\n")
+				.slice(0, CONTEXT_CHARS);
+			const picks = new Map<string, string>();
+			for (const field of fields) {
+				const index = await judgeRecommendation(
+					judge,
+					context,
+					questions.get(field) ?? field.name,
+					field,
+					signal,
+				);
+				picks.set(field.name, field.options[index]!.value);
+			}
+			return picks;
+		} catch (error) {
+			logger.debug("ask: judged recommendation failed; waiting for the user", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return undefined;
+		}
+	}
+
 	async execute(
 		_toolCallId: string,
 		params: AskParams,
@@ -413,9 +571,10 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		const extensionUi = context.ui;
 
-		// Determine timeout based on settings and plan mode
+		// Determine timeout: plan mode honors only `ask.recommendedTimeout`; elsewhere `ask.timeout` wins.
 		const planModeEnabled = this.session.getPlanModeState?.()?.enabled ?? false;
-		const timeout = planModeEnabled ? undefined : askTimeoutMs(this.session.settings);
+		const recommendedTimeout = askRecommendedTimeoutMs(this.session.settings);
+		let timeout = planModeEnabled ? recommendedTimeout : (askTimeoutMs(this.session.settings) ?? recommendedTimeout);
 		// A message the user queues closes the dialog without cancelling the turn: they moved on, and the
 		// message reaches the agent at the batch boundary. Peer IRC, asides and finished background jobs are
 		// not the user's answer, so the dialog stays open for it.
@@ -445,12 +604,33 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			vocalizer.speak(named.map(field => questions.get(field) ?? field.name).join("\n"));
 		}
 
+		// A deadline must never submit a radio question unanswered: preselect a judged recommendation,
+		// or wait for the user when no judge answers.
+		let html = params.html;
+		if (timeout !== undefined && recommendedTimeout !== undefined) {
+			const unrecommended = unrecommendedRadios(form);
+			if (unrecommended.length > 0) {
+				const picks = await this.#recommend(form, unrecommended, questions, dialogSignal);
+				if (dialogSignal.aborted) throw abortError();
+				if (picks) {
+					html = checkRadioValues(params.html, picks);
+					for (const field of unrecommended) {
+						const value = picks.get(field.name);
+						const option = field.options.find(candidate => !candidate.disabled && candidate.value === value);
+						if (option) option.checked = true;
+					}
+				} else {
+					timeout = undefined;
+				}
+			}
+		}
+
 		let answered: { data: HtmlFormData; notes?: OptionNote[]; timedOut?: boolean } | undefined;
 		try {
 			if (extensionUi.formDialog) {
 				const formDialog = extensionUi.formDialog.bind(extensionUi);
 				answered = await untilAborted(dialogSignal, () =>
-					formDialog(params.html, { timeout, signal: dialogSignal }),
+					formDialog(html, { timeout, signal: dialogSignal }),
 				);
 			} else {
 				answered = await askFieldByField(extensionUi, form, timeout, dialogSignal);
