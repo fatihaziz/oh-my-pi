@@ -12,6 +12,7 @@ Capture exact technical state, not abstractions.
 - Partial work affecting the next step
 Register: address the successor directly in the imperative ("Fix X", "Run Y") — never first person ("I need to…", "my attempt…").
 The handoff mechanism is invisible to the document: NEVER list writing, generating, or delivering a handoff/summary/context document as progress or a next step. Progress and Next Steps cover the user's task only.
+Code maintains `<read-files>`, `<modified-files>`, and `<ledger>` (commands, user constraints, anchors); focus on decisions with rationale, findings, failed approaches, and next steps.
 </instruction>
 
 <output>
@@ -35,6 +36,9 @@ Use exactly this structure:
 
 ## Key Decisions
 - **[Decision]**: [Rationale]
+
+## Approaches that failed
+- [What was tried and why it failed, if any]
 
 ## Critical Context
 - Code snippets, file paths, function/type names, error messages, data essential to continue

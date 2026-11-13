@@ -188,14 +188,26 @@ export class SessionProviderBoundary {
 	obfuscateCompactionPreparation(preparation: CompactionPreparation): CompactionPreparation {
 		if (!this.#host.obfuscator()?.obfuscates()) return preparation;
 		const previousSummary = this.obfuscateText(preparation.previousSummary);
+		const factLedger = this.obfuscateText(preparation.factLedger);
 		const previousPreserveData = this.#obfuscatePreservedArchiveText(preparation.previousPreserveData);
+		const apecPreviousState = preparation.apecPreviousState
+			? {
+					...preparation.apecPreviousState,
+					segments: preparation.apecPreviousState.segments.map(seg => ({
+						...seg,
+						summary: this.obfuscateText(seg.summary) ?? seg.summary,
+					})),
+				}
+			: undefined;
 		if (
 			previousSummary === preparation.previousSummary &&
-			previousPreserveData === preparation.previousPreserveData
+			factLedger === preparation.factLedger &&
+			previousPreserveData === preparation.previousPreserveData &&
+			apecPreviousState === preparation.apecPreviousState
 		) {
 			return preparation;
 		}
-		return { ...preparation, previousSummary, previousPreserveData };
+		return { ...preparation, previousSummary, factLedger, previousPreserveData, apecPreviousState };
 	}
 
 	/** Deobfuscates provider text before exposing it to the session. */

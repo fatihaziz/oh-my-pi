@@ -13,6 +13,7 @@ import {
 	Tokenizer,
 } from "@oh-my-pi/pi-agent-core";
 import {
+	type ApecPrefixState,
 	AGGRESSIVE_SHAKE_CONFIG,
 	AUTO_HANDOFF_THRESHOLD_FOCUS,
 	applyShakeRegions,
@@ -22,18 +23,22 @@ import {
 	type CompactionResult,
 	type CompactionSummaryMessage,
 	calculateContextTokens,
+	carryDroppedSummaryItems,
 	canReplayRemoteCompactionFrom,
 	collectShakeRegions,
 	COMPACTION_RECOVERY_BAND,
 	compact,
+	computeMaxApecPrefixTokens,
 	compactionContextTokens,
 	countResponsesHistoryTokens,
 	createCompactionSummaryMessage,
 	DEFAULT_SHAKE_CONFIG,
+	formatApecCombinedSummary,
 	type CompactionSettings as EngineCompactionSettings,
 	effectiveReserveTokens,
 	invalidateMessageCache,
 	isTranscriptUsageAnchor,
+	parseApecPrefixState,
 	NativeCompactionError,
 	prepareCompaction,
 	promptBudgetTokens,
@@ -45,6 +50,8 @@ import {
 	type ShakeConfig,
 	type ShakeRegion,
 	type SummaryOptions,
+	stripSegmentSuffixes,
+	withApecPrefixPreserveData,
 	shouldCompact,
 	shouldUseProviderNativeCompaction,
 } from "@oh-my-pi/pi-agent-core/compaction";
@@ -113,6 +120,7 @@ import { isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
 	resolveCompactionConfiguredTarget,
 	resolveContextPromotionConfiguredTarget,
+	resolveConfiguredModelTarget,
 	resolveRoleModelFull,
 } from "./role-models";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
@@ -136,6 +144,7 @@ import {
 	cfgCompactionAutoContinue,
 	cfgCompactionEnabled,
 	cfgCompactionMethodOrder,
+	cfgCompactionModels,
 	cfgContextPromotionEnabled,
 	cfgSnapcompactShape,
 } from "./context-settings";
@@ -441,11 +450,75 @@ function mergeLlmCompactionPreserveData(
 function handoffSummaryFromDocument(
 	document: string,
 	preparation: CompactionPreparation,
-): { summary: string; details: CompactionDetails } {
+	preserveData?: Record<string, unknown>,
+	contextWindow?: number | null,
+): { summary: string; details: CompactionDetails; preserveData?: Record<string, unknown> } {
 	const { readFiles, modifiedFiles } = snapcompact.computeFileLists(preparation.fileOps);
+	const progressiveEnabled = preparation.settings.progressiveEnabled === true;
+	let summary = stripSegmentSuffixes(document);
+	let nextPreserveData = preserveData;
+	if (progressiveEnabled) {
+		if (preparation.apecPreviousState) {
+			const nextState: ApecPrefixState = {
+				epochId: preparation.apecPreviousState.epochId,
+				segments: [
+					...preparation.apecPreviousState.segments,
+					{
+						id: `seg-${preparation.apecPreviousState.segments.length + 1}`,
+						summary,
+						timestamp: new Date().toISOString(),
+						tokens: Math.ceil(summary.length / 4),
+					},
+				],
+			};
+			nextPreserveData = withApecPrefixPreserveData(preserveData, nextState);
+			summary = formatApecCombinedSummary(nextState.segments);
+		} else {
+			if (preparation.previousSummary) {
+				summary = carryDroppedSummaryItems(preparation.previousSummary, summary);
+			}
+			const cleanSummary = stripSegmentSuffixes(summary);
+			const nextState: ApecPrefixState = {
+				epochId: `epoch-${Date.now()}`,
+				segments: [
+					{
+						id: "seg-1",
+						summary: cleanSummary,
+						timestamp: new Date().toISOString(),
+						tokens: Math.ceil(cleanSummary.length / 4),
+					},
+				],
+			};
+			nextPreserveData = withApecPrefixPreserveData(preserveData, nextState);
+			summary = formatApecCombinedSummary(nextState.segments);
+		}
+	} else {
+		if (preparation.previousSummary) {
+			summary = carryDroppedSummaryItems(preparation.previousSummary, summary);
+		}
+		nextPreserveData = withApecPrefixPreserveData(preserveData, undefined);
+	}
+	const windowTokens = contextWindow ?? 0;
+	if (windowTokens > 0 && nextPreserveData) {
+		const parsed = parseApecPrefixState(nextPreserveData);
+		const maxTokens = computeMaxApecPrefixTokens(
+			resolveThresholdTokens(windowTokens, preparation.settings),
+			COMPACTION_RECOVERY_BAND,
+			preparation.settings.keepRecentTokens,
+			preparation.settings.reserveTokens ?? 16384,
+		);
+		if (parsed && maxTokens <= 0) {
+			nextPreserveData = withApecPrefixPreserveData(nextPreserveData, undefined);
+		}
+	}
+	let formatted = snapcompact.upsertFileOperations(summary, readFiles, modifiedFiles, preparation.fileOps.read);
+	if (preparation.factLedger) {
+		formatted = formatted ? `${formatted}\n\n${preparation.factLedger}` : preparation.factLedger;
+	}
 	return {
-		summary: snapcompact.upsertFileOperations(document, readFiles, modifiedFiles, preparation.fileOps.read),
+		summary: formatted,
 		details: { readFiles, modifiedFiles },
+		preserveData: nextPreserveData,
 	};
 }
 
@@ -719,9 +792,12 @@ export class SessionMaintenance {
 	#usesExperimentalContextManagement(): boolean {
 		return (
 			this.#compactionSettings.experimentalContextManagement === true &&
+			this.#compactionSettings.experimentalRollover !== false &&
 			this.#host.hasExperimentalContextRolloverTools()
 		);
 	}
+
+	#obfuscateLedgerText = (text: string): string => this.#host.obfuscateTextForProvider(text) ?? text;
 
 	/**
 	 * The notebook prompt is deliberately single-shot per rollover window. It is
@@ -1493,7 +1569,13 @@ export class SessionMaintenance {
 				);
 			}
 			const pathEntries = snapshot?.entries ?? manager.getBranch();
-			const preparation = prepareCompaction(pathEntries, effectiveSettings, activeModel, this.#tokenizer);
+			const preparation = prepareCompaction(
+				pathEntries,
+				effectiveSettings,
+				activeModel,
+				this.#tokenizer,
+				this.#obfuscateLedgerText,
+			);
 			if (!preparation) {
 				// Check why we can't compact
 				const lastEntry = pathEntries[pathEntries.length - 1];
@@ -1673,7 +1755,12 @@ export class SessionMaintenance {
 					signal: compactionSignal,
 				});
 				if (document === undefined) throw new Error("Handoff generation returned no document");
-				({ summary, details } = handoffSummaryFromDocument(document, preparation));
+				({ summary, details, preserveData } = handoffSummaryFromDocument(
+					document,
+					preparation,
+					compactionPrep.preserveData,
+					activeModel.contextWindow,
+				));
 				shortSummary = undefined;
 				firstKeptEntryId = preparation.firstKeptEntryId;
 				tokensBefore = preparation.tokensBefore;
@@ -2632,7 +2719,13 @@ export class SessionMaintenance {
 		const branch = pendingEntry < 0 ? fullBranch : fullBranch.slice(0, pendingEntry);
 		const snapshotLeafId = branch[branch.length - 1]?.id;
 		if (!snapshotLeafId) return clear();
-		const preparation = prepareCompaction(branch, effectiveSettings, model, this.#tokenizer);
+		const preparation = prepareCompaction(
+			branch,
+			effectiveSettings,
+			model,
+			this.#tokenizer,
+			this.#obfuscateLedgerText,
+		);
 		if (!preparation) return clear();
 		const signal = run.controller.signal;
 		const onAttempt = (message: AssistantMessage) => {
@@ -2650,7 +2743,12 @@ export class SessionMaintenance {
 				onAttempt,
 			});
 			if (!document) return clear();
-			const { summary, details } = handoffSummaryFromDocument(document, preparation);
+			const { summary, details, preserveData } = handoffSummaryFromDocument(
+				document,
+				preparation,
+				undefined,
+				model.contextWindow,
+			);
 			armed = {
 				result: {
 					summary,
@@ -2658,6 +2756,7 @@ export class SessionMaintenance {
 					firstKeptEntryId: preparation.firstKeptEntryId,
 					tokensBefore: preparation.tokensBefore,
 					details,
+					preserveData,
 				},
 				action: "handoff",
 				method,
@@ -3127,7 +3226,9 @@ export class SessionMaintenance {
 		if (contextWindow <= 0) return;
 		const compactionSettings = this.#compactionSettings;
 		const experimentalNewContextRequest =
-			this.#usesExperimentalContextManagement() && this.#host.takeExperimentalContextRolloverRequest(context);
+			compactionSettings.experimentalContextManagement === true &&
+			this.#host.hasExperimentalContextRolloverTools() &&
+			this.#host.takeExperimentalContextRolloverRequest(context);
 
 		// An explicit model-requested rollover bypasses the Auto-Compact toggle:
 		// `new_context` already acknowledged the request, so silently dropping it
@@ -3961,6 +4062,26 @@ export class SessionMaintenance {
 			if (filter && !filter(model)) return;
 			candidates.push(model);
 		};
+		const configuredCompactionModels = cfgCompactionModels.get(settings);
+		const anchorModel = preferredModel ?? availableModels[0];
+		for (const rawSelector of configuredCompactionModels) {
+			const selector = typeof rawSelector === "string" ? rawSelector.trim() : "";
+			if (!selector) continue;
+			if (selector.endsWith("*")) {
+				const prefix = selector.slice(0, -1);
+				const effortOrder = ["-medium", "-low", "-high", "-xhigh"];
+				const matches = availableModels
+					.filter(candidate => `${candidate.provider}/${candidate.id}`.startsWith(prefix))
+					.sort((a, b) => {
+						const ai = effortOrder.findIndex(suffix => a.id.endsWith(suffix));
+						const bi = effortOrder.findIndex(suffix => b.id.endsWith(suffix));
+						return (ai === -1 ? effortOrder.length : ai) - (bi === -1 ? effortOrder.length : bi);
+					});
+				for (const match of matches) addCandidate(match);
+			} else if (anchorModel) {
+				addCandidate(resolveConfiguredModelTarget(selector, anchorModel, availableModels));
+			}
+		}
 
 		if (preferredModel) {
 			addCandidate(resolveCompactionConfiguredTarget(preferredModel, availableModels));
@@ -4030,7 +4151,9 @@ export class SessionMaintenance {
 						onAttempt(message);
 					};
 
-		for (const candidate of candidates) {
+		for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
+			const candidate = candidates[candidateIndex];
+			const hasMoreCandidates = candidateIndex < candidates.length - 1;
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 			if (!apiKey) continue;
 			if (
@@ -4060,30 +4183,14 @@ export class SessionMaintenance {
 									this.#host.extensionRunner?.emitBeforeProviderRequest(payload, model, signal)
 							: undefined,
 						telemetry,
-						// Honor the user's /model thinking selection (incl. `off`) on
-						// the manual `/compact` path. Clamped per-model inside compact()
-						// via resolveCompactionEffort so unsupported-effort models
-						// (xai-oauth/grok-build) don't trip requireSupportedEffort.
 						thinkingLevel: this.#host.thinkingLevel(),
 						tools: this.#host.agent.state.tools,
 						sessionId: this.#host.sessionId(),
-						// Explicit cache keys only (never a sessionId fallback): V2
-						// treats any truthy key as provenance for x-opencode-session.
-						// Conventional summaries run on `candidate`; remote compaction
-						// may send a different api/model, so it is gated separately.
 						promptCacheKey: this.#host.getPromptCacheKeyForModel(candidate),
 						remotePromptCacheKey: this.#host.getPromptCacheKeyForModel(remoteCompactionPolicyModel(candidate)),
 						providerSessionState: this.#host.providerSessionState,
 						preferWebsockets: this.#host.preferWebsockets(candidate),
 						codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
-						// Route every summarization HTTP request through the
-						// session's side-stream transport so the provider
-						// concurrency cap (e.g. providers.ollama-cloud.maxConcurrency)
-						// brackets compaction the same way it brackets the live
-						// agent turn — without this, multiple ollama-cloud
-						// subagents auto/manually compacting issued uncapped
-						// summary requests in parallel (chatgpt-codex review on
-						// #3751).
 						completeImpl: async (requestModel, requestContext, requestOptions) => {
 							const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
 							const message = await stream.result();
@@ -4099,6 +4206,15 @@ export class SessionMaintenance {
 				if (AIError.is(id, AIError.Flag.AuthFailed)) continue;
 				if (error instanceof NativeCompactionError) {
 					nativeCompactionFailure ??= { error, provider: candidate.provider };
+					continue;
+				}
+				if (
+					hasMoreCandidates &&
+					!signal.aborted &&
+					(AIError.is(id, AIError.Flag.UsageLimit) ||
+						AIError.is(id, AIError.Flag.Timeout) ||
+						AIError.is(id, AIError.Flag.Transient))
+				) {
 					continue;
 				}
 				throw error;
@@ -5519,9 +5635,9 @@ export class SessionMaintenance {
 		// The explicit request is valid only on the notes-backed rollover path.
 		// If the experimental capability disappeared between request recognition
 		// and this dispatch (tool surface or settings changed while tool results
-		// were being persisted), drop the stale request rather than fall through
-		// to ordinary summary compaction: no summary-provider request was agreed.
-		if (explicitNewContextRequest) return COMPACTION_CHECK_NONE;
+		if (explicitNewContextRequest && compactionSettings.experimentalRollover !== false) {
+			return COMPACTION_CHECK_NONE;
+		}
 		const methods = resolveCompactionMethodOrder(compactionSettings.methodOrder);
 		if (methods.length === 0) return COMPACTION_CHECK_NONE;
 		const generation = this.#host.promptGeneration();
@@ -5720,7 +5836,13 @@ export class SessionMaintenance {
 			const pathEntries = this.#host.sessionManager.getBranch();
 
 			let pathEntriesForCompaction = pathEntries;
-			let preparation = prepareCompaction(pathEntriesForCompaction, effectiveSettings, this.#model, this.#tokenizer);
+			let preparation = prepareCompaction(
+				pathEntriesForCompaction,
+				effectiveSettings,
+				this.#model,
+				this.#tokenizer,
+				this.#obfuscateLedgerText,
+			);
 			if (!preparation) {
 				// prepareCompaction found nothing to summarize because the kept region
 				// is a single oversized recent turn — findCutPoint never cuts inside a
@@ -5775,6 +5897,7 @@ export class SessionMaintenance {
 									effectiveSettings,
 									this.#model,
 									this.#tokenizer,
+									this.#obfuscateLedgerText,
 								);
 								return preparation !== undefined;
 							},
@@ -6170,13 +6293,18 @@ export class SessionMaintenance {
 				preserveData = compactionPrep.preserveData;
 				providerReplayThroughEntryId = compactionPrep.providerReplayThroughEntryId;
 			} else if (handoffDocument) {
-				const handoffSummary = handoffSummaryFromDocument(handoffDocument, preparation);
+				const handoffSummary = handoffSummaryFromDocument(
+					handoffDocument,
+					preparation,
+					compactionPrep.preserveData,
+					this.#model?.contextWindow,
+				);
 				summary = handoffSummary.summary;
 				shortSummary = undefined;
 				firstKeptEntryId = preparation.firstKeptEntryId;
 				tokensBefore = preparation.tokensBefore;
 				details = handoffSummary.details;
-				preserveData = compactionPrep.preserveData;
+				preserveData = handoffSummary.preserveData;
 			} else if (snapcompactResult) {
 				summary = snapcompactResult.summary;
 				shortSummary = snapcompactResult.shortSummary;
@@ -6305,6 +6433,17 @@ export class SessionMaintenance {
 								} else {
 									lastError = error;
 								}
+								break;
+							}
+							if (
+								hasMoreCandidates &&
+								(AIError.is(id, AIError.Flag.UsageLimit) || AIError.is(id, AIError.Flag.AccountPolicy))
+							) {
+								logger.warn("Auto-compaction hit quota/account limit, advancing fallback", {
+									error: message,
+									model: `${candidate.provider}/${candidate.id}`,
+								});
+								lastError = error;
 								break;
 							}
 
