@@ -2,8 +2,10 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { customMessageEntryMessage, isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import {
 	canReplayRemoteCompaction,
+	extractCompactionFooter,
 	getAnthropicCompactionPayload,
 	isTurnStartEntry,
+	parseApecPrefixState,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	coerceServiceTierByFamily,
@@ -593,10 +595,32 @@ export function buildSessionContext(
 				historyRewriteAt,
 			},
 		);
+		const apecState =
+			!options?.transcript && !providerPayload && !snapcompactArchive
+				? parseApecPrefixState(compaction.preserveData)
+				: undefined;
 		// Agent context (non-transcript): summary first so the LLM sees the
 		// compacted context before recent messages.
 		if (!options?.transcript) {
-			pushMessage(compactionSummaryMsg);
+			if (apecState) {
+				for (const seg of apecState.segments) {
+					pushMessage(
+						createCompactionSummaryMessage(seg.summary, 0, seg.timestamp, {
+							method: compaction.method,
+						}),
+					);
+				}
+				const footer = extractCompactionFooter(compaction.summary);
+				if (footer) {
+					pushMessage(
+						createCompactionSummaryMessage(footer, compaction.tokensBefore, compaction.timestamp, {
+							method: compaction.method,
+						}),
+					);
+				}
+			} else {
+				pushMessage(compactionSummaryMsg);
+			}
 		}
 
 		// Notes-backed windows do not summarize a discarded turn prefix. Recover

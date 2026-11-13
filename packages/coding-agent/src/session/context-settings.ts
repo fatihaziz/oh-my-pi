@@ -154,6 +154,42 @@ export const cfgCompactionMethodOrder = register({
 		ordered: true,
 	},
 });
+export const cfgCompactionExperimentalRollover = register({
+	id: "compaction.experimentalRollover",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Experimental Notes-Only Rollover",
+		description:
+			"When experimentalContextManagement is enabled, replace AI summary compaction with notes-only rollover",
+	},
+});
+
+export const cfgCompactionProgressiveEnabled = register({
+	id: "compaction.progressiveEnabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "APEC Progressive Compaction",
+		description: "Append immutable segment summaries across compaction boundaries to preserve prompt prefix caching",
+	},
+});
+
+export const cfgCompactionModels = register({
+	id: "compaction.models",
+	type: "array",
+	default: [] as string[],
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Compaction Model Chain",
+		description: "Ordered provider/model selectors tried for local compaction summaries before the active model",
+	},
+});
 
 export const cfgCompactionThresholdPercent = register({
 	id: "compaction.thresholdPercent",
@@ -384,6 +420,7 @@ export const cfgCompactionDropUseless = register({
 /** Every `compaction.*` setting as one memoized snapshot (the configured compaction policy). */
 export const cfgCompaction = combine({
 	enabled: cfgCompactionEnabled,
+	experimentalRollover: cfgCompactionExperimentalRollover,
 	experimentalContextManagement: cfgCompactionExperimentalContextManagement,
 	methodOrder: cfgCompactionMethodOrder,
 	thresholdPercent: cfgCompactionThresholdPercent,
@@ -400,6 +437,8 @@ export const cfgCompaction = combine({
 	idleEnabled: cfgCompactionIdleEnabled,
 	idleThresholdTokens: cfgCompactionIdleThresholdTokens,
 	idleTimeoutSeconds: cfgCompactionIdleTimeoutSeconds,
+	progressiveEnabled: cfgCompactionProgressiveEnabled,
+	models: cfgCompactionModels,
 	supersedeReads: cfgCompactionSupersedeReads,
 	dropUseless: cfgCompactionDropUseless,
 });

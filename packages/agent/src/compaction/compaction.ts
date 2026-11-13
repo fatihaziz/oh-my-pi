@@ -77,6 +77,17 @@ import {
 	trimRemoteCompactionInputToContextWindow,
 	withOpenAiRemoteCompactionPreserveData,
 } from "./openai";
+import { carryDroppedSummaryItems } from "./carry";
+import { buildFactLedger, renderFactLedger, stripFactLedger } from "./ledger";
+import {
+	type ApecPrefixState,
+	canExtendApecEpoch,
+	computeMaxApecPrefixTokens,
+	formatApecCombinedSummary,
+	parseApecPrefixState,
+	stripSegmentSuffixes,
+	withApecPrefixPreserveData,
+} from "./progressive";
 import autoHandoffThresholdFocusPrompt from "./prompts/auto-handoff-threshold-focus.md" with { type: "text" };
 import compactionShortSummaryPrompt from "./prompts/compaction-short-summary.md" with { type: "text" };
 import compactionSummaryPrompt from "./prompts/compaction-summary.md" with { type: "text" };
@@ -188,6 +199,8 @@ export interface CompactionSettings {
 	remoteEndpoint?: string;
 	remoteStreamingV2Enabled?: boolean;
 	v2RetainedMessageBudget?: number;
+	progressiveEnabled?: boolean;
+	models?: string[];
 }
 
 /** Reserve applied when {@link CompactionSettings.reserveTokens} is unset. */
@@ -232,6 +245,8 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	remoteEnabled: true,
 	remoteStreamingV2Enabled: true,
 	v2RetainedMessageBudget: V2_RETAINED_MESSAGE_TOKEN_BUDGET,
+	progressiveEnabled: false,
+	models: [],
 };
 
 /**
@@ -1389,6 +1404,10 @@ export interface CompactionPreparation {
 	fileOps: snapcompact.FileOperations;
 	/** Compaction settions from settings.jsonl	*/
 	settings: CompactionSettings;
+	/** Code-extracted bounded fact ledger appended after file lists. */
+	factLedger?: string;
+	/** Prior APEC progressive prefix state when extending an epoch. */
+	apecPreviousState?: ApecPrefixState;
 }
 
 /**
@@ -1479,9 +1498,10 @@ export function prepareCompaction(
 	settings: CompactionSettings,
 	activeModel?: Model,
 	tokenizer: Tokenizer = new Tokenizer(activeModel),
+	obfuscate?: (text: string) => string,
 ): CompactionPreparation | undefined {
 	return withLoopPhase("compaction.prepare", () =>
-		prepareCompactionUnlabeled(pathEntries, settings, activeModel, tokenizer),
+		prepareCompactionUnlabeled(pathEntries, settings, activeModel, tokenizer, obfuscate),
 	);
 }
 
@@ -1490,6 +1510,7 @@ function prepareCompactionUnlabeled(
 	settings: CompactionSettings,
 	activeModel: Model | undefined,
 	tokenizer: Tokenizer,
+	obfuscate?: (text: string) => string,
 ): CompactionPreparation | undefined {
 	const lastEntry = pathEntries[pathEntries.length - 1];
 	// A speculative native record may leave uncovered messages before the record.
@@ -1630,6 +1651,29 @@ function prepareCompactionUnlabeled(
 			extractFileOpsFromMessage(msg, fileOps);
 		}
 	}
+	const factLedgerText = renderFactLedger(buildFactLedger(pathEntries, resetBoundaryIndex, obfuscate));
+	const priorApecState =
+		previousCompaction &&
+		settings.progressiveEnabled === true &&
+		!getCompactionV2PreserveData(previousCompaction.preserveData) &&
+		!getPreservedOpenAiRemoteCompactionData(previousCompaction.preserveData) &&
+		!getPreservedAnthropicCompactionData(previousCompaction.preserveData) &&
+		!snapcompact.getPreservedArchive(previousCompaction.preserveData)
+			? parseApecPrefixState(previousCompaction.preserveData)
+			: undefined;
+	const thresholdTokens =
+		activeModel?.contextWindow && activeModel.contextWindow > 0
+			? resolveThresholdTokens(activeModel.contextWindow, settings)
+			: settings.thresholdTokens && settings.thresholdTokens > 0
+				? settings.thresholdTokens
+				: 200_000;
+	const maxApecTokens = computeMaxApecPrefixTokens(
+		thresholdTokens,
+		COMPACTION_RECOVERY_BAND,
+		settings.keepRecentTokens,
+		settings.reserveTokens ?? DEFAULT_RESERVE_TOKENS,
+	);
+	const apecPreviousState = canExtendApecEpoch(priorApecState, maxApecTokens) ? priorApecState : undefined;
 
 	return {
 		firstKeptEntryId,
@@ -1645,6 +1689,8 @@ function prepareCompactionUnlabeled(
 		previousPreserveData: previousCompaction?.preserveData,
 		fileOps,
 		settings,
+		...(factLedgerText ? { factLedger: factLedgerText } : {}),
+		...(apecPreviousState ? { apecPreviousState } : {}),
 	};
 }
 
@@ -1780,6 +1826,8 @@ export async function compact(
 		previousPreserveData,
 		fileOps,
 		settings,
+		factLedger,
+		apecPreviousState,
 	} = preparation;
 
 	const reserveTokens = settings.reserveTokens ?? DEFAULT_RESERVE_TOKENS;
@@ -2339,45 +2387,100 @@ export async function compact(
 		// locally then (see remotePreserveReusable).
 		const inputTokens = getCompactionV2PreserveData(preserveData)?.usedTokens ?? 0;
 		summary = formatRemoteCompactionSummary(inputTokens);
-	} else if (isSplitTurn && turnPrefixMessages.length > 0) {
-		// Generate both summaries in parallel
-		const [historyResult, turnPrefixResult] = await Promise.all([
-			messagesToSummarize.length > 0 || previousSummaryForCompaction
-				? generateSummary(
-						messagesToSummarize,
-						model,
-						reserveTokens,
-						apiKey,
-						signal,
-						customInstructions,
-						previousSummaryForCompaction,
-						summaryOptions,
-					)
-				: Promise.resolve("No prior history."),
-			generateTurnPrefixSummary(turnPrefixMessages, model, reserveTokens, apiKey, signal, summaryOptions),
-		]);
-		// Merge into single summary
-		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
-	} else if (messagesToSummarize.length > 0) {
-		// Generate history summary from messages to summarize
-		summary = await generateSummary(
-			messagesToSummarize,
-			model,
-			reserveTokens,
-			apiKey,
-			signal,
-			customInstructions,
-			previousSummaryForCompaction,
-			summaryOptions,
-		);
-	} else if (previousSummaryForCompaction) {
-		// No new messages to summarize, preserve previous summary
-		summary = previousSummaryForCompaction;
 	} else {
-		// No messages and no previous summary
-		summary = "No prior history.";
-	}
+		const extendingApecEpoch =
+			!usedRemoteCompaction &&
+			nativeSummary === undefined &&
+			settings.progressiveEnabled === true &&
+			apecPreviousState !== undefined;
+		const previousSummaryClean = previousSummaryForCompaction
+			? stripFactLedger(previousSummaryForCompaction)
+			: undefined;
+		const summaryInputForLlm = extendingApecEpoch ? undefined : previousSummaryClean;
+		if (isSplitTurn && turnPrefixMessages.length > 0) {
+			// Generate both summaries in parallel
+			const [historyResult, turnPrefixResult] = await Promise.all([
+				messagesToSummarize.length > 0 || summaryInputForLlm
+					? generateSummary(
+							messagesToSummarize,
+							model,
+							reserveTokens,
+							apiKey,
+							signal,
+							customInstructions,
+							summaryInputForLlm,
+							summaryOptions,
+						)
+					: Promise.resolve("No prior history."),
+				generateTurnPrefixSummary(turnPrefixMessages, model, reserveTokens, apiKey, signal, summaryOptions),
+			]);
+			// Merge into single summary
+			summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
+		} else if (messagesToSummarize.length > 0) {
+			// Generate history summary from messages to summarize
+			summary = await generateSummary(
+				messagesToSummarize,
+				model,
+				reserveTokens,
+				apiKey,
+				signal,
+				customInstructions,
+				summaryInputForLlm,
+				summaryOptions,
+			);
+		} else if (summaryInputForLlm) {
+			// No new messages to summarize, preserve previous summary
+			summary = summaryInputForLlm;
+		} else {
+			// No messages and no previous summary
+			summary = "No prior history.";
+		}
 
+		if (!usedRemoteCompaction && nativeSummary === undefined) {
+			if (extendingApecEpoch) {
+				const cleanDelta = stripSegmentSuffixes(summary);
+				const deltaTokens = new Tokenizer(model).countTokens(cleanDelta);
+				const nextState: ApecPrefixState = {
+					epochId: apecPreviousState.epochId,
+					segments: [
+						...apecPreviousState.segments,
+						{
+							id: `seg-${apecPreviousState.segments.length + 1}`,
+							summary: cleanDelta,
+							timestamp: new Date().toISOString(),
+							tokens: deltaTokens,
+						},
+					],
+				};
+				preserveData = withApecPrefixPreserveData(preserveData, nextState);
+				summary = formatApecCombinedSummary(nextState.segments);
+			} else {
+				if (previousSummaryForReader) {
+					summary = carryDroppedSummaryItems(previousSummaryForReader, summary);
+				}
+				if (settings.progressiveEnabled === true) {
+					const cleanConsolidated = stripSegmentSuffixes(summary);
+					const segTokens = new Tokenizer(model).countTokens(cleanConsolidated);
+					const nextState: ApecPrefixState = {
+						epochId: `epoch-${Date.now()}`,
+						segments: [
+							{
+								id: "seg-1",
+								summary: cleanConsolidated,
+								timestamp: new Date().toISOString(),
+								tokens: segTokens,
+							},
+						],
+					};
+					preserveData = withApecPrefixPreserveData(preserveData, nextState);
+				} else {
+					preserveData = withApecPrefixPreserveData(preserveData, undefined);
+				}
+			}
+		} else {
+			preserveData = withApecPrefixPreserveData(preserveData, undefined);
+		}
+	}
 	const shortSummary = usedRemoteCompaction
 		? "Remote compaction"
 		: await generateShortSummary(recentMessages, summary, model, reserveTokens, apiKey, signal, summaryOptions);
@@ -2385,6 +2488,9 @@ export async function compact(
 	// Compute file lists and append to summary
 	const { readFiles, modifiedFiles } = snapcompact.computeFileLists(fileOps);
 	summary = snapcompact.upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
+	if (!usedRemoteCompaction && nativeSummary === undefined && factLedger) {
+		summary = summary ? `${summary}\n\n${factLedger}` : factLedger;
+	}
 	if (nativeSummary !== undefined) {
 		// The replayed block (summary and any `tool_changes`) stays
 		// byte-identical to the API's output so it matches its signature. The

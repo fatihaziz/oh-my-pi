@@ -24,6 +24,9 @@ You MUST use this format (sections can be omitted if not applicable):
 ## Key Decisions
 - **[Decision]**: [Brief rationale]
 
+## Approaches that failed
+- [Tried approaches and why they failed, if any]
+
 ## Next Steps
 1. [Ordered list of next actions]
 
@@ -35,4 +38,4 @@ You MUST use this format (sections can be omitted if not applicable):
 
 You MUST output only the structured summary; you NEVER include extra text.
 
-Sections MUST be kept concise. You MUST preserve exact file paths, function names, error messages, and relevant tool outputs or command results. You MUST include repository state changes (branch, uncommitted changes) if mentioned.
+Sections MUST be kept concise. Code maintains file lists (`<read-files>`, `<modified-files>`) and a `<ledger>` (commands, exit codes, user rules, anchors); focus on intent, decisions with rationale, findings, failed approaches, and exact file/symbol next steps. You MUST preserve exact file paths, function names, error messages, and repository state changes if mentioned.

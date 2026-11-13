@@ -8,8 +8,7 @@ MUST:
 - MAY remove irrelevant content.
 - If new messages end with an unanswered user question/request: add it to Critical Context; replace any previous pending question if answered.
 - output only the structured summary; NEVER extra text.
-- keep sections concise.
-- preserve relevant tool outputs/command results.
+- keep sections concise. Code maintains `<read-files>`, `<modified-files>`, and `<ledger>`; focus on intent, decisions, findings, failed approaches, and next steps.
 - include mentioned repository state changes (branch, uncommitted changes).
 
 Format (omit inapplicable sections):
@@ -33,6 +32,9 @@ Format (omit inapplicable sections):
 
 ## Key Decisions
 - **[Decision]**: [Brief rationale] (preserve all previous, add new)
+
+## Approaches that failed
+- [Preserve earlier failed approaches and add any new ones]
 
 ## Next Steps
 1. [Update based on current state]
