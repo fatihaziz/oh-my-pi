@@ -527,13 +527,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				.slice(0, CONTEXT_CHARS);
 			const picks = new Map<string, string>();
 			for (const field of fields) {
-				const index = await judgeRecommendation(
-					judge,
-					context,
-					questions.get(field) ?? field.name,
-					field,
-					signal,
-				);
+				const index = await judgeRecommendation(judge, context, questions.get(field) ?? field.name, field, signal);
 				picks.set(field.name, field.options[index]!.value);
 			}
 			return picks;
@@ -629,9 +623,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		try {
 			if (extensionUi.formDialog) {
 				const formDialog = extensionUi.formDialog.bind(extensionUi);
-				answered = await untilAborted(dialogSignal, () =>
-					formDialog(html, { timeout, signal: dialogSignal }),
-				);
+				answered = await untilAborted(dialogSignal, () => formDialog(html, { timeout, signal: dialogSignal }));
 			} else {
 				answered = await askFieldByField(extensionUi, form, timeout, dialogSignal);
 			}
