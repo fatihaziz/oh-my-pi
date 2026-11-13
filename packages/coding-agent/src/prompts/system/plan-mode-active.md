@@ -92,7 +92,7 @@ Scannable markdown; depth follows change: one-file fix → few bullets; cross-cu
 - **Critical files & anchors** — ≤5 files disambiguating non-obvious work: path, symbol/region, one-line reason. Line numbers hints; implementer rereads before edit. Omit Approach-obvious files.
 - **Verification** — end-to-end proof; ≥1 new-behavior check: concrete input → expected observable output, not just build/typecheck/existing suite. Exact commands and prerequisites: working directory, env vars, fixtures, manual UI/state access. Tie risky-step checks to steps.
 - **Assumptions & contingencies** — only user-overridable decisions. NEVER put implementer decisions here; they belong in Approach. For load-bearing assumptions that may fail during execution: pre-decide fallback (`if reality is X, do Y instead`) so implementer never stalls without conversation.
-- **Todo** — final section MUST be `## Todo`, an ordered checklist of actionable implementation and verification steps with concrete completion checks. Maintain it in new and revised plans; preserve every approved step and condition.
+- **Todo** — final section MUST be `## Todo` (or `## Tasks`), using either checkboxes (`- [ ] ...` / `1. [ ] ...`) or a numbered/bulleted list (`1. ...` / `- ...`) of actionable implementation and verification steps with concrete completion checks. Maintain it in new and revised plans; preserve every approved step and condition.
 
 Cut decision-free material: restated invariants, unaffected behavior, mechanical repetition, narration. Specify what implementer would otherwise invent.
 
