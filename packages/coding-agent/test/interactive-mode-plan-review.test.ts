@@ -1362,6 +1362,32 @@ describe("InteractiveMode plan review rendering", () => {
 		},
 	);
 
+	it.each([
+		[
+			"numbered ## Tasks",
+			"## Tasks\n1. Build the feature.\n   - Keep sub-detail attached.\n2. Verify tests pass.",
+			["Build the feature.\n- Keep sub-detail attached.", "Verify tests pass."],
+		],
+		["bulleted ## Todo", "## Todo\n- Implement change\n- Run verification", ["Implement change", "Run verification"]],
+	])("accepts %s lists without requiring checkboxes", async (_label, section, expectedTasks) => {
+		const planFilePath = "local://goal-flex-plan.md";
+		const resolved = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolved, `# Plan\n\n${section}\n`);
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(session, "getEnabledToolNames").mockReturnValue(["read", "todo", "goal"]);
+		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and keep context");
+		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "Plan" });
+		expect(session.getGoalModeState()?.goal.objective).toBe(section);
+		expect(session.getTodoPhases()[0]?.tasks.map(task => task.content)).toEqual(expectedTasks);
+	});
+
 	it.each(["missing checklist", "goal disabled", "conflicting goal", "activation failure"])(
 		"does not dispatch an approved plan on %s",
 		async failure => {

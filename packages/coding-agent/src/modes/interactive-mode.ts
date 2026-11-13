@@ -6795,7 +6795,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	): Promise<boolean> {
 		const checklist = extractApprovedTodo(planContent);
 		if (!checklist) {
-			this.showError("Plan execution requires a non-empty final ## Todo checklist.");
+			this.showError("Plan execution requires a non-empty final ## Todo (or ## Tasks) list.");
 			return false;
 		}
 		const goalBlocker = (): string | undefined => {

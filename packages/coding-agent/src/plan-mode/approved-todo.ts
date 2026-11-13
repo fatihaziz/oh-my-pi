@@ -19,7 +19,7 @@ export function extractApprovedTodo(plan: string): { objective: string; phases: 
 			)
 				fence = undefined;
 		} else if (!fence && /^##(?:\s|$)/.test(line)) {
-			headingOffset = /^## Todo\s*$/.test(line) ? offset : -1;
+			headingOffset = /^##\s+(?:todo|todos|tasks?)\s*$/i.test(line) ? offset : -1;
 			headingLine = i;
 		}
 		offset += lines[i].length;
@@ -40,9 +40,20 @@ export function extractApprovedTodo(plan: string): { objective: string; phases: 
 				fence = undefined;
 		}
 		if (!fence && !marker && /^\s*(?:[-+*]|\d+[.)])\s+\[[ xX]\]\s*$/.test(line)) return undefined;
-		const match = !fence && !marker ? /^\s*(?:[-+*]|\d+[.)])\s+\[([ xX])\]\s+(.+?)\s*$/.exec(line) : undefined;
-		if (match) tasks.push({ content: match[2], status: match[1].toLowerCase() === "x" ? "completed" : "pending" });
-		else if (line.trim() && tasks.length) tasks[tasks.length - 1].content += `\n${line.trimStart()}`;
+		const checkboxMatch =
+			!fence && !marker ? /^\s*(?:[-+*]|\d+[.)])\s+\[([ xX])\]\s+(.+?)\s*$/.exec(line) : undefined;
+		const plainMatch =
+			!checkboxMatch && !fence && !marker ? /^ ?(?:[-+*]|\d+[.)])\s+(?!\[[ xX]\])(.+?)\s*$/.exec(line) : undefined;
+		if (checkboxMatch) {
+			tasks.push({
+				content: checkboxMatch[2],
+				status: checkboxMatch[1].toLowerCase() === "x" ? "completed" : "pending",
+			});
+		} else if (plainMatch) {
+			tasks.push({ content: plainMatch[1], status: "pending" });
+		} else if (line.trim() && tasks.length) {
+			tasks[tasks.length - 1].content += `\n${line.trimStart()}`;
+		}
 	}
 	if (!tasks.length) return undefined;
 	const firstPending = tasks.find(task => task.status === "pending");
