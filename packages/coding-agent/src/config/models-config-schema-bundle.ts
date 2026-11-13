@@ -58,6 +58,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"requiresToolResultName?": "boolean",
 		"requiresMistralToolIds?": "boolean",
 		"requiresAssistantAfterToolResult?": "boolean",
+		"filterReasoningHistory?": "boolean",
+		"replayReasoningContent?": "boolean",
 		"requiresThinkingAsText?": "boolean",
 		"reasoningContentField?": '"reasoning_content" | "reasoning" | "reasoning_text"',
 		"requiresReasoningContentForToolCalls?": "boolean",

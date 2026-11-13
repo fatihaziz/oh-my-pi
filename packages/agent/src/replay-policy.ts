@@ -4,7 +4,7 @@ import type { AssistantMessage, Message } from "@oh-my-pi/pi-ai";
 export function isProviderRefusalMessage(message: AssistantMessage): boolean {
 	if (message.stopReason !== "error") return false;
 	const stopType = message.stopDetails?.type;
-	return stopType === "refusal" || stopType === "sensitive";
+	return stopType === "refusal" || stopType === "sensitive" || stopType === "content_filter";
 }
 
 /** Removes API-level provider refusals from live provider replay while preserving other messages. */

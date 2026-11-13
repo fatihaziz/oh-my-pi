@@ -942,6 +942,48 @@ export function transformMessages<TApi extends Api>(
 		}
 	}
 	const targetHasReasoningSlot = targetReplaysPlaintextReasoning(model, targetCompat);
+	const filterReasoningHistory =
+		targetCompat !== undefined &&
+		"filterReasoningHistory" in targetCompat &&
+		targetCompat.filterReasoningHistory === true;
+	const dropsCumulativeDemotedThinking =
+		!filterReasoningHistory && resolveCatalogPolicy(model).classifierCotExtraction === true;
+	const MAX_FOREIGN_DEMOTED_THINKING_TURNS = 2;
+	const allowedDemotedForeignIndexes = new Set<number>();
+	if (dropsCumulativeDemotedThinking) {
+		const targetReadsForeign = targetReadsForeignThinking(model, targetCompat);
+		for (
+			let i = messages.length - 1;
+			i >= 0 && allowedDemotedForeignIndexes.size < MAX_FOREIGN_DEMOTED_THINKING_TURNS;
+			i--
+		) {
+			const candidate = messages[i]!;
+			if (candidate.role !== "assistant") continue;
+			if (isSameModelTurn(candidate, model)) continue;
+			if (isAnthropicMessagesModel(model) && candidate.api === "anthropic-messages") continue;
+			if (targetReadsForeign) continue;
+			const carriesSameModel =
+				candidate.stopReason !== "error" &&
+				targetHasReasoningSlot &&
+				carriesReasoning(
+					{
+						provider: candidate.provider,
+						api: candidate.api,
+						model: candidate.upstreamModel ?? candidate.model,
+					},
+					model,
+				);
+			const hasDemotableThinking = candidate.content.some(
+				block =>
+					block.type === "thinking" &&
+					block.thinking.trim() !== "" &&
+					!(carriesSameModel && block.summary === false),
+			);
+			if (hasDemotableThinking) {
+				allowedDemotedForeignIndexes.add(i);
+			}
+		}
+	}
 	// Origin-scope sets, accumulated by the normalization map itself (below) so
 	// the scope needs no second transcript walk. Only read via `.has`, so
 	// iteration order is inert.
@@ -1208,6 +1250,12 @@ export function transformMessages<TApi extends Api>(
 					// stay byte-identical. A separator baked into the block text would
 					// leak to non-flattening targets: Anthropic/Bedrock reject a
 					// terminal assistant message whose text ends with whitespace.
+					if (
+						filterReasoningHistory ||
+						(dropsCumulativeDemotedThinking && !allowedDemotedForeignIndexes.has(index))
+					) {
+						return [];
+					}
 					return {
 						type: "text" as const,
 						text: renderDemotedThinking(model.id, sanitized.thinking),

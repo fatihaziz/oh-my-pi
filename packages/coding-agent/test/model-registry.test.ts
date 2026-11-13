@@ -1059,6 +1059,29 @@ describe("ModelRegistry", () => {
 			expect(compat?.supportsUsageInStreaming).toBe(true);
 			expect(compat?.maxTokensField).toBe("max_completion_tokens");
 		});
+
+		test("models.yml accepts replayReasoningContent and filterReasoningHistory on loopback proxy providers", () => {
+			const proxyRegistry = readonlyRegistry({
+				providers: {
+					"9router": {
+						baseUrl: "http://127.0.0.1:20129/v1",
+						apiKey: "test-key",
+						api: "openai-completions",
+						compat: {
+							replayReasoningContent: false,
+							filterReasoningHistory: true,
+						},
+						models: [{ id: "cc/claude-opus-5-5" }],
+					},
+				},
+			});
+			expect(proxyRegistry.drainConfigWarnings()).toEqual([]);
+			const model = proxyRegistry.find("9router", "cc/claude-opus-5-5");
+			expect(model?.compat).toMatchObject({
+				replayReasoningContent: false,
+				filterReasoningHistory: true,
+			});
+		});
 	});
 
 	describe("mixed provider routes", () => {

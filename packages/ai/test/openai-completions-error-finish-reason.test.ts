@@ -590,3 +590,42 @@ describe("non-string finish_reason", () => {
 		expect(result.errorMessage).toBe("Provider finish_reason: 42");
 	}, 10_000);
 });
+
+describe("finish_reason: content_filter", () => {
+	it("attaches stopDetails.type content_filter and preserves streamed explanation", async () => {
+		const explanation = "This request was blocked as it seems to violate Anthropic's Terms of Service restrictions.";
+		const fetchMock = createSseFetch([
+			completionChunk({ choices: [{ index: 0, delta: { role: "assistant", content: explanation } }] }),
+			completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: "content_filter" }] }),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Provider finish_reason: content_filter");
+		expect(result.stopDetails).toEqual({ type: "content_filter", explanation });
+		const id = AIError.classifyMessage(result);
+		expect(AIError.is(id, AIError.Flag.ContentBlocked)).toBe(true);
+		expect(AIError.retriable(id)).toBe(false);
+	}, 10_000);
+
+	it("attaches stopDetails.type content_filter without explanation when stream has no text", async () => {
+		const fetchMock = createSseFetch([
+			completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: "content_filter" }] }),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Provider finish_reason: content_filter");
+		expect(result.stopDetails).toEqual({ type: "content_filter" });
+	}, 10_000);
+});

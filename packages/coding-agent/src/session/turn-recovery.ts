@@ -1803,7 +1803,10 @@ export class TurnRecovery {
 	isClassifierRefusal(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
 		const stopType = message.stopDetails?.type;
-		return stopType === "refusal" || stopType === "sensitive";
+		if (stopType === "refusal" || stopType === "sensitive" || stopType === "content_filter") return true;
+		const id = AIError.classifyMessage(message);
+		if (AIError.is(id, AIError.Flag.AccountPolicy)) return false;
+		return AIError.is(id, AIError.Flag.ContentBlocked);
 	}
 
 	#getRetryFallbackResolutionContext(): RetryFallbackResolutionContext {
