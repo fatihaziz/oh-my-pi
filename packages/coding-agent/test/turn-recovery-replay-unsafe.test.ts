@@ -1,5 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import type { AgentMessage, SyntheticToolResultDetails } from "@oh-my-pi/pi-agent-core";
+import {
+	type AgentMessage,
+	filterProviderReplayMessages,
+	isProviderRefusalMessage,
+	type SyntheticToolResultDetails,
+} from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -1378,6 +1383,25 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				{ type: "text", text: "Partial answer" },
 			]);
 			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(withOutput)).toBe(false);
+		});
+	});
+
+	describe("content_filter refusal classification and replay filtering", () => {
+		it("treats content_filter stopDetails and ContentBlocked errors as classifier refusals", () => {
+			const withStopDetails = makeMessage([{ type: "text", text: "Blocked by content filter." }], model);
+			withStopDetails.stopDetails = { type: "content_filter", explanation: "Blocked by content filter." };
+			withStopDetails.errorMessage = "Provider finish_reason: content_filter";
+
+			const withoutStopDetails = makeMessage([], model);
+			withoutStopDetails.stopDetails = undefined;
+			withoutStopDetails.errorMessage = "Provider finish_reason: content_filter";
+
+			const recovery = new TurnRecovery(createHost(model, modelRegistry));
+			expect(recovery.isClassifierRefusal(withStopDetails)).toBe(true);
+			expect(recovery.isClassifierRefusal(withoutStopDetails)).toBe(true);
+			expect(recovery.isRetryableError(withStopDetails)).toBe(false);
+			expect(isProviderRefusalMessage(withStopDetails)).toBe(true);
+			expect(filterProviderReplayMessages([withStopDetails])).toEqual([]);
 		});
 	});
 });

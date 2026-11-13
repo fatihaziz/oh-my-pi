@@ -1794,7 +1794,10 @@ export class TurnRecovery {
 	isClassifierRefusal(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
 		const stopType = message.stopDetails?.type;
-		return stopType === "refusal" || stopType === "sensitive";
+		if (stopType === "refusal" || stopType === "sensitive" || stopType === "content_filter") return true;
+		const id = AIError.classifyMessage(message);
+		if (AIError.is(id, AIError.Flag.AccountPolicy)) return false;
+		return AIError.is(id, AIError.Flag.ContentBlocked);
 	}
 
 	#getRetryFallbackResolutionContext(): RetryFallbackResolutionContext {
@@ -2109,12 +2112,17 @@ export class TurnRecovery {
 		if (!cfgRetryModelFallback.get(this.#host.settings) || this.#host.modelFallbackDisabled?.()) return false;
 
 		const fallback = await this.#findKeyedRetryFallback(
-			currentSelector, currentModel, signal, describeUsageFallback(health, cfgRetryUsageReservePct.get(this.#host.settings)),
+			currentSelector,
+			currentModel,
+			signal,
+			describeUsageFallback(health, cfgRetryUsageReservePct.get(this.#host.settings)),
 		);
 		if (!fallback) {
 			if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
 			if (health.state === "depleted")
-				throw new Error(`${USAGE_PREFLIGHT_BLOCKED_PREFIX} usage depleted for ${currentSelector}; no eligible configured fallback.`);
+				throw new Error(
+					`${USAGE_PREFLIGHT_BLOCKED_PREFIX} usage depleted for ${currentSelector}; no eligible configured fallback.`,
+				);
 			return false;
 		}
 
@@ -2232,9 +2240,18 @@ export class TurnRecovery {
 				}
 				if (stale()) return undefined;
 				if (!apiKey) continue;
-				if (usageReason && !(await this.#approveRetryFallback(
-					currentSelector, candidate, candidateModel, usageReason, signal, candidateHealth,
-				))) continue;
+				if (
+					usageReason &&
+					!(await this.#approveRetryFallback(
+						currentSelector,
+						candidate,
+						candidateModel,
+						usageReason,
+						signal,
+						candidateHealth,
+					))
+				)
+					continue;
 				if (stale()) return undefined;
 				return { role, selector: candidate, apiKey };
 			}
@@ -3108,10 +3125,14 @@ export class TurnRecovery {
 							!sourceRateLimited &&
 							!classifierRefusal &&
 							!accountPolicyDenial &&
-							!((options?.fireworksFastFallback || options?.hardErrorFallback) && !this.isRetryableError(message)) &&
+							!(
+								(options?.fireworksFastFallback || options?.hardErrorFallback) &&
+								!this.isRetryableError(message)
+							) &&
 							!exceedsDelayCap(
 								usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs
-									? parsedRetryAfterMs : delayMs,
+									? parsedRetryAfterMs
+									: delayMs,
 							),
 					});
 				} catch (error) {

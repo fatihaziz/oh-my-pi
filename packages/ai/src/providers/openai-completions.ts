@@ -1374,6 +1374,7 @@ const streamOpenAICompletionsOnce = (
 			/** Server-declared repetition stop; classified after the finalization sweep. */
 			let repetitionStop: string | undefined;
 			let nativeFinishError: string | undefined;
+			let sawContentFilterFinish = false;
 			const applyUsagePayload = (rawUsage: object): void => {
 				output.usage = parseChunkUsage(
 					rawUsage,
@@ -1480,6 +1481,9 @@ const streamOpenAICompletionsOnce = (
 					output.errorMessage = nativeFinishError;
 					streamFinishedAt ??= Date.now();
 				} else if (choice.finish_reason) {
+					sawContentFilterFinish =
+						typeof choice.finish_reason === "string" &&
+						choice.finish_reason.trim().toLowerCase() === "content_filter";
 					const finishReasonResult = mapStopReason(choice.finish_reason);
 					output.stopReason = finishReasonResult.stopReason;
 					if (finishReasonResult.errorMessage) {
@@ -1854,6 +1858,19 @@ const streamOpenAICompletionsOnce = (
 					}),
 					AIError.create(AIError.Flag.ThinkingLoop),
 				);
+			}
+			if (output.stopReason === "error" && sawContentFilterFinish && !output.stopDetails) {
+				const explanation = output.content
+					.filter(
+						(block): block is Extract<(typeof output.content)[number], { type: "text" }> => block.type === "text",
+					)
+					.map(block => block.text)
+					.join("")
+					.trim();
+				output.stopDetails = {
+					type: "content_filter",
+					...(explanation ? { explanation } : {}),
+				};
 			}
 			if (output.stopReason === "error") {
 				throw new AIError.ProviderResponseError(output.errorMessage || "Provider returned an error stop reason", {

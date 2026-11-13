@@ -303,3 +303,77 @@ describe("cross-API thinking-block preservation (#3433/#3434)", () => {
 		expect(assistant.reasoning_text).toBeUndefined();
 	});
 });
+
+describe("classifier-cot-extraction and filterReasoningHistory demotion guard", () => {
+	function claudeRouterTarget(compat?: ModelSpec<"openai-completions">["compat"]): Model<"openai-completions"> {
+		return buildModel({
+			id: "cc/claude-opus-5-5",
+			name: "Claude Opus 5.5 via 9router",
+			api: "openai-completions",
+			provider: "9router",
+			baseUrl: "http://127.0.0.1:20129/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 16_384,
+			compat,
+		} satisfies ModelSpec<"openai-completions">);
+	}
+
+	function foreignGeminiTurn(thought: string, answer: string): AssistantMessage {
+		return {
+			role: "assistant",
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			model: "gemini-4-hydrogen-xhigh",
+			content: [
+				{ type: "thinking", thinking: thought },
+				{ type: "text", text: answer },
+			],
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 0,
+		};
+	}
+
+	it("drops foreign thinking instead of demoting when filterReasoningHistory is true", () => {
+		const target = claudeRouterTarget({ replayReasoningContent: false, filterReasoningHistory: true });
+		const messages: Message[] = [
+			userMessage("Step 1"),
+			foreignGeminiTurn("Secret Gemini thought 1", "Answer 1."),
+			userMessage("Step 2"),
+		];
+		const wire = convertMessages(target, { messages }, target.compat);
+		const assistant = findAssistantMessage(wire);
+		expect(assistant).toBeDefined();
+		expect(assistant?.reasoning_content).toBeUndefined();
+		expect(assistant?.content).toBe("Answer 1.");
+	});
+
+	it("caps foreign demoted thinking to the latest two turns on classifier-cot-extraction targets", () => {
+		const target = claudeRouterTarget({ replayReasoningContent: false });
+		const messages: Message[] = [
+			userMessage("Turn 1"),
+			foreignGeminiTurn("Older Gemini thought 1", "Answer 1."),
+			userMessage("Turn 2"),
+			foreignGeminiTurn("Recent Gemini thought 2", "Answer 2."),
+			userMessage("Turn 3"),
+			foreignGeminiTurn("Latest Gemini thought 3", "Answer 3."),
+			userMessage("Continue"),
+		];
+		const wire = convertMessages(target, { messages }, target.compat);
+		const assistants = wire.filter(m => m.role === "assistant");
+		expect(assistants).toHaveLength(3);
+		expect(assistants[0]?.content).toBe("Answer 1.");
+		expect(assistants[1]?.content).toBe("Recent Gemini thought 2\nAnswer 2.");
+		expect(assistants[2]?.content).toBe("Latest Gemini thought 3\nAnswer 3.");
+	});
+});
