@@ -8,7 +8,7 @@ Full plan inlined below; durable copy at `{{planFilePath}}` (identical content).
 Execute plan step-by-step with full tool access; MUST verify each step before next.
 NEVER re-read `{{planFilePath}}` while the inline plan is intact; the path is for subagent handoff and recovery only.
 {{#has tools "todo"}}
-Before execution: initialize todo tracking with `todo`.
+The native todo tracker is initialized from the final `## Todo` checklist; use the same items and completion conditions.
 After each completed step: immediately update `todo`.
 If `todo` fails: fix payload; retry before continuing.
 {{/has}}

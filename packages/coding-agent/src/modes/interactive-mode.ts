@@ -125,6 +125,7 @@ import {
 	type McpConnectionStatusEvent,
 } from "../mcp/startup-events";
 import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../plan-mode/approved-plan";
+import { extractApprovedTodo } from "../plan-mode/approved-todo";
 import {
 	isJudgmentBatchProgress,
 	JUDGMENT_BATCH_PROGRESS_EVENT_CHANNEL,
@@ -6792,10 +6793,70 @@ export class InteractiveMode implements InteractiveModeContext {
 			reviewOwner: object;
 		},
 	): Promise<boolean> {
+		const checklist = extractApprovedTodo(planContent);
+		if (!checklist) {
+			this.showError("Plan execution requires a non-empty final ## Todo checklist.");
+			return false;
+		}
+		const goalBlocker = (): string | undefined => {
+			if (!cfgGoalEnabled.get(this.session.settings)) return "Goal mode is disabled (goal.enabled).";
+			const state = this.session.getGoalModeState();
+			if (
+				this.goalModeEnabled ||
+				this.goalModePaused ||
+				(state?.goal && state.goal.status !== "complete" && state.goal.status !== "dropped")
+			)
+				return "An unfinished goal already exists; resume or drop it before approving this plan.";
+			return undefined;
+		};
+		const blocker = goalBlocker();
+		if (blocker) {
+			this.showError(`${blocker} Plan execution was not dispatched.`);
+			return false;
+		}
 		const previousPresentation = this.#planModePreviousToolPresentation ?? {
 			enabled: this.session.getEnabledToolNames().filter(name => !isMCPToolName(name)),
 			mounted: this.session.getMountedXdevToolNames().filter(name => !isMCPToolName(name)),
 			registered: this.session.getAllToolNames(),
+		};
+		const executionTools = previousPresentation.enabled.includes("read")
+			? previousPresentation.enabled
+			: [...previousPresentation.enabled, "read"];
+		let executionToolsRestored = false;
+		const restoreExecutionTools = async (): Promise<void> => {
+			if (executionToolsRestored) return;
+			await this.session.restoreNonMCPToolPresentation(
+				executionTools,
+				previousPresentation.mounted,
+				previousPresentation.registered,
+			);
+			executionToolsRestored = true;
+		};
+		let modeChangeRecorded = false;
+		const recordApprovedModeChange = (): void => {
+			if (modeChangeRecorded) return;
+			this.sessionManager.appendModeChange("none", { approvedPlanFilePath: options.planFilePath });
+			modeChangeRecorded = true;
+		};
+		let goalActivated = false;
+		const activatePlanGoal = async (): Promise<void> => {
+			if (goalActivated) return;
+			const reason = goalBlocker();
+			if (reason) throw new Error(reason);
+			await this.#enterGoalMode({ objective: checklist.objective, silent: true });
+			const goal = this.session.getGoalModeState();
+			if (!this.goalModeEnabled || !goal?.enabled || goal.goal.objective !== checklist.objective)
+				throw new Error("Native goal activation did not establish the approved checklist.");
+			const previousTodos = structuredClone(this.session.getTodoPhases());
+			try {
+				this.session.commitTodoPhases(checklist.phases);
+			} catch (error) {
+				this.session.setTodoPhases(previousTodos);
+				await this.session.goalRuntime.dropGoal();
+				await this.#exitGoalMode({ silent: true, reason: "dropped" });
+				throw error;
+			}
+			goalActivated = true;
 		};
 
 		// Mark the pending abort caused by the plan-mode → compaction transition as
@@ -6852,10 +6913,19 @@ export class InteractiveMode implements InteractiveModeContext {
 				compactOutcome = await this.handleCompactCommand(
 					undefined,
 					undefined,
-					outcome => this.#applyDeferredPlanModelTransition(outcome, options.executionModel),
+					async outcome => {
+						await restoreExecutionTools();
+						this.session.setPlanReferencePath(options.planFilePath);
+						recordApprovedModeChange();
+						await this.#applyDeferredPlanModelTransition(outcome, options.executionModel);
+						if (outcome !== "cancelled") await activatePlanGoal();
+					},
 					{ internalGuidance: compactionPrompt, readerModel },
 				);
 			}
+		} catch (error) {
+			this.showError(`Plan execution was not dispatched: ${error instanceof Error ? error.message : String(error)}`);
+			return false;
 		} finally {
 			// Unconditional clear. Idempotent: a no-op when the flag was never set
 			// (i.e., the !compactBeforeExecute branch), and a no-op when the flag
@@ -6866,16 +6936,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Restore the execution tool set, but force-enable `read` so the durable
 		// local:// plan remains available if the inline copy becomes unrecoverable.
-		const executionTools = previousPresentation.enabled.includes("read")
-			? previousPresentation.enabled
-			: [...previousPresentation.enabled, "read"];
-		await this.session.restoreNonMCPToolPresentation(
-			executionTools,
-			previousPresentation.mounted,
-			previousPresentation.registered,
-		);
+		await restoreExecutionTools();
 		this.session.setPlanReferencePath(options.planFilePath);
-		this.sessionManager.appendModeChange("none", { approvedPlanFilePath: options.planFilePath });
+		recordApprovedModeChange();
 		try {
 			const autosaved = await autosaveApprovedPlan({
 				settings: this.session.settings,
@@ -6925,6 +6988,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 			return false;
 		}
+		try {
+			if (!goalActivated) await activatePlanGoal();
+		} catch (error) {
+			this.showError(`Plan execution was not dispatched: ${error instanceof Error ? error.message : String(error)}`);
+			return false;
+		}
 
 		// Approved plans land in a fresh (or compacted) session whose first user-visible
 		// turn is the synthetic plan-approved prompt — that path bypasses the
@@ -6943,6 +7012,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			planFilePath: options.planFilePath,
 			planContent,
 			contextPreserved: options.preserveContext === true,
+			tools: this.session.getEnabledToolNames(),
 		});
 		// Close the review overlay only now — after the async title write and plan
 		// prompt are prepared, immediately before the execution turn is queued. The
