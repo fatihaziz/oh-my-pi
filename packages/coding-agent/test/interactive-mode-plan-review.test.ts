@@ -34,6 +34,7 @@ import { setKeybindings } from "@oh-my-pi/pi-tui";
 import { formatNumber, TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgPlanAutosave, cfgPlanAutosaveDir } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
+import { cfgGoalEnabled } from "@oh-my-pi/pi-coding-agent/goals/settings";
 
 /**
  * Matches the plan-approved synthetic-prompt dispatch. `#approvePlan` calls
@@ -324,7 +325,8 @@ describe("InteractiveMode plan review rendering", () => {
 
 	it("lets an extension approve the open review through the same execute path", async () => {
 		const planFilePath = "local://PLAN.md";
-		const planContent = "# Plan\n\nDo the thing.";
+		const planContent =
+			"# Plan\n\nDo the thing.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.";
 		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
@@ -377,7 +379,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nDo the thing.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
@@ -417,7 +422,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nDo the thing.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
@@ -466,7 +474,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nRun this on the slow tier.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nRun this on the slow tier.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		await mode.handlePlanModeCommand();
 		expect(session.getPlanModeState()?.enabled).toBe(true);
@@ -507,7 +518,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nDo the thing.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
@@ -542,7 +556,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nDo the thing.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
@@ -643,7 +660,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nDo the thing.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
@@ -724,7 +744,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nDo the thing.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
@@ -939,7 +962,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nDo the thing.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
@@ -1259,6 +1285,122 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(overlayHandle.hide).not.toHaveBeenCalled();
 	});
 
+	it("Refine with no annotations silently aborts approval and returns to the editor", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nbody");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		let streaming = false;
+		Object.defineProperty(session, "isStreaming", {
+			configurable: true,
+			get: () => streaming,
+		});
+		const abortSpy = vi.spyOn(session, "abort").mockImplementation(async () => {
+			streaming = false;
+		});
+		vi.spyOn(mode, "showPlanReview").mockImplementation(async () => {
+			streaming = true;
+			return "refine";
+		});
+		const statusSpy = vi.spyOn(mode, "showStatus");
+		const errorSpy = vi.spyOn(mode, "showError");
+		const startSpy = vi.spyOn(mode, "startPendingSubmission");
+		const onInput = vi.fn();
+		mode.onInputCallback = onInput;
+
+		await mode.handlePlanApproval({
+			planFilePath,
+			planExists: true,
+			title: "PLAN",
+		});
+
+		expect(abortSpy).toHaveBeenCalledTimes(1);
+		expect(statusSpy).toHaveBeenCalledWith("Refine plan: enter a follow-up prompt.");
+		expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("Failed to refine plan"));
+		expect(startSpy).not.toHaveBeenCalled();
+		expect(onInput).not.toHaveBeenCalled();
+		expect(session.isPlanInternalAbortPending).toBe(false);
+	});
+
+	it.each(["execute", "compact", "keep"] as const)(
+		"initializes the edited checklist as one native goal for %s",
+		async choice => {
+			const planFilePath = "local://goal-plan.md";
+			const resolved = resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			});
+			await Bun.write(resolved, "# Draft\n\n## Todo\n- [ ] Old item");
+			const objective =
+				"## Todo\n1. [ ] Build the feature; inspect the result.\n2. [ ] Verify the feature; confirm the check passes.";
+			const edited = `# Approved\n\n${objective}\n`;
+			mode.planModeEnabled = true;
+			mode.planModePlanFilePath = planFilePath;
+			vi.spyOn(session, "getEnabledToolNames").mockReturnValue(["read", "todo", "goal"]);
+			vi.spyOn(mode, "showPlanReview").mockImplementation(async (_plan, _title, _options, dialog) => {
+				dialog?.onPlanEdited?.(edited);
+				return choice;
+			});
+			vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+			vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+			const sent = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+			if (choice === "compact") {
+				vi.spyOn(mode, "handleCompactCommand").mockImplementation(async (_instructions, _mode, beforeFlush) => {
+					await beforeFlush?.("ok");
+					expect(session.getGoalModeState()?.goal.objective).toBe(objective);
+					expect(session.getTodoPhases()[0]?.tasks).toHaveLength(2);
+					return "ok";
+				});
+			}
+			await mode.handlePlanApproval({ planFilePath, planExists: true, title: "Plan" });
+			expect(session.getGoalModeState()?.goal.objective).toBe(objective);
+			expect(session.getTodoPhases()[0]?.tasks.map(task => task.content)).toEqual([
+				"Build the feature; inspect the result.",
+				"Verify the feature; confirm the check passes.",
+			]);
+			const approvedCall = sent.mock.calls.find(isPlanApprovedCall);
+			expect(approvedCall).toBeDefined();
+			expect(approvedCall?.[0]).toContain(
+				"The native todo tracker is initialized from the final `## Todo` checklist",
+			);
+			expect(sent.mock.calls.filter(isPlanApprovedCall)).toHaveLength(1);
+		},
+	);
+
+	it.each(["missing checklist", "goal disabled", "conflicting goal", "activation failure"])(
+		"does not dispatch an approved plan on %s",
+		async failure => {
+			const planFilePath = "local://blocked-plan.md";
+			const resolved = resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			});
+			const plan =
+				failure === "missing checklist" ? "# Plan\nNo checklist." : "# Plan\n\n## Todo\n- [ ] Execute and verify.";
+			await Bun.write(resolved, plan);
+			if (failure === "goal disabled") cfgGoalEnabled.set(session.settings, false);
+			if (failure === "conflicting goal") await session.goalRuntime.createGoal({ objective: "Existing work" });
+			if (failure === "activation failure")
+				vi.spyOn(session.goalRuntime, "createGoal").mockRejectedValue(new Error("goal activation denied"));
+			vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+			mode.planModeEnabled = true;
+			mode.planModePlanFilePath = planFilePath;
+			vi.spyOn(mode, "showPlanReview").mockResolvedValue("keep");
+			const sent = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+			const error = vi.spyOn(mode, "showError");
+			await mode.handlePlanApproval({ planFilePath, planExists: true, title: "Plan" });
+			expect(sent.mock.calls.filter(isPlanApprovedCall)).toHaveLength(0);
+			expect(error).toHaveBeenCalled();
+			expect(await Bun.file(resolved).text()).toBe(plan);
+			if (failure === "conflicting goal") expect(session.getGoalModeState()?.goal.objective).toBe("Existing work");
+		},
+	);
+
 	it("approves with in-overlay edits and mirrors them to the plan file", async () => {
 		const planFilePath = "local://PLAN.md";
 		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
@@ -1269,7 +1411,8 @@ describe("InteractiveMode plan review rendering", () => {
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
-		const edited = "# Plan\n\nedited body\n";
+		const edited =
+			"# Plan\n\nedited body\n\n## Todo\n\n- [ ] Implement the change; confirm behavior.\n- [ ] Verify the result with the focused check.\n";
 		vi.spyOn(mode, "showPlanReview").mockImplementation(async (_plan, _title, _options, dialogOptions) => {
 			dialogOptions?.onPlanEdited?.(edited);
 			return "execute";
@@ -1356,7 +1499,8 @@ describe("InteractiveMode plan review rendering", () => {
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
-		const planContent = "# Plan\n\nfinal approved body\n";
+		const planContent =
+			"# Plan\n\nfinal approved body\n\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.";
 		vi.spyOn(mode, "showPlanReview").mockImplementation(async (_plan, _title, _options, dialogOptions) => {
 			dialogOptions?.onPlanEdited?.(planContent);
 			return "execute";
@@ -1579,7 +1723,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nKeep context.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nKeep context.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
@@ -1595,7 +1742,9 @@ describe("InteractiveMode plan review rendering", () => {
 		});
 
 		expect(clear).not.toHaveBeenCalled();
-		expect(await Bun.file(resolvedFinalPlanPath).text()).toBe("# Plan\n\nKeep context.");
+		expect(await Bun.file(resolvedFinalPlanPath).text()).toBe(
+			"# Plan\n\nKeep context.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 		expect(prompt).toHaveBeenCalledWith(expect.any(String), {
 			synthetic: true,
 		});
@@ -1613,7 +1762,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nKeep context.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nKeep context.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
@@ -1667,7 +1819,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nbody");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nbody\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
 
@@ -1715,7 +1870,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nbody");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nbody\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
 
@@ -1756,7 +1914,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nbody");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nbody\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
 
@@ -1818,7 +1979,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nClear context.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nClear context.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
@@ -1861,7 +2025,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nRun this on the slow tier.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nRun this on the slow tier.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		await mode.handlePlanModeCommand();
 		expect(session.getPlanModeState()?.enabled).toBe(true);
@@ -1912,7 +2079,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nKeep executing on the planning tier.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nKeep executing on the planning tier.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		await mode.handlePlanModeCommand();
 		expect(session.model?.id).toBe(planModel.id);
@@ -1961,7 +2131,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nDifferent thinking on the same model.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nDifferent thinking on the same model.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		await mode.handlePlanModeCommand();
 		expect(session.model?.id).toBe(opus.id);
@@ -2005,7 +2178,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nPreserve the configured auto selector.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nPreserve the configured auto selector.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		await mode.handlePlanModeCommand();
 		expect(session.model?.id).toBe(opus.id);
@@ -2048,7 +2224,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nNo slider, restore default.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nNo slider, restore default.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		await mode.handlePlanModeCommand();
 		expect(session.model?.id).toBe(opus.id);
@@ -2083,7 +2262,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nCompact on the plan model.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nCompact on the plan model.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		await mode.handlePlanModeCommand();
 		expect(session.model?.id).toBe(planModel.id);
@@ -2120,7 +2302,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nCompact failure still dispatches.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nCompact failure still dispatches.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		await mode.handlePlanModeCommand();
 		expect(session.model?.id).toBe(planModel.id);
@@ -2163,7 +2348,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nCompact on plan model, execute on default.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nCompact on plan model, execute on default.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		await mode.handlePlanModeCommand();
 		expect(session.model?.id).toBe(planModel.id);
@@ -2218,7 +2406,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nCancel compaction, restore pre-plan model.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nCancel compaction, restore pre-plan model.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		await mode.handlePlanModeCommand();
 		expect(session.model?.id).toBe(planModel.id);
@@ -2265,7 +2456,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nTransition before the queue flushes.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nTransition before the queue flushes.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		await mode.handlePlanModeCommand();
 		expect(session.model?.id).toBe(planModel.id);
@@ -2303,7 +2497,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nExecute then edit.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nExecute then edit.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		await mode.handlePlanModeCommand();
 
@@ -2319,6 +2516,8 @@ describe("InteractiveMode plan review rendering", () => {
 
 		expect(mode.planModeEnabled).toBe(false);
 		expect(session.getPlanReferencePath()).toBe(planFilePath);
+		vi.spyOn(mode, "showHookConfirm").mockResolvedValue(true);
+		await mode.handleGoalModeCommand("drop");
 
 		await mode.handlePlanModeCommand();
 		expect(session.getPlanModeState()).toMatchObject({
@@ -2366,7 +2565,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nAutosave me.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nAutosave me.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		await mode.handlePlanModeCommand();
 		cfgPlanAutosave.set(session.settings, true);
@@ -2383,7 +2585,9 @@ describe("InteractiveMode plan review rendering", () => {
 		});
 
 		const saved = path.join(tempDir.path(), ".omp", "plans", "AUTOSAVE_PLAN.md");
-		expect(await Bun.file(saved).text()).toBe("# Plan\n\nAutosave me.");
+		expect(await Bun.file(saved).text()).toBe(
+			"# Plan\n\nAutosave me.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 		expect(status).toHaveBeenCalledWith(expect.stringContaining("Saved plan to"));
 	});
 
@@ -2393,7 +2597,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nAutosave me.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nAutosave me.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		await mode.handlePlanModeCommand();
 		cfgPlanAutosave.set(session.settings, true);
@@ -2422,7 +2629,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nCompact and execute.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nCompact and execute.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
@@ -2473,7 +2683,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nCompact, then execute on the pre-plan model.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nCompact, then execute on the pre-plan model.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		await mode.handlePlanModeCommand();
 		expect(session.model?.id).toBe(planModel.id);
@@ -2497,7 +2710,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nCancel mid-compact.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nCancel mid-compact.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
@@ -2536,7 +2752,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nCancel mid-compact.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nCancel mid-compact.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
 		const annotationState: PlanReviewAnnotationState = {
@@ -2579,7 +2798,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nFail mid-compact.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nFail mid-compact.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
@@ -2610,7 +2832,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nQueue race.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nQueue race.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
@@ -2660,7 +2885,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nBody.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nBody.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
@@ -2711,7 +2939,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nBody.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nBody.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
+		);
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
 		vi.spyOn(mode, "showPlanReview").mockResolvedValue("execute");
@@ -2734,7 +2965,10 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nKeep editing this artifact.");
+		await Bun.write(
+			resolvedPlanPath,
+			"# Plan\n\nKeep editing this artifact.\n\n## Todo\n- [ ] Implement the plan and verify the result.",
+		);
 
 		await mode.handlePlanModeCommand();
 		expect(session.getPlanModeState()?.planFilePath).toBe(planFilePath);
@@ -2752,6 +2986,8 @@ describe("InteractiveMode plan review rendering", () => {
 
 		expect(mode.planModeEnabled).toBe(false);
 		expect(session.getPlanReferencePath()).toBe(planFilePath);
+		vi.spyOn(mode, "showHookConfirm").mockResolvedValue(true);
+		await mode.handleGoalModeCommand("drop");
 
 		await mode.handlePlanModeCommand();
 		expect(session.getPlanModeState()).toMatchObject({
