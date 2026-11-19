@@ -6638,8 +6638,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			helpText?: string;
 			/** Refine with feedback from the editor or existing annotations. */
 			refine?: { id: string; label: string };
-			/** Save with the overlay's current plan text; the review stays open. */
-			onSave?: (content: string) => void;
+			/** Save with the overlay's current plan text; resolves the destination once written. */
+			onSave?: (content: string, signal: AbortSignal) => Promise<string | undefined>;
 			onExternalEditor?: () => void;
 			onPlanEdited?: (content: string) => void;
 			onFeedbackChange?: (feedback: string) => void;
@@ -6657,10 +6657,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		const { promise, resolve } = Promise.withResolvers<string | undefined>();
 		let settled = false;
 		let picked: string | undefined;
+		// This review's picker write, if any: a new review's finish can never abort it.
+		let saveController: AbortController | undefined;
 		const finish = (choice: string | undefined): void => {
 			if (settled) return;
 			settled = true;
 			picked = choice;
+			// A picker still open belongs to this review: abort its write before the
+			// choice resolves, so a losing save cannot write or report later.
+			const controller = saveController;
+			saveController = undefined;
+			controller?.abort();
 			if (this.#planReviewOwner === owner) {
 				this.#planReviewCancel = undefined;
 				this.#planReviewPick = undefined;
@@ -6673,6 +6680,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planReviewPick = choice => overlay.selectOption(choice);
 		const onClose = dialogOptions?.onClose;
 		this.#planReviewOnHide = onClose ? () => onClose(picked) : undefined;
+		const saveRequest = dialogOptions?.onSave;
 		const overlay = new PlanReviewOverlay(
 			planContent,
 			{
@@ -6688,7 +6696,35 @@ export class InteractiveMode implements InteractiveModeContext {
 			{
 				onPick: choice => finish(choice),
 				onCancel: () => finish(undefined),
-				onSave: dialogOptions?.onSave,
+				onSave: saveRequest
+					? content => {
+							// One picker per review; remote-lost picks above already settled it.
+							if (settled || this.#planReviewOwner !== owner || saveController) return;
+							const controller = new AbortController();
+							saveController = controller;
+							// The callback may be arbitrary (an extension hook, a picker): a
+							// synchronous throw must land in the same rejection path.
+							void Promise.try(() => saveRequest(content, controller.signal)).then(
+								destination => {
+									if (saveController === controller) saveController = undefined;
+									// A destination is a completed write; finish only while this
+									// review still owns the screen, so a stale save cannot close a newer review.
+									if (destination !== undefined && !settled && this.#planReviewOwner === owner) {
+										finish("save");
+									}
+								},
+								error => {
+									if (saveController === controller) saveController = undefined;
+									// The rejection came from this review settling; the picker is gone.
+									if (controller.signal.aborted) return;
+									if (this.#planReviewOwner !== owner) return;
+									this.showError(
+										`Failed to save plan: ${error instanceof Error ? error.message : String(error)}`,
+									);
+								},
+							);
+						}
+					: undefined,
 				onCopyPlan: content => void this.#copyPlanToClipboard(content),
 				onExternalEditor: dialogOptions?.onExternalEditor,
 				onAnnotationExternalEditor: (draft, commit) => void this.#openPlanAnnotationInExternalEditor(draft, commit),
@@ -6874,7 +6910,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	async #promptPlanSavePath(planContent: string, title: string): Promise<string | undefined> {
+	async #promptPlanSavePath(
+		planContent: string,
+		title: string,
+		cwd: string,
+		signal: AbortSignal,
+	): Promise<string | undefined> {
 		let suggestedPath = planSaveFileName(title);
 		let overlay: PlanSaveOverlay | undefined;
 		const excerpt = planSaveTitleExcerpt(planContent);
@@ -6882,10 +6923,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			void this.session
 				.generateTitle(excerpt, PLAN_FILENAME_SYSTEM_PROMPT)
 				.then(generatedTitle => {
-					if (!generatedTitle) return;
+					// A late suggestion updates only the hint: entered or accepted text stays.
+					if (!generatedTitle || signal.aborted) return;
 					suggestedPath = planSaveFileName(generatedTitle);
 					overlay?.setSuggestedPath(suggestedPath);
-					this.ui.requestRender();
 				})
 				.catch(error => {
 					logger.debug("plan-save: filename generation failed", {
@@ -6895,11 +6936,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		try {
 			const result = await this.showHookCustom<PlanSaveOverlayResult | undefined>(
-				(_tui, _theme, _keybindings, done) => {
-					overlay = new PlanSaveOverlay(suggestedPath, done);
+				(tui, _theme, _keybindings, done) => {
+					overlay = new PlanSaveOverlay(
+						suggestedPath,
+						path => {
+							signal.throwIfAborted();
+							return this.#savePlan(planContent, path, cwd, signal);
+						},
+						done,
+						() => tui.requestRender(),
+					);
 					return overlay;
 				},
-				{ overlay: true },
+				{ overlay: true, signal },
 			);
 			return result?.path;
 		} finally {
@@ -6908,38 +6957,50 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
-	 * The plan review's Save: write `planContent` to `presetPath`, or to a path the
-	 * operator picks (prefilled), and report it. The review stays open: its focus
-	 * comes back after the path prompt.
+	 * Write `planContent` to `selectedPath` under the originating `cwd`, resolving
+	 * the destination only after the write. A local save (`signal`) never
+	 * overwrites: an existing file or folder is an error the picker shows inline.
+	 * A remote save keeps its copy semantics and reports through the status line.
 	 */
-	async #savePlan(planContent: string, title: string, presetPath?: string): Promise<void> {
-		let selectedPath = presetPath;
-		if (selectedPath === undefined) {
-			try {
-				selectedPath = await this.#promptPlanSavePath(planContent, title);
-			} finally {
-				if (this.#planReviewOverlay) this.ui.setFocus(this.#planReviewOverlay);
-				this.ui.requestRender();
-			}
-		}
-		if (!selectedPath) return;
-
+	async #savePlan(
+		planContent: string,
+		selectedPath: string,
+		cwd: string,
+		signal?: AbortSignal,
+	): Promise<string> {
 		let destination: string;
 		try {
-			destination = resolveToCwd(selectedPath, this.sessionManager.getCwd());
+			destination = resolveToCwd(selectedPath, cwd);
 		} catch (error) {
-			this.showError(`Invalid plan save path: ${error instanceof Error ? error.message : String(error)}`);
-			return;
+			throw new Error(`Invalid plan save path: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		if (signal) {
+			signal.throwIfAborted();
+			try {
+				await fs.mkdir(path.dirname(destination), { recursive: true });
+				signal.throwIfAborted();
+				await fs.writeFile(destination, planContent, { flag: "wx" });
+			} catch (error) {
+				if (signal.aborted) throw error;
+				const code = (error as NodeJS.ErrnoException).code;
+				if (code === "EEXIST" || code === "EISDIR") {
+					throw new Error(`A file or folder already exists at ${destination}. Choose a different path.`);
+				}
+				throw new Error(
+					`Failed to save plan to ${destination}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+			return destination;
 		}
 		try {
 			await Bun.write(destination, planContent);
 		} catch (error) {
-			this.showError(
+			throw new Error(
 				`Failed to save plan to ${shortenPath(destination)}: ${error instanceof Error ? error.message : String(error)}`,
 			);
-			return;
 		}
 		this.showStatus(`Saved plan to ${shortenPath(destination)}`);
+		return destination;
 	}
 
 	async #openPlanInExternalEditor(planFilePath: string): Promise<void> {
@@ -8183,17 +8244,22 @@ export class InteractiveMode implements InteractiveModeContext {
 				: undefined,
 		};
 		const reviewId = request.reviewId;
-		// Save writes the plan as it stands (in-overlay edits, else the file) and leaves the review open.
-		const savePlan = async (content: string | undefined, presetPath?: string): Promise<void> => {
+		// Local saves resolve against the cwd that opened the review, not a later one.
+		const reviewCwd = this.sessionManager.getCwd();
+		// The destination the local picker wrote, for the visible chat result.
+		let savedPlanPath: string | undefined;
+		// Remote Save writes the plan as it stands to its default name and leaves the review open.
+		const savePlan = async (content: string | undefined, presetPath: string): Promise<void> => {
 			try {
 				const latestPlanContent = content ?? editedContent ?? (await this.#readPlanFile(planFilePath));
 				if (latestPlanContent === null) {
 					this.showError(`Plan file not found at ${planFilePath}`);
 					return;
 				}
-				await this.#savePlan(latestPlanContent, details.title, presetPath);
+				await this.#savePlan(latestPlanContent, presetPath, reviewCwd);
 			} catch (error) {
-				this.showError(`Failed to save plan: ${error instanceof Error ? error.message : String(error)}`);
+				// #savePlan formats the exact remote notice (invalid path or write failure).
+				this.showError(error instanceof Error ? error.message : String(error));
 			}
 		};
 		this.#pendingPlanReview = {
@@ -8225,7 +8291,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			{
 				helpText,
 				refine: { id: "refine", label: "Refine plan" },
-				onSave: content => void savePlan(content),
+				onSave: async (content, signal) => {
+					// The picker writes; the review closes only once it resolves a destination.
+					const destination = await this.#promptPlanSavePath(content, details.title, reviewCwd, signal);
+					if (destination !== undefined) savedPlanPath = destination;
+					return destination;
+				},
 				onExternalEditor: () => void this.#openPlanInExternalEditor(planFilePath),
 				onPlanEdited: content => {
 					editedContent = content;
@@ -8351,6 +8422,13 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.showError(`Failed to refine plan: ${error instanceof Error ? error.message : String(error)}`);
 			}
 			closePlanReview();
+			return;
+		}
+		if (choice === "save") {
+			// The picker already wrote and resolved the destination; close this review
+			// (owner-guarded) before showing the result, and leave the session untouched.
+			closePlanReview();
+			if (savedPlanPath !== undefined) this.showStatus(`Saved plan to ${savedPlanPath}`, { dim: false });
 			return;
 		}
 		closePlanReview();

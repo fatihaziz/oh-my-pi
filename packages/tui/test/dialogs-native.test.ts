@@ -8,6 +8,7 @@ import { AskDialogComponent, type ExtensionAskDialogQuestion } from "@oh-my-pi/p
 import { APPROVE_ARM_MS, ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import { LoginDialogComponent } from "@oh-my-pi/pi-tui/overlays/login-dialog";
 import { PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
+import { PlanSaveOverlay } from "@oh-my-pi/pi-tui/overlays/plan-save-overlay";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { PREVIEW_LIMITS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
@@ -1167,5 +1168,157 @@ describe("dialogs under a native surface", () => {
 		dialog.handleNativeEvent({ type: "action", key: "x", act: "cancel", mods: [] });
 		await expect(cancelled).rejects.toThrow("Login cancelled");
 		expect(onComplete).toHaveBeenCalledWith(false, "Login cancelled");
+	});
+});
+
+describe("plan save overlay", () => {
+	beforeAll(async () => {
+		const dark = await getThemeByName("dark");
+		if (!dark) throw new Error("dark theme unavailable");
+		setThemeInstance(dark);
+	});
+
+	beforeEach(() => {
+		setKeybindings(KeybindingsManager.inMemory());
+	});
+
+	afterEach(() => {
+		setKeybindings(KeybindingsManager.inMemory());
+	});
+
+	async function mount(save: (path: string) => Promise<string>, suggested = "AUTO_QA_PLAN.md", cols = 100) {
+		const done = vi.fn();
+		let overlay!: PlanSaveOverlay;
+		const h = await TspHarness.start(tui => {
+			overlay = new PlanSaveOverlay(suggested, save, done, () => tui.requestRender());
+			tui.showOverlay(overlay, { fullscreen: true, width: "100%", maxHeight: "100%" });
+			tui.setFocus(overlay);
+		}, { cols });
+		return { h, done, overlay };
+	}
+
+	const input = (h: TspHarness) => h.find(node => node.k === "input");
+	const hint = (h: TspHarness) =>
+		h.find(node => node.k === "text" && JSON.stringify(node.p ?? {}).includes("use suggested name"));
+	const errorText = (h: TspHarness) =>
+		h.find(node => node.k === "text" && JSON.stringify(node.p ?? {}).includes("already exists"));
+
+	it.each([48, 100])("Tab fills the suggested name without writing (%i columns)", async cols => {
+		const save = vi.fn(async (path: string) => path);
+		const { h, done } = await mount(save, "AUTO_QA_PLAN.md", cols);
+		try {
+			expect(input(h)?.p).toMatchObject({ text: "", cursor: 0, placeholder: "AUTO_QA_PLAN.md" });
+			expect(hint(h)).toBeDefined();
+			h.terminal.send("\t");
+			h.flush();
+			const field = input(h);
+			expect(field?.p).toMatchObject({ text: "AUTO_QA_PLAN.md", cursor: "AUTO_QA_PLAN.md".length });
+			expect(save).not.toHaveBeenCalled();
+			expect(done).not.toHaveBeenCalled();
+			expect(h.errors).toEqual([]);
+		} finally {
+			h.stop();
+		}
+	});
+
+	it("keeps a custom name through Tab and rejects a duplicate, then saves after editing", async () => {
+		interface DeferredWrite {
+			promise: Promise<string>;
+			resolve: (path: string) => void;
+			reject: (error: Error) => void;
+		}
+		const writes: DeferredWrite[] = [];
+		const save = vi.fn(() => {
+			const deferred = Promise.withResolvers<string>();
+			writes.push(deferred);
+			return deferred.promise;
+		});
+		const { h, done } = await mount(save);
+		try {
+			const field = input(h)!;
+			h.event({
+				ev: "edit",
+				sf: h.terminal.surface!,
+				id: field.id,
+				from: 0,
+				to: 0,
+				text: "custom-plan.md",
+				cursor: "custom-plan.md".length,
+				len: 0,
+			});
+			h.terminal.send("\t");
+			h.flush();
+			expect(input(h)?.p).toMatchObject({ text: "custom-plan.md", cursor: "custom-plan.md".length });
+
+			const saveButton = h.find(node => node.k === "button" && node.p?.text === "Save")!;
+			h.event({ ev: "action", sf: h.terminal.surface!, id: saveButton.id, act: "save" });
+			expect(save).toHaveBeenCalledTimes(1);
+			expect(save).toHaveBeenCalledWith("custom-plan.md");
+			// In flight: the editable input is gone and a repeated submit cannot start a second write.
+			expect(input(h)).toBeUndefined();
+			expect(h.find(node => node.k === "button" && node.p?.text === "Save")).toBeUndefined();
+			h.terminal.send(ENTER);
+			h.flush();
+			expect(save).toHaveBeenCalledTimes(1);
+
+			writes[0]?.reject(
+				new Error("A file or folder already exists at C:/tmp/custom-plan.md. Choose a different path."),
+			);
+			await h.until(() => errorText(h) !== undefined);
+			expect(save).toHaveBeenCalledTimes(1);
+			expect(errorText(h)).toBeDefined();
+			expect(done).not.toHaveBeenCalled();
+			expect(input(h)?.p).toMatchObject({ text: "custom-plan.md", cursor: "custom-plan.md".length });
+
+			const retry = input(h)!;
+			h.event({
+				ev: "edit",
+				sf: h.terminal.surface!,
+				id: retry.id,
+				from: 0,
+				to: "custom-plan.md".length,
+				text: "saved-plan.md",
+				cursor: "saved-plan.md".length,
+				len: "custom-plan.md".length,
+			});
+			h.event({
+				ev: "action",
+				sf: h.terminal.surface!,
+				id: h.find(node => node.k === "button" && node.p?.text === "Save")!.id,
+				act: "save",
+			});
+			expect(save).toHaveBeenCalledTimes(2);
+			writes[1]?.resolve("C:/tmp/saved-plan.md");
+			await h.until(() => done.mock.calls.length > 0);
+			expect(done).toHaveBeenCalledWith({ path: "C:/tmp/saved-plan.md" });
+			expect(h.errors).toEqual([]);
+		} finally {
+			h.stop();
+		}
+	});
+
+	it("Enter saves the default and Escape writes nothing", async () => {
+		const saved = vi.fn(async (path: string) => path);
+		const first = await mount(saved);
+		try {
+			first.h.terminal.send(ENTER);
+			first.h.flush();
+			await first.h.render();
+			expect(saved).toHaveBeenCalledWith("AUTO_QA_PLAN.md");
+			expect(first.done).toHaveBeenCalledWith({ path: "AUTO_QA_PLAN.md" });
+		} finally {
+			first.h.stop();
+		}
+
+		const second = await mount(async () => {
+			throw new Error("must not write");
+		});
+		try {
+			second.h.terminal.send("\x1b");
+			second.h.flush();
+			expect(second.done).toHaveBeenCalledWith(undefined);
+		} finally {
+			second.h.stop();
+		}
 	});
 });

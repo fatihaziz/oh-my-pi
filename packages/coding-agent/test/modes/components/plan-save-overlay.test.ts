@@ -16,7 +16,12 @@ describe("PlanSaveOverlay", () => {
 	});
 
 	it("renders the generated filename as a dim empty-input suggestion", () => {
-		const overlay = new PlanSaveOverlay("AUTO_QA_PLAN.md", () => {});
+		const overlay = new PlanSaveOverlay(
+			"AUTO_QA_PLAN.md",
+			async path => path,
+			() => {},
+			() => {},
+		);
 		overlay.focused = true;
 		const lines = overlay.render(80);
 
@@ -24,27 +29,33 @@ describe("PlanSaveOverlay", () => {
 		expect(lines.map(visibleWidth)).toEqual(Array(lines.length).fill(80));
 	});
 
-	it("uses the latest generated suggestion when entered empty", () => {
-		let result: PlanSaveOverlayResult | undefined;
-		const overlay = new PlanSaveOverlay("PLAN.md", value => {
-			result = value;
-		});
+	it("uses the latest generated suggestion when entered empty", async () => {
+		const settled = Promise.withResolvers<PlanSaveOverlayResult | undefined>();
+		const overlay = new PlanSaveOverlay(
+			"PLAN.md",
+			async path => path,
+			value => settled.resolve(value),
+			() => {},
+		);
 
 		overlay.setSuggestedPath("AUTO_QA_PLAN.md");
 		overlay.handleInput("\r");
 
-		expect(result).toEqual({ path: "AUTO_QA_PLAN.md" });
+		expect(await settled.promise).toEqual({ path: "AUTO_QA_PLAN.md" });
 	});
 
-	it("uses a typed path instead of the suggestion", () => {
-		let result: PlanSaveOverlayResult | undefined;
-		const overlay = new PlanSaveOverlay("AUTO_QA_PLAN.md", value => {
-			result = value;
-		});
+	it("uses a typed path instead of the suggestion", async () => {
+		const settled = Promise.withResolvers<PlanSaveOverlayResult | undefined>();
+		const overlay = new PlanSaveOverlay(
+			"AUTO_QA_PLAN.md",
+			async path => path,
+			value => settled.resolve(value),
+			() => {},
+		);
 
 		overlay.pasteText("plans/review.md");
 		overlay.handleInput("\r");
 
-		expect(result).toEqual({ path: "plans/review.md" });
+		expect(await settled.promise).toEqual({ path: "plans/review.md" });
 	});
 });

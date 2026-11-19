@@ -13,6 +13,9 @@ import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import type { HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
+import { PlanSaveOverlay } from "@oh-my-pi/pi-tui/overlays/plan-save-overlay";
+import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type {
@@ -176,7 +179,7 @@ describe("InteractiveMode plan review rendering", () => {
 		sharedTempDir?.removeSync();
 	});
 
-	function createSession(extensions: Extension[] = []) {
+	function createSession(extensions: Extension[] = [], composer?: Composer) {
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected claude-sonnet-4-5 to exist in registry");
@@ -199,7 +202,7 @@ describe("InteractiveMode plan review rendering", () => {
 				? new ExtensionRunner(extensions, new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry)
 				: undefined,
 		});
-		mode = new InteractiveMode(session, "test");
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, composer);
 	}
 
 	beforeEach(() => {
@@ -1628,56 +1631,206 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(await Bun.file(resolvedPlanPath).text()).toContain("edited body");
 	});
 
-	it("saves the overlay's plan to the chosen path and keeps the review and plan mode", async () => {
-		const planFilePath = "local://PLAN.md";
-		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
-			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
-			getSessionId: () => session.sessionManager.getSessionId(),
-		});
-		await Bun.write(resolvedPlanPath, "# Draft plan\n\noriginal body\n");
-		const previousGoal = await seedPreviousGoal("paused");
-		const modeJournal = session.sessionManager.getEntries().filter(entry => entry.type === "mode_change");
-		const drop = vi.spyOn(session.goalRuntime, "dropGoal");
-		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+	/**
+	 * Replaces the beforeEach fixture with one mounted on a real Composer and
+	 * VirtualTerminal, so keys travel the TUI input path and the viewport is the
+	 * rendered screen. No provider or session discovery runs.
+	 */
+	async function mountLiveMode(): Promise<{ term: VirtualTerminal; composer: Composer; screen: () => string }> {
+		mode.stop();
+		await session.dispose();
+		const term = new VirtualTerminal(80, 24);
+		const composer = new Composer({ terminal: term, preferences: { quiet: true } });
+		createSession([], composer);
+		composer.setRuntimeChildren([mode.chatContainer, mode.editorContainer]);
+		composer.start({ playWelcomeIntro: false });
+		mode.ui.setFocus(mode.editor);
+		await term.waitForRender();
+		const screen = () =>
+			term
+				.getViewport()
+				.map(row => Bun.stripANSI(row).trimEnd())
+				.join("\n");
+		return { term, composer, screen };
+	}
 
-		mode.planModeEnabled = true;
-		mode.planModePlanFilePath = planFilePath;
-		const edited = "# Auto QA\n\nSave the final plan.\n\n## Todo\n\n- run focused tests\n";
-		const saved = Promise.withResolvers<string>();
-		vi.spyOn(mode, "showStatus").mockImplementation(message => {
-			if (message.startsWith("Saved plan to")) saved.resolve(message);
-		});
-		vi.spyOn(mode, "showPlanReview").mockImplementation(async (_plan, _title, _options, dialogOptions) => {
-			// Save leaves the review up: the operator dismisses it afterwards.
-			dialogOptions?.onSave?.(edited);
-			await saved.promise;
-			return undefined;
-		});
-		const generateTitle = vi.spyOn(session, "generateTitle").mockResolvedValue("Auto QA");
-		const destination = path.join(tempDir.path(), "AUTO_QA_PLAN.md");
-		vi.spyOn(mode, "showHookCustom").mockResolvedValue({ path: "AUTO_QA_PLAN.md" });
-		const clear = vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+	/** Review rows: execute, compact, keep (enabled here), refine, then Save. */
+	async function openSavePicker(term: VirtualTerminal): Promise<PlanSaveOverlay> {
+		for (const key of ["\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\r"]) term.sendInput(key);
+		await term.waitForRender(() => mode.ui.getFocused() instanceof PlanSaveOverlay);
+		const picker = mode.ui.getFocused();
+		if (!(picker instanceof PlanSaveOverlay)) throw new Error("Save did not open the path picker");
+		return picker;
+	}
 
-		await mode.handlePlanApproval({
-			planFilePath,
-			planExists: true,
-			title: "DRAFT",
-		});
+	const squash = (value: string) => value.replace(/\s+/g, "");
 
-		expect(generateTitle).toHaveBeenCalledWith(
-			"# Auto QA\nSave the final plan.\n## Todo\n- run focused tests",
-			expect.any(String),
-		);
-		expect(await Bun.file(destination).text()).toBe(edited);
-		expect(await saved.promise).toContain("Saved plan to");
-		expect(clear).not.toHaveBeenCalled();
-		expect(mode.planModeEnabled).toBe(true);
-		expect(drop).not.toHaveBeenCalled();
-		expect(session.getGoalModeState()).toEqual(previousGoal);
-		expect(session.getGoalModeState()?.goal).toMatchObject({ id: previousGoal?.goal.id, status: "paused" });
-		expect(session.sessionManager.getEntries().filter(entry => entry.type === "mode_change")).toEqual(modeJournal);
-		expect(session.getTodoPhases()).toEqual(previousTodos);
-		expect(prompt.mock.calls.some(isPlanApprovedCall)).toBe(false);
+	it("saves the edited plan through the live picker, then returns to the same composer", async () => {
+		const { term, composer, screen } = await mountLiveMode();
+		try {
+			const planFilePath = "local://PLAN.md";
+			const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			});
+			await Bun.write(resolvedPlanPath, "# Draft plan\n\noriginal body\n");
+			const previousGoal = await seedPreviousGoal("paused");
+			const sessionId = session.sessionManager.getSessionId();
+			const modeJournal = session.sessionManager.getEntries().filter(entry => entry.type === "mode_change");
+			const draft = "Unsent first line\nunsent second line";
+			mode.editor.setText(draft);
+			mode.planModeEnabled = true;
+			mode.planModePlanFilePath = planFilePath;
+			const drop = vi.spyOn(session.goalRuntime, "dropGoal");
+			const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+			const clear = vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+			const generateTitle = vi.spyOn(session, "generateTitle").mockResolvedValue("Auto QA");
+			const events = observeExtensionEvents(session);
+			const edited = "# Auto QA\n\nSave the final plan.\n\n## Todo\n\n- run focused tests\n";
+			const destination = path.join(tempDir.path(), "AUTO_QA_PLAN.md");
+			const savedLine = `Saved plan to ${destination}`;
+
+			// First review: suggested name via Tab, then Enter.
+			const opened = Promise.withResolvers<void>();
+			const first = mode.handlePlanApproval(
+				{ planFilePath, planExists: true, title: "DRAFT" },
+				{
+					onOpened: () => {
+						const overlay = mode.ui.getFocused();
+						if (!(overlay instanceof PlanReviewOverlay)) throw new Error("Plan review did not take focus");
+						overlay.setPlanContent(edited);
+						opened.resolve();
+					},
+				},
+			);
+			await opened.promise;
+			await openSavePicker(term);
+			await term.waitForRender(() => screen().includes("AUTO_QA_PLAN.md"));
+			expect(screen()).toContain("Save plan");
+			expect(screen()).toContain("use suggested name");
+			term.sendInput("\t");
+			await term.waitForRender();
+			// Tab fills the name without submitting.
+			expect(mode.ui.getFocused()).toBeInstanceOf(PlanSaveOverlay);
+			expect(await Bun.file(destination).exists()).toBe(false);
+			term.sendInput("\r");
+			await first;
+			await term.waitForRender(() => squash(screen()).includes(squash(savedLine)));
+
+			expect(generateTitle).toHaveBeenCalledWith(
+				"# Auto QA\nSave the final plan.\n## Todo\n- run focused tests",
+				expect.any(String),
+			);
+			expect(await Bun.file(destination).text()).toBe(edited);
+			expect(squash(screen())).toContain(squash(savedLine));
+			expect(screen()).not.toContain("Save plan");
+			expect(mode.ui.hasOverlay()).toBe(false);
+			expect(mode.ui.getFocused()).toBe(mode.editor);
+			expect(mode.editor.getExpandedText()).toBe(draft);
+			expect(events.filter(event => event.type === "plan_review_resolved")).toEqual([
+				expect.objectContaining({ choice: "save", by: "local" }),
+			]);
+
+			// Second review: a manual name hits an existing file, then a corrected name saves.
+			const taken = path.join(tempDir.path(), "taken-plan.md");
+			await Bun.write(taken, "sentinel\n");
+			const reopened = Promise.withResolvers<void>();
+			const second = mode.handlePlanApproval(
+				{ planFilePath, planExists: true, title: "DRAFT" },
+				{ onOpened: () => reopened.resolve() },
+			);
+			await reopened.promise;
+			const picker = await openSavePicker(term);
+			for (const char of "taken-plan.md") term.sendInput(char);
+			term.sendInput("\r");
+			await term.waitForRender(() => screen().includes("already exists"));
+			expect(await Bun.file(taken).text()).toBe("sentinel\n");
+			expect(mode.ui.getFocused()).toBe(picker);
+			expect(screen()).toContain("A file or folder already exists");
+			expect(screen()).toContain("taken-plan.md");
+			for (const _ of "taken-plan.md") term.sendInput("\x7f");
+			for (const char of "custom-plan.md") term.sendInput(char);
+			term.sendInput("\r");
+			await second;
+			const custom = path.join(tempDir.path(), "custom-plan.md");
+			await term.waitForRender(() => squash(screen()).includes(squash(`Saved plan to ${custom}`)));
+
+			expect(await Bun.file(custom).text()).toBe(await Bun.file(resolvedPlanPath).text());
+			expect(await Bun.file(taken).text()).toBe("sentinel\n");
+			expect(squash(screen())).toContain(squash(`Saved plan to ${custom}`));
+			expect(mode.ui.hasOverlay()).toBe(false);
+			expect(mode.ui.getFocused()).toBe(mode.editor);
+			expect(mode.editor.getExpandedText()).toBe(draft);
+			expect(events.filter(event => event.type === "plan_review_resolved")).toEqual([
+				expect.objectContaining({ choice: "save", by: "local" }),
+				expect.objectContaining({ choice: "save", by: "local" }),
+			]);
+
+			// The session is the one that planned: nothing approved, prompted, cleared, or dropped.
+			expect(session.sessionManager.getSessionId()).toBe(sessionId);
+			expect(mode.planModeEnabled).toBe(true);
+			expect(mode.planModePlanFilePath).toBe(planFilePath);
+			expect(session.sessionManager.getEntries().filter(entry => entry.type === "mode_change")).toEqual(modeJournal);
+			expect(session.getGoalModeState()).toEqual(previousGoal);
+			expect(session.getTodoPhases()).toEqual(previousTodos);
+			expect(drop).not.toHaveBeenCalled();
+			expect(clear).not.toHaveBeenCalled();
+			expect(prompt).not.toHaveBeenCalled();
+		} finally {
+			composer.stop();
+		}
+	});
+
+	it("closes an open path picker without writing when an extension refines the review", async () => {
+		const { term, composer } = await mountLiveMode();
+		try {
+			const planFilePath = "local://PLAN.md";
+			const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			});
+			await Bun.write(resolvedPlanPath, "# Draft plan\n\nbody\n");
+			mode.planModeEnabled = true;
+			mode.planModePlanFilePath = planFilePath;
+			const draft = "Keep this draft";
+			mode.editor.setText(draft);
+			vi.spyOn(session, "generateTitle").mockResolvedValue("Auto QA");
+			const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+			// The refinement is the next planning submission, captured instead of reaching a provider.
+			const onInput = vi.fn();
+			mode.onInputCallback = onInput;
+			let refine: (() => boolean) | undefined;
+			const recorder = planReviewRecorder("remote", (event, ctx) => {
+				refine = () => ctx.resolvePlanReview(event.reviewId, "refine", { feedback: "Clarify rollback" });
+			});
+			await loadExtensions(recorder.extension);
+
+			const opened = Promise.withResolvers<void>();
+			const approval = mode.handlePlanApproval(
+				{ planFilePath, planExists: true, title: "DRAFT" },
+				{ onOpened: () => opened.resolve() },
+			);
+			await opened.promise;
+			await openSavePicker(term);
+			for (const char of "late-plan.md") term.sendInput(char);
+			expect(refine?.()).toBe(true);
+			await approval;
+			const resolved = await recorder.resolved;
+			await term.waitForRender();
+
+			expect(resolved).toMatchObject({ choice: "refine", by: "extension" });
+			expect(mode.ui.hasOverlay()).toBe(false);
+			expect(mode.ui.getFocused()).toBe(mode.editor);
+			expect(mode.editor.getExpandedText()).toBe(draft);
+			expect(await Bun.file(path.join(tempDir.path(), "late-plan.md")).exists()).toBe(false);
+			expect(await Bun.file(path.join(tempDir.path(), "AUTO_QA_PLAN.md")).exists()).toBe(false);
+			expect(onInput).toHaveBeenCalledTimes(1);
+			expect(onInput.mock.calls[0]?.[0]).toMatchObject({ text: "Clarify rollback" });
+			expect(prompt).not.toHaveBeenCalled();
+			expect(prompt.mock.calls.some(isPlanApprovedCall)).toBe(false);
+		} finally {
+			composer.stop();
+		}
 	});
 
 	it("carries pre-approval local artifacts into the fresh approve-and-execute session", async () => {

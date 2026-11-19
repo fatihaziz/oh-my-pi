@@ -114,7 +114,7 @@ Review options:
 - **Approve and compact context** — discussion distilled, then executes here.
 - **Approve and keep context** — executes here with exploration history.
 - **Refine plan**: with feedback, sends it into another planning turn without approving; without feedback, just returns to the composer without submitting.
-- **Save** — copies the plan to a chosen path; the review stays open.
+- **Save** — writes the plan to a path you enter (Tab accepts the suggested name; an existing file is refused with the reason), then returns to this chat and shows the saved path. Plan mode and the session stay as they are.
 
 All require self-contained file.
 </caution>
