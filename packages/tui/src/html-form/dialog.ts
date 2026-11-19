@@ -645,7 +645,18 @@ export class HtmlFormDialog implements Component, Focusable {
 		};
 	}
 
+	/** Stop auto-answer and keep the form open; false when untimed or already stopped. */
+	stopCountdown(): boolean {
+		if (this.#tick === undefined) return false;
+		this.#stopCountdown();
+		this.#changed();
+		this.#options.tui?.requestRender();
+		return true;
+	}
+
 	handleInput(data: string): void {
+		// Before the inactivity reset: the stop key must not first rearm the deadline.
+		if (getKeybindings().matches(data, "app.ask.stopCountdown") && this.stopCountdown()) return;
 		this.#resetCountdown();
 		this.#changed();
 		if (getKeybindings().matches(data, "app.ask.hide")) {
@@ -732,6 +743,10 @@ export class HtmlFormDialog implements Component, Focusable {
 	/** Clicks on folded fields, their pills, option rows and the action bar of the native description. */
 	handleNativeEvent(event: NativeUiEvent): void {
 		this.#options.claimKeys?.();
+		if (event.type === "action" && event.act === "stop-countdown") {
+			this.stopCountdown();
+			return;
+		}
 		this.#resetCountdown();
 		this.#changed();
 		if (this.#noteEditor) {
@@ -1074,6 +1089,8 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	#onTick(): void {
+		// A tick queued before stopCountdown() cleared the interval must not submit.
+		if (this.#tick === undefined) return;
 		const left = this.#deadline - Date.now();
 		this.#changed();
 		if (left <= 0) {
@@ -1538,7 +1555,9 @@ export class HtmlFormDialog implements Component, Focusable {
 	#titleText(): string {
 		const progress = this.#progress();
 		const title = `${this.#options.title ?? DEFAULT_TITLE}${progress ? ` · ${progress}` : ""}`;
-		return this.#remaining === undefined ? title : `${title} (${this.#remaining}s)`;
+		if (this.#remaining === undefined) return title;
+		const stopKey = editorKey("app.ask.stopCountdown");
+		return stopKey ? `${title} (${this.#remaining}s · ${stopKey} stop timer)` : `${title} (${this.#remaining}s)`;
 	}
 
 	/** `2 of 5 answered`, for forms of two or more questions the keyboard reaches. */
@@ -2173,9 +2192,19 @@ export class HtmlFormDialog implements Component, Focusable {
 	 * the first answer that needs a fix. An open note shows Keep and Save instead.
 	 */
 	#describeActions(): NativeNode {
+		const stopKey = getKeybindings().getKeys("app.ask.stopCountdown")[0];
+		const stopHint = editorKey("app.ask.stopCountdown");
+		const stopTimer =
+			this.#remaining !== undefined
+				? actionButton("Stop timer", "stop-countdown", {
+						...(stopKey ? { keys: stopKey } : {}),
+						title: `Keep the form open without auto-answer${stopHint ? `  ${stopHint}` : ""}`,
+					})
+				: null;
 		if (this.#noteEditor) {
 			return actionBar([
 				text(this.#noteEditHint(), { role: "omp.ask.note" }),
+				stopTimer,
 				actionButton("Keep", "cancel", { keys: "escape" }),
 				actionButton("Save", "save-note", { keys: "enter" }),
 			]);
@@ -2185,7 +2214,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		const [noteKey] = this.#noteKeys(stop.kind === "select");
 		return actionBar([
 			lead ? text([span(lead, "muted")], { truncate: "end", role: "omp.ask.summary" }) : null,
-			...(lead ? [null] : []),
+			...(stopTimer ? [stopTimer, null] : []),
 			actionButton("Cancel", "cancel"),
 			...(stop.kind === "option" || stop.kind === "select"
 				? [

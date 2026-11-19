@@ -676,6 +676,22 @@ export class AskDialogComponent implements Component {
 		this.#stopRingTick();
 		this.#panel.dispose();
 	}
+
+	/**
+	 * Stop auto-answer for this dialog and keep the question open; false when closed or untimed.
+	 * Every question tab shares the stopped state, and later keys never rearm it.
+	 */
+	stopCountdown(): boolean {
+		if (this.#closed || !this.#countdown) return false;
+		this.#countdown.dispose();
+		this.#countdown = undefined;
+		this.#timeoutExpired = false;
+		this.#remainingSeconds = undefined;
+		this.#countdownDeadline = 0;
+		this.#stopRingTick();
+		this.#requestRender();
+		return true;
+	}
 	/**
 	 * Toggle truncated question headers and option descriptions. Returns false
 	 * when there is nothing to expand so the global Ctrl+O listener can still
@@ -701,7 +717,10 @@ export class AskDialogComponent implements Component {
 	}
 
 	handleInput(keyData: string): void {
-		if (this.#closed || this.#promptActive) return;
+		if (this.#closed) return;
+		// Before the prompt guard and the reset below: stopping must work from a nested editor too.
+		if (getKeybindings().matches(keyData, "app.ask.stopCountdown") && this.stopCountdown()) return;
+		if (this.#promptActive) return;
 		// Reset the inactivity countdown on any key that reaches past the
 		// closed/prompt guards, matching HookSelector/HookInput semantics.
 		this.#countdown?.reset();
@@ -917,7 +936,18 @@ export class AskDialogComponent implements Component {
 	 */
 	#describeActions(ring: boolean): NativeNode {
 		const cancel = actionButton("Cancel", "cancel", { title: "Cancel without answering" });
-		const lead: NativeNode[] = this.#countdown ? [this.#describeTimer(this.#countdown, ring)] : [];
+		const lead: NativeNode[] = [];
+		if (this.#countdown) {
+			const stopKey = getKeybindings().getKeys("app.ask.stopCountdown")[0];
+			const stopHint = editorKey("app.ask.stopCountdown");
+			lead.push(
+				this.#describeTimer(this.#countdown, ring),
+				actionButton("Stop timer", "stop-countdown", {
+					...(stopKey ? { keys: stopKey } : {}),
+					title: `Keep the question open without auto-answer${stopHint ? `  ${stopHint}` : ""}`,
+				}),
+			);
+		}
 		const note = actionButton("Note", "note", {
 			keys: "n",
 			title: "Add a note to the highlighted answer  n",
@@ -939,6 +969,10 @@ export class AskDialogComponent implements Component {
 		if (event.type === "action") {
 			if (event.act === "cancel") {
 				this.#finishCancel();
+				return;
+			}
+			if (event.act === "stop-countdown") {
+				this.stopCountdown();
 				return;
 			}
 			if (event.act === "submit") {
@@ -1156,7 +1190,9 @@ export class AskDialogComponent implements Component {
 	}
 
 	#titleText(): string {
-		return this.#remainingSeconds === undefined ? "Ask" : `Ask (${this.#remainingSeconds}s)`;
+		if (this.#remainingSeconds === undefined) return "Ask";
+		const stopKey = editorKey("app.ask.stopCountdown");
+		return stopKey ? `Ask (${this.#remainingSeconds}s · ${stopKey} stop timer)` : `Ask (${this.#remainingSeconds}s)`;
 	}
 
 	/** The panel's title: {@link #titleText}, and with several questions how many have an answer (the native card's progress). */
@@ -1485,7 +1521,8 @@ export class AskDialogComponent implements Component {
 	}
 
 	#handleTimeout(): void {
-		if (this.#closed) return;
+		// A stopped countdown is gone; a timer callback queued before the stop must not answer.
+		if (this.#closed || !this.#countdown) return;
 		if (this.#promptActive) {
 			this.#timeoutExpired = true;
 			return;

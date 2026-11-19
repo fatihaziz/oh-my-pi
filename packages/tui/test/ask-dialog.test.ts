@@ -18,6 +18,7 @@ const CANCEL = "\x07";
 const SPACE = " ";
 const TAB = "\t";
 const SHIFT_TAB = "\x1b[Z";
+const F8 = "\x1b[19~";
 
 let darkTheme = await getThemeByName("dark");
 
@@ -982,6 +983,86 @@ describe("AskDialogComponent", () => {
 		expect(results[0].timedOut).toBeUndefined();
 		expect(results[1].selectedOptions).toEqual(["Option D"]);
 		expect(results[1].timedOut).toBe(true);
+	});
+
+	it("auto-submits a fresh 30s ask exactly once at 30,000 ms", () => {
+		vi.useFakeTimers();
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[{ id: "q1", question: "Pick?", options: [{ label: "A" }, { label: "B" }], recommended: 1 }],
+			{ onSubmit, onCancel: vi.fn() },
+			{ timeout: 30_000 },
+		);
+		expect(render(component)).toContain("F8 stop timer");
+		vi.advanceTimersByTime(29_999);
+		expect(onSubmit).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(1);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results[0]).toMatchObject({ selectedOptions: ["B"], timedOut: true });
+		vi.advanceTimersByTime(60_000);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+	});
+
+	it("F8 stops the countdown, keeps the ask open across navigation, and takes a manual answer", () => {
+		vi.useFakeTimers();
+		const onSubmit = vi.fn();
+		const onCancel = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{ id: "q1", question: "First?", options: [{ label: "A1" }, { label: "A2" }], recommended: 1 },
+				{ id: "q2", question: "Second?", options: [{ label: "B1" }, { label: "B2" }], recommended: 1 },
+			],
+			{ onSubmit, onCancel },
+			{ timeout: 30_000 },
+		);
+		vi.advanceTimersByTime(29_000);
+		component.handleInput(F8);
+		expect(render(component)).not.toContain("stop timer");
+		expect(render(component)).not.toMatch(/Ask \(\d+s/);
+		expect(component.stopCountdown()).toBe(false);
+		vi.advanceTimersByTime(61_000);
+		component.handleInput(TAB);
+		component.handleInput(SHIFT_TAB);
+		vi.advanceTimersByTime(61_000);
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(onCancel).not.toHaveBeenCalled();
+		component.handleInput(ENTER);
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		const results = onSubmit.mock.calls[0][0].results;
+		expect(results.map((r: { selectedOptions: string[] }) => r.selectedOptions)).toEqual([["A2"], ["B2"]]);
+		expect(results.every((r: { timedOut?: boolean }) => r.timedOut === undefined)).toBe(true);
+	});
+
+	it("F8 during a pending answer prompt drops the deferred timeout and keeps the typed answer", async () => {
+		vi.useFakeTimers();
+		const deferred = Promise.withResolvers<string | undefined>();
+		const onSubmit = vi.fn();
+		const onTimeout = vi.fn();
+		const component = new AskDialogComponent(
+			[{ id: "q1", question: "Only?", options: [{ label: "Fallback" }] }],
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn().mockReturnValue(deferred.promise) },
+			{ timeout: 1000, onTimeout },
+		);
+		component.handleInput(DOWN);
+		component.handleInput(ENTER);
+		vi.advanceTimersByTime(1000);
+		component.handleInput(F8);
+		deferred.resolve("typed");
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(onTimeout).not.toHaveBeenCalled();
+		expect(onSubmit.mock.calls.at(-1)?.[0].results[0]).toMatchObject({ customInput: "typed" });
+		expect(onSubmit.mock.calls.at(-1)?.[0].results[0].timedOut).toBeUndefined();
+	});
+
+	it("an untimed ask shows no stop hint and ignores F8", () => {
+		const component = new AskDialogComponent([{ id: "q1", question: "Approve?", options: [{ label: "Yes" }] }], {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+		});
+		expect(render(component)).not.toContain("stop timer");
+		expect(component.stopCountdown()).toBe(false);
 	});
 
 	it("keeps a single-question custom prompt answer when timeout expires while the prompt is pending", async () => {

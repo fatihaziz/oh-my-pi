@@ -701,6 +701,8 @@ export interface InteractiveModeContext {
 	handleBtwEscape(): boolean;
 	/** Gives the keys to the ask waiting above the composer; false when none waits. */
 	focusAsk(): boolean;
+	/** Stops the pending ask's auto-answer countdown, keeping it open and focus unchanged; false when none runs. */
+	stopAskCountdown(): boolean;
 	/** The composer talks to a `/btw` note (Tern): plain drafts go to its topic as follow-ups. */
 	readonly isBtwFocused: boolean;
 	/** Sends a draft to the focused `/btw` note's topic; false when no follow-up started. */

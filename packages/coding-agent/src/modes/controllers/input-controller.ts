@@ -524,6 +524,12 @@ export class InputController {
 				this.toggleToolOutputExpansion();
 				return { consume: true };
 			});
+			// `app.ask.stopCountdown` (F8) stops a pending ask's auto-answer wherever the keys are (composer,
+			// a form text field, a nested answer editor) without moving focus; untimed asks let it through.
+			this.ctx.ui.addInputListener(data => {
+				if (!this.ctx.keybindings.matches(data, "app.ask.stopCountdown")) return undefined;
+				return this.ctx.stopAskCountdown() ? { consume: true } : undefined;
+			});
 		}
 		if (!this.#inlineMouseListenerInstalled) {
 			this.#inlineMouseListenerInstalled = true;

@@ -10140,6 +10140,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#extensionUiController.focusAsk();
 	}
 
+	stopAskCountdown(): boolean {
+		return this.#extensionUiController.stopAskCountdown();
+	}
+
 	get isBtwFocused(): boolean {
 		return this.#btwController.isFocused();
 	}

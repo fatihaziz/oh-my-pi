@@ -913,6 +913,12 @@ export class ExtensionUiController {
 		return true;
 	}
 
+	/** Stops the pending ask's auto-answer countdown without taking focus; false when none runs. */
+	stopAskCountdown(): boolean {
+		const ask = this.#ask;
+		return ask instanceof HtmlFormDialog || ask instanceof AskDialogComponent ? ask.stopCountdown() : false;
+	}
+
 	/** Gives the keys to the composer (Tab past an ask's last stop, the ask closing). */
 	#focusComposer(): void {
 		this.ctx.ui.setFocus(this.ctx.editor);

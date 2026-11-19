@@ -164,7 +164,7 @@ describe("read tool column truncation vs hashline snapshot", () => {
 		expect(after).toBe(`intro\n${longLine}\nepilogue\n`);
 	});
 
-	it("rejects a PUT or CUT of a column-cut line until a raw read shows its tail", async () => {
+	it("refuses a CUT of a column-cut line; after a raw read a full-line PUT applies without a warning", async () => {
 		const filePath = path.join(tmpDir, "tail.txt");
 		const longLine = `note: ${"abcdefghij".repeat(80)} END-OF-LINE-TAIL`;
 		const original = `first\n${longLine}\nlast\n`;
@@ -173,32 +173,50 @@ describe("read tool column truncation vs hashline snapshot", () => {
 		const session = createSession(tmpDir);
 		cfgToolsOutputMaxColumns.set(session.settings, 768);
 		const readTool = new ReadTool(session);
-		const readText = textOutput(await readTool.execute("read-cut", { path: filePath }));
-		const { header } = extractHeader(readText);
-		const shownLine = readText
-			.split("\n")
-			.find(line => line.startsWith("2:"))!
-			.slice(2);
-		expect(shownLine.endsWith("…")).toBe(true);
-
+		const { header } = extractHeader(textOutput(await readTool.execute("read-cut", { path: filePath })));
 		const editTool = new EditTool(session, "hashline");
-		for (const body of [
-			`PUT 2.=2:\n+${shownLine.slice(0, -1).replace("note:", "NOTE:")}\n`,
-			`PUT 2.=2:\n+${shownLine.replace("note:", "NOTE:")}\n`,
-			"CUT 2.=2\n",
-		]) {
-			const result = await editTool.execute("edit-cut", { input: `${header}\n${body}` });
-			expect(textOutput(result)).toContain("tail.txt:2:raw");
-			expect(await fs.readFile(filePath, "utf8")).toBe(original);
-		}
+		const cut = await editTool.execute("edit-cut", { input: `${header}\nCUT 2.=2\n` });
+		expect(textOutput(cut)).toContain("tail.txt:2:raw");
+		expect(await fs.readFile(filePath, "utf8")).toBe(original);
 
 		const raw = textOutput(await readTool.execute("read-raw", { path: `${filePath}:2-2:raw` }));
 		expect(raw).toContain(longLine);
-		await editTool.execute("edit-full", {
+		const full = await editTool.execute("edit-full", {
 			input: `${header}\nPUT 2.=2:\n+${longLine.replace("note:", "NOTE:")}\n`,
 		});
+		expect(textOutput(full)).not.toContain("Applied as written");
 		expect(await fs.readFile(filePath, "utf8")).toBe(original.replace("note:", "NOTE:"));
 	});
+
+	for (const [label, keepEllipsis] of [
+		["without", false],
+		["with", true],
+	] as const) {
+		it(`applies a prefix-only PUT of a column-cut line ${label} its display ellipsis as written, with a warning`, async () => {
+			const filePath = path.join(tmpDir, `prefix-${label}.txt`);
+			const longLine = `note: ${"abcdefghij".repeat(80)} END-OF-LINE-TAIL`;
+			await fs.writeFile(filePath, `first\n${longLine}\nlast\n`);
+			const session = createSession(tmpDir);
+			cfgToolsOutputMaxColumns.set(session.settings, 768);
+			const readText = textOutput(await new ReadTool(session).execute("read-prefix", { path: filePath }));
+			const { header } = extractHeader(readText);
+			const shown = readText
+				.split("\n")
+				.find(line => line.startsWith("2:"))!
+				.slice(2);
+			expect(shown.endsWith("…")).toBe(true);
+			const authored = (keepEllipsis ? shown : shown.slice(0, -1)).replace("note:", "NOTE:");
+			const result = (await new EditTool(session, "hashline").execute("edit-prefix", {
+				input: `${header}\nPUT 2.=2:\n+${authored}\n`,
+			})) as AgentToolResult<{ diff?: string }>;
+			expect(result.isError).not.toBe(true);
+			expect(await fs.readFile(filePath, "utf8")).toBe(`first\n${authored}\nlast\n`);
+			const output = textOutput(result);
+			expect(output.match(/Applied as written:/g)?.length).toBe(1);
+			expect(output).toContain("replaced original lines 2, which were not displayed in full");
+			expect(result.details?.diff ?? "").toContain("END-OF-LINE-TAIL");
+		});
+	}
 
 	it("rejects a cut line in a multi-range read but allows edits to the other displayed range", async () => {
 		const filePath = path.join(tmpDir, "multi-cut.txt");
@@ -258,11 +276,10 @@ describe("read tool column truncation vs hashline snapshot", () => {
 		expect(await fs.readFile(filePath, "utf8")).toBe(`${longLine.replace("note:", "NOTE:")}\n`);
 	});
 
-	it("does not treat a clipped grep match as an editable full line", async () => {
+	it("applies a PUT over a clipped grep match on an ordinary file as written, with a warning", async () => {
 		const filePath = path.join(tmpDir, "grep-wide.txt");
 		const longLine = `note: ${"abcdefghij".repeat(80)} END-OF-LINE-TAIL`;
-		const original = `${longLine}\n`;
-		await fs.writeFile(filePath, original);
+		await fs.writeFile(filePath, `${longLine}\n`);
 		const session = createSession(tmpDir);
 		const grepText = textOutput(
 			await new GrepTool(session).execute("grep-cut", {
@@ -276,8 +293,11 @@ describe("read tool column truncation vs hashline snapshot", () => {
 		const result = await new EditTool(session, "hashline").execute("edit-grep-cut", {
 			input: `[${filePath}#${tag}]\nPUT 1.=1:\n+NOTE: cut\n`,
 		});
-		expect(textOutput(result)).toContain("grep-wide.txt:1:raw");
-		expect(await fs.readFile(filePath, "utf8")).toBe(original);
+		expect(result.isError).not.toBe(true);
+		const output = textOutput(result);
+		expect(output.match(/Applied as written:/g)?.length).toBe(1);
+		expect(output).toContain("grep-wide.txt replaced original lines 1, which were not displayed in full");
+		expect(await fs.readFile(filePath, "utf8")).toBe("NOTE: cut\n");
 	});
 
 	it("keeps a genuine blank line editable without exposing the EOF sentinel", async () => {
@@ -299,7 +319,7 @@ describe("read tool column truncation vs hashline snapshot", () => {
 		expect(await fs.readFile(filePath, "utf8")).toBe("first\nlast\n");
 	});
 
-	describe("local:// span replacements over wide clipped rows", () => {
+	describe("span replacements over wide clipped rows", () => {
 		const WIDE = new Map([
 			[132, 818],
 			[153, 1266],
@@ -461,6 +481,61 @@ describe("read tool column truncation vs hashline snapshot", () => {
 			expect(result.details?.errorKind).toBe("stale_tag");
 			expect(textOutput(result)).not.toContain("Applied as written");
 			expect(await fs.readFile(file, "utf8")).toBe(newer);
+		});
+
+		it("applies a multi-hunk span patch to an ordinary source file outside plan mode", async () => {
+			const session = createSession(tmpDir);
+			cfgToolsOutputMaxColumns.set(session.settings, 768);
+			const file = path.join(tmpDir, "source.txt");
+			await fs.writeFile(file, `${wideRows().join("\n")}\n`);
+			const readText = textOutput(await new ReadTool(session).execute("read-src", { path: `${file}:1-220` }));
+			const { tag, relPath } = extractHeader(readText);
+			const result = await run(
+				session,
+				`[${relPath}#${tag}]\nPUT 4.=4:\n+new-004\nPUT 132.=132:\n+new-132\nPUT 153.=154:\n+new-153\n+new-154\nPUT 191.=191:\n+new-191\n`,
+			);
+			expect(result.isError).not.toBe(true);
+			const expected = wideRows().flatMap((row, i) => {
+				const n = i + 1;
+				if (n === 154) return ["new-153", "new-154"];
+				if (n === 153) return [];
+				return [4, 132, 191].includes(n) ? [`new-${String(n).padStart(3, "0")}`] : [row];
+			});
+			expect(await fs.readFile(file, "utf8")).toBe(`${expected.join("\n")}\n`);
+			const output = textOutput(result);
+			expect(output).toContain(`[${relPath}#`);
+			expect(output).not.toContain(`[${relPath}#${tag}]`);
+			expect(output.match(/Applied as written:/g)?.length).toBe(1);
+			expect(output).toContain(
+				`Applied as written: ${relPath} replaced original lines 132, 153, 191, which were not displayed in full.`,
+			);
+			const diff = result.details?.diff ?? "";
+			for (const n of WIDE.keys()) expect(diff).toContain(`TAIL-${n}-END`);
+		});
+
+		it("accepts a grep-issued tag for a span over a clipped match", async () => {
+			const session = createSession(tmpDir);
+			const file = path.join(tmpDir, "grep-src.txt");
+			await fs.writeFile(file, `${wideRows().join("\n")}\n`);
+			await new GrepTool(session).execute("grep-src", { pattern: "TAIL-132-END", path: file });
+			const tag = getEditStore(session).headHash(file);
+			expect(tag).not.toBeNull();
+			const result = await run(session, `[${file}#${tag}]\nPUT 132.=132:\n+new-132\n`);
+			expect(result.isError).not.toBe(true);
+			expect(textOutput(result)).toContain("Applied as written");
+			expect((await fs.readFile(file, "utf8")).split("\n")[131]).toBe("new-132");
+		});
+
+		it("still refuses a working-tree span patch in plan mode", async () => {
+			const { session } = localSession();
+			const file = path.join(tmpDir, "tree.txt");
+			const text = `${wideRows().join("\n")}\n`;
+			await fs.writeFile(file, text);
+			const { tag } = await readTag(session, `${file}:1-220`);
+			const result = await run(session, `[${file}#${tag}]\nPUT 132.=132:\n+new-132\n`);
+			expect(result.isError).toBe(true);
+			expect(textOutput(result)).not.toContain("Applied as written");
+			expect(await fs.readFile(file, "utf8")).toBe(text);
 		});
 	});
 });

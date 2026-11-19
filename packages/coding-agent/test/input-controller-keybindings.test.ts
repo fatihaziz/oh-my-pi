@@ -90,6 +90,7 @@ async function createContext() {
 		"app.clipboard.pasteImage": ["ctrl+v"],
 		"app.tools.toggleVisibility": ["ctrl+shift+o"],
 		"app.tools.expand": ["ctrl+o"],
+		"app.ask.stopCountdown": ["f8"],
 	};
 	const customHandlers = new Map<string, () => void>();
 	const setActionKeys = vi.fn();
@@ -141,6 +142,8 @@ async function createContext() {
 	const handleBtwFollowUpKey = vi.fn(() => true);
 	const hasActiveBtw = vi.fn(() => false);
 	const handlesBtwBranchKey = vi.fn(() => false);
+	const stopAskCountdown = vi.fn(() => false);
+	const focusAsk = vi.fn(() => true);
 	const isGuidedGoalInterviewActive = vi.fn(() => false);
 	const editor: FakeEditor = {
 		setText(text: string) {
@@ -267,6 +270,8 @@ async function createContext() {
 		showError,
 		showStatus: vi.fn(),
 		isGuidedGoalInterviewActive,
+		stopAskCountdown,
+		focusAsk,
 		sessionManager: { getSessionId: () => "session", getLeafId: () => null },
 	} as unknown as InteractiveModeContext;
 
@@ -308,6 +313,8 @@ async function createContext() {
 			handleBtwFollowUpKey,
 			showError,
 			isGuidedGoalInterviewActive,
+			stopAskCountdown,
+			focusAsk,
 		},
 	};
 }
@@ -515,6 +522,26 @@ describe("InputController keybinding setup", () => {
 		expect(ctx.editor.pendingImageLinks).toEqual(["local://draft.png"]);
 		expect(editor.imageLinks).toEqual(["local://draft.png"]);
 		expect(editor.getText()).toBe("draft with image");
+	});
+
+	it("F8 stops a timed ask without touching the composer draft or focus", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		editor.setText("half-typed draft");
+		spies.stopAskCountdown.mockReturnValue(true);
+		new InputController(ctx).setupKeyHandlers();
+		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "\x1b[19~");
+		expect(result).toEqual({ consume: true });
+		expect(spies.stopAskCountdown).toHaveBeenCalledTimes(1);
+		expect(spies.focusAsk).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("half-typed draft");
+		expect(ctx.ui.getFocused()).toBe(editor);
+	});
+
+	it("lets F8 through when no ask countdown is running", async () => {
+		const { InputController, ctx, spies } = await createContext();
+		new InputController(ctx).setupKeyHandlers();
+		expect(dispatchInput(registeredInputListeners(spies.addInputListener), "\x1b[19~")).toBeUndefined();
+		expect(spies.stopAskCountdown).toHaveBeenCalledTimes(1);
 	});
 
 	it("routes b to branch a branchable /btw panel", async () => {

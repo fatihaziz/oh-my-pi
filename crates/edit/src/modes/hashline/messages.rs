@@ -941,9 +941,9 @@ pub fn wide_unseen_lines_message(section_path: &str, unseen_lines: &[u32]) -> St
 	)
 }
 
-/// A current-tag `local://` span replacement applied over rows a read cut:
-/// names the original rows whose unseen tails the replacement may have dropped.
-pub fn wide_local_put_warning(section_path: &str, unseen_lines: &[u32]) -> String {
+/// A current-tag span replacement applied over rows a read cut: names the
+/// original rows whose unseen tails the replacement may have dropped.
+pub fn wide_span_put_warning(section_path: &str, unseen_lines: &[u32]) -> String {
 	let ranges = format_line_ranges(unseen_lines);
 	format!(
 		"Applied as written: {section_path} replaced original lines {ranges}, which were not \

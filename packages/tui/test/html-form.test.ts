@@ -33,6 +33,7 @@ const TAB = "\t";
 const DOWN = "\x1b[B";
 const RIGHT = "\x1b[C";
 const ESC = "\x1b";
+const F8 = "\x1b[19~";
 
 const CX: DescribeContext = { cols: 100, reduceMotion: false, dark: true, supports: () => true, feature: () => true };
 
@@ -1128,6 +1129,59 @@ describe("html form", () => {
 			vi.advanceTimersByTime(2000);
 			expect(onTimeout).toHaveBeenCalledWith({ db: "pg", extras: ["ci"], region: "us", workers: 4, notes: "" }, []);
 			form.dispose();
+		});
+
+		it("F8 stops the countdown, keeps a typed note, and the form submits only by hand", () => {
+			vi.useFakeTimers();
+			const onTimeout = vi.fn();
+			const { form, onSubmit } = dialog(DB_FORM, { timeout: 30_000, onTimeout });
+			expect(plain(form).join("\n")).toContain("F8 stop timer");
+			form.handleInput("n");
+			form.handleInput("keep me");
+			vi.advanceTimersByTime(29_000);
+			form.handleInput(F8);
+			expect(form.debugState().remaining).toBeNull();
+			expect(form.stopCountdown()).toBe(false);
+			vi.advanceTimersByTime(61_000);
+			expect(onTimeout).not.toHaveBeenCalled();
+			expect(form.debugState().noteEdit).toBe("db=sqlite");
+			expect(plain(form).join("\n")).not.toContain("stop timer");
+			form.handleInput(ENTER); // saves the note
+			expect(form.optionNotes()).toMatchObject([{ name: "db", value: "sqlite", text: "keep me" }]);
+			form.handleInput(DOWN);
+			vi.advanceTimersByTime(61_000);
+			expect(onTimeout).not.toHaveBeenCalled();
+			expect(onSubmit).not.toHaveBeenCalled();
+			expect(form.optionNotes()).toMatchObject([{ text: "keep me" }]);
+			form.dispose();
+		});
+
+		it("natively, Stop timer shows only while timed (note editor included) and stops it", () => {
+			vi.useFakeTimers();
+			setNativeRendering(true);
+			try {
+				const onTimeout = vi.fn();
+				const { form } = dialog(DB_FORM, { timeout: 30_000, onTimeout });
+				// Without negotiated native buttons the action is an `omp.btn` row: a click act plus an F8 keycap.
+				const stopButton = () => allNodes(form.describe(CX)).find(node => node.key === "stop-countdown");
+				const first = stopButton();
+				expect(first?.p?.role).toBe("omp.btn");
+				expect(first?.p?.actions).toEqual({ click: "stop-countdown" });
+				expect(allNodes(first!).find(node => node.k === "kbd")?.p?.keys).toEqual(["f8"]);
+				form.handleInput("n");
+				expect(stopButton()?.p?.actions).toEqual({ click: "stop-countdown" });
+				form.handleNativeEvent({ type: "action", key: "x", act: "stop-countdown", mods: [] });
+				expect(stopButton()).toBeUndefined();
+				expect(form.debugState().noteEdit).toBe("db=sqlite");
+				vi.advanceTimersByTime(90_000);
+				expect(onTimeout).not.toHaveBeenCalled();
+				form.dispose();
+				const untimed = dialog(DB_FORM).form;
+				expect(allNodes(untimed.describe(CX)).some(node => node.key === "stop-countdown")).toBe(false);
+				untimed.dispose();
+			} finally {
+				setNativeRendering(false);
+			}
 		});
 
 		it("rows: stack every question; the focused one opens, the rest fold to their answer or first options", () => {

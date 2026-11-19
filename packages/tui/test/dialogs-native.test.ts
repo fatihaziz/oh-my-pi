@@ -191,6 +191,31 @@ describe("dialogs under a native surface", () => {
 		expect(buttons).toEqual(["note", "cancel", "submit"]);
 	});
 
+	it("ask: a timed card carries a Stop timer button that stops auto-answer and leaves the card open", () => {
+		vi.useFakeTimers();
+		try {
+			const onSubmit = vi.fn();
+			const onCancel = vi.fn();
+			const dialog = new AskDialogComponent(
+				QUESTIONS,
+				{ onSubmit, onCancel, onPrompt: async () => undefined },
+				{ timeout: 30_000 },
+			);
+			const buttons = () => all(dialog.describe(CX), node => node.p?.role === "omp.btn").map(button => button.key);
+			expect(buttons()).toEqual(["stop-countdown", "note", "cancel", "submit"]);
+			expect(find(dialog.describe(CX), node => node.key === "timer")).toBeDefined();
+			press(dialog, "stop-countdown");
+			expect(buttons()).toEqual(["note", "cancel", "submit"]);
+			expect(find(dialog.describe(CX), node => node.key === "timer")).toBeUndefined();
+			vi.advanceTimersByTime(90_000);
+			expect(onSubmit).not.toHaveBeenCalled();
+			expect(onCancel).not.toHaveBeenCalled();
+			dialog.dispose();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("ask: a pill picks from a folded question without opening it; the pick shows marked among its options", () => {
 		const dialog = new AskDialogComponent(WIDE, {
 			onSubmit: vi.fn(),
@@ -717,6 +742,8 @@ describe("dialogs under a native surface", () => {
 			onDeny: vi.fn(),
 		});
 		expect(find(plain.describe(), node => node.key === "expand")).toBeUndefined();
+		// Approvals never carry the ask countdown's stop control.
+		expect(find(plain.describe(), node => node.key === "stop-countdown")).toBeUndefined();
 	});
 
 	it("approval: styles covered and prompted compound bash segments distinctly in terminal and native views", () => {

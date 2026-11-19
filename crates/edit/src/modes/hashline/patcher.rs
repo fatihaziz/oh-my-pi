@@ -16,7 +16,7 @@ use super::{
 	messages::{
 		HEADTAIL_DRIFT_WARNING, RevealedLine, UnseenLinesReveal, path_recovered_from_tag_message,
 		stale_unseen_lines_message, unseen_lines_message, unverified_wide_lines_message,
-		wide_local_put_warning, wide_unseen_lines_message,
+		wide_span_put_warning, wide_unseen_lines_message,
 	},
 	mismatch::{
 		MismatchDetails, format_header_only_message, mismatch_error, tag_from_other_file_error,
@@ -489,7 +489,7 @@ fn assert_seen_lines(
 	text: &str,
 	current: Option<&str>,
 	max_columns: usize,
-	allow_wide_local_put: bool,
+	allow_wide_span_put: bool,
 ) -> Result<Option<String>, EditError> {
 	let Some(snapshot) = store.by_content(canonical, text) else {
 		// No retained read (restart, store eviction): the tag still matches the
@@ -547,13 +547,13 @@ fn assert_seen_lines(
 				section, &unseen, &guarded, expected, canonical, store, text, current, true,
 			));
 		}
-		// Session scratch drafts take a span replacement over rows the read
-		// cut, with a warning naming them; the rows stay unseen.
-		if allow_wide_local_put
+		// A current-tag span replacement over rows the read cut applies with a
+		// warning naming them; the rows stay unseen.
+		if allow_wide_span_put
 			&& unseen.iter().all(|&line| is_wide(line))
 			&& all_unseen_are_span_puts(section.edits()?, &unseen)
 		{
-			return Ok(Some(wide_local_put_warning(section.path.as_str(), &unseen)));
+			return Ok(Some(wide_span_put_warning(section.path.as_str(), &unseen)));
 		}
 		return Err(EditError::rejected(
 			Rejection::UnseenLines,
@@ -664,8 +664,8 @@ fn record_reply_provenance(
 
 /// `seen_line_guard` enables the displayed-line guard with its column cap
 /// (see [`crate::session::SessionConfig::max_columns`]); `None` disables it.
-/// `allow_wide_local_put` lets a current-tag `local://` span replacement over
-/// over-cap unseen rows apply with a warning instead of a rejection.
+/// `allow_wide_span_put` lets a current-tag span replacement over over-cap
+/// unseen rows apply with a warning instead of a rejection.
 pub(crate) fn apply_with_recovery(
 	section: &PatchSection,
 	canonical: &Path,
@@ -674,7 +674,7 @@ pub(crate) fn apply_with_recovery(
 	clipboard: &mut Clipboard,
 	store: &EditStore,
 	seen_line_guard: Option<usize>,
-	allow_wide_local_put: bool,
+	allow_wide_span_put: bool,
 ) -> Result<ApplyResult, EditError> {
 	let expected = section.file_hash.as_deref().unwrap_or_default();
 	let live_matches = file_hash(normalized).eq_ignore_ascii_case(expected);
@@ -727,7 +727,7 @@ pub(crate) fn apply_with_recovery(
 				normalized,
 				None,
 				max_columns,
-				allow_wide_local_put,
+				allow_wide_span_put,
 			)? {
 				resolve_warnings.push(advisory);
 			}
@@ -1017,14 +1017,9 @@ fn stage_section(
 			return Err(EditError::apply(format!("MV destination is the same as {}.", section.path)));
 		}
 	}
-	// Session scratch (`local://`) drafts may replace rows a read cut, with a
-	// warning; working-tree files, file ops and parser recoveries stay strict.
-	let allow_wide_local_put = parsed.file_op.is_none()
-		&& parsed.warnings.is_empty()
-		&& files.policy().url_target(&section.path).is_some_and(|url| {
-			url.split_once(':')
-				.is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("local"))
-		});
+	// Span replacements may cover rows a read cut, with a warning; file ops and
+	// parser recoveries stay strict.
+	let allow_wide_span_put = parsed.file_op.is_none() && parsed.warnings.is_empty();
 	let edits = parsed.edits.as_slice();
 	let mut apply = apply_with_recovery(
 		section,
@@ -1034,7 +1029,7 @@ fn stage_section(
 		clipboard,
 		store,
 		seen_line_guard,
-		allow_wide_local_put,
+		allow_wide_span_put,
 	)?;
 	// A REM section's cuts only fill registers; the file is deleted whole.
 	if matches!(parsed.file_op, Some(FileOp::Rem)) {

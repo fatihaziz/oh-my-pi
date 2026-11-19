@@ -38,6 +38,7 @@ interface AppKeybindings {
 	"app.tools.expand": true;
 	"app.tools.toggleVisibility": true;
 	"app.ask.hide": true;
+	"app.ask.stopCountdown": true;
 	"app.ask.note": true;
 	"app.approval.approve": true;
 	"app.editor.external": true;
@@ -149,6 +150,10 @@ export const KEYBINDINGS = {
 	"app.ask.hide": {
 		defaultKeys: "alt+h",
 		description: "Hide or show a pending ask dialog",
+	},
+	"app.ask.stopCountdown": {
+		defaultKeys: "f8",
+		description: "Stop a pending ask's auto-answer countdown and keep it open",
 	},
 	"app.ask.note": {
 		// Dropdowns keep printable keys for type-ahead, so they take the first non-printable key.
