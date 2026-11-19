@@ -645,6 +645,8 @@ describe("structured subagent primitive", () => {
 				expect(event).toMatchObject({
 					assignment: "resolved file contents",
 					context: "shared context",
+					spawnKey: "BoundWorker",
+					spawnLabel: "Inspect the target",
 					dispatchId: "BoundWorker",
 					parentToolCallId: "call-1",
 					index: 2,
@@ -673,7 +675,7 @@ describe("structured subagent primitive", () => {
 					invocationKind,
 					assignment: "resolved file contents",
 					context: "shared context",
-					identity: { id: "BoundWorker" },
+					identity: { id: "BoundWorker", label: "Inspect the target" },
 					parentToolCallId: "call-1",
 					index: 2,
 					retainArtifacts: true,

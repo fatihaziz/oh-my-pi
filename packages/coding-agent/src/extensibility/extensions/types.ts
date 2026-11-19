@@ -1245,6 +1245,7 @@ export interface BeforeSubagentSpawnEvent {
 	requestedModel?: string;
 	/** Stable per-spawn key for deterministic selection, when the caller supplies one. */
 	spawnKey?: string;
+	readonly spawnLabel?: string;
 	/** Final resolved child input, absent when an old persisted session cannot supply it. */
 	readonly assignment?: string;
 	readonly context?: string;
