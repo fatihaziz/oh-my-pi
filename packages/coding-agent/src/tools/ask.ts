@@ -651,11 +651,11 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			throw new ToolAbortError("Ask tool requires interactive mode");
 		}
 
-		const html = recoverAskHtml(params);
-		if (html === undefined) {
+		const originalHtml = recoverAskHtml(params);
+		if (originalHtml === undefined) {
 			return { content: [{ type: "text", text: INVALID_ASK_ERROR }], details: { answers: [] }, isError: true };
 		}
-		const form = parseHtmlForm(html);
+		const form = parseHtmlForm(originalHtml);
 		const questions = fieldQuestions(form);
 		const named = form.fields.filter(field => field.name);
 		if (named.length === 0) {
@@ -714,14 +714,14 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		// A deadline must never submit a radio question unanswered: preselect a judged recommendation,
 		// or wait for the user when no judge answers.
-		let html = params.html;
+		let html = originalHtml;
 		if (timeout !== undefined && recommendedTimeout !== undefined) {
 			const unrecommended = unrecommendedRadios(form);
 			if (unrecommended.length > 0) {
 				const picks = await this.#recommend(form, unrecommended, questions, dialogSignal);
 				if (dialogSignal.aborted) throw abortError();
 				if (picks) {
-					html = checkRadioValues(params.html, picks);
+					html = checkRadioValues(originalHtml, picks);
 					for (const field of unrecommended) {
 						const value = picks.get(field.name);
 						const option = field.options.find(candidate => !candidate.disabled && candidate.value === value);

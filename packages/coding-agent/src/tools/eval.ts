@@ -493,7 +493,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			throw new ToolError("Eval tool requires a session when not using proxy executor");
 		}
 		const session = this.session;
-		noteEvalPreludesNamed(params.code, params.language, session);
+		if (params.language !== "rust") {
+			noteEvalPreludesNamed(params.code, params.language, session);
+		}
 		const excludeWebP = webpExclusionForModel(session.getActiveModel?.());
 
 		const cellLanguage: EvalLanguage = params.language === "py" ? "python" : params.language;
