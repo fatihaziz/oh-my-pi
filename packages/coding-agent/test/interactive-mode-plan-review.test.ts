@@ -1338,7 +1338,13 @@ describe("InteractiveMode plan review rendering", () => {
 			await Bun.write(resolved, "# Draft\n\n## Todo\n- [ ] Old item");
 			const objective =
 				"## Todo\n1. [ ] Build the feature; inspect the result.\n2. [ ] Verify the feature; confirm the check passes.";
-			const edited = `# Approved\n\n${objective}\n`;
+			const edited = [
+				"# Approved",
+				"## Hard rules\nDo not change the source file.",
+				"## Approach\n### Milestone 1: Prepare\nBuild the feature.\n\n### Milestone 2: Verify\nRun the check.",
+				objective,
+				"",
+			].join("\n\n");
 			mode.planModeEnabled = true;
 			mode.planModePlanFilePath = planFilePath;
 			vi.spyOn(session, "getEnabledToolNames").mockReturnValue(["read", "todo", "goal"]);
@@ -1365,6 +1371,7 @@ describe("InteractiveMode plan review rendering", () => {
 			]);
 			const approvedCall = sent.mock.calls.find(isPlanApprovedCall);
 			expect(approvedCall).toBeDefined();
+			expect(approvedCall?.[0]).toContain(edited.trimEnd());
 			expect(approvedCall?.[0]).toContain(
 				"The native todo tracker is initialized from the final `## Todo` checklist",
 			);

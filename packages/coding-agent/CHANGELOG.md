@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `/plan <prompt>` pauses an active goal without dropping it or losing the supplied prompt and images.
+- Plan mode now explains when to use shared rules and milestone gates, and how to report a blocker without closing unfinished tasks.
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes

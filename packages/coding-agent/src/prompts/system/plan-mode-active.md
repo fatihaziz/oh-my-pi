@@ -43,6 +43,8 @@ Resolve unknowns by discovery, not questions.
 
 Every question MUST alter plan or resolve load-bearing choice; batch. NEVER ask what exploration answers or filler.
 
+If planning gets stuck, name the missing fact, decision, or permission. Try a read-only route that can resolve it and continue independent planning. If evidence establishes a fallback, record it in Approach with its trigger. If only the user can resolve a material prerequisite, use the available question tool for that issue only, not for plan approval. Do not guess or propose an incomplete plan.
+
 {{#if reentry}}
 ## Re-entry
 
@@ -82,7 +84,8 @@ New request primary; existing plan reference only. NEVER reconcile old plan whil
 Scannable markdown; depth follows change: one-file fix → few bullets; cross-cutting change → ordered behavior steps.
 
 - **Context** — literal ask, need, intended end state; 2–4 sentences. Every requested outcome maps to a step; add nothing beyond ask.
-- **Approach** — load-bearing ordered change steps. Order for a building tree and passing existing tests after each; state dependencies and independencies. Group by behavior, NEVER file. Each step:
+- **Hard rules** (optional): Use `## Hard rules` only for non-negotiable constraints that govern more than one step. State each once as a concrete boundary or stop condition. Put a localized constraint at the affected step. Omit this section if all rules are local or it would only repeat tool policy.
+- **Approach**: Order the behavior changes and name dependencies. When later work depends on a distinct handoff or stop/go check, use `### Milestone N: <outcome>` headings inside Approach. Each milestone states what must be true before the next starts and points to the applicable check in Verification. Omit milestones for a short, linear change. Do not add a second milestone checklist. Each step:
   - Concrete edit: verb, exact target, new behavior; NEVER merely area to “update”/“handle”.
   - Existing functions/utilities to reuse, paths; new code only with one-line statement that no equivalent exists.
   - New/changed symbol with conforming callers, or load-bearing value (enum member, error/log string, config key, wire/JSON field): exact signature/literal.
@@ -92,7 +95,7 @@ Scannable markdown; depth follows change: one-file fix → few bullets; cross-cu
 - **Critical files & anchors** — ≤5 files disambiguating non-obvious work: path, symbol/region, one-line reason. Line numbers hints; implementer rereads before edit. Omit Approach-obvious files.
 - **Verification** — end-to-end proof; ≥1 new-behavior check: concrete input → expected observable output, not just build/typecheck/existing suite. Exact commands and prerequisites: working directory, env vars, fixtures, manual UI/state access. Tie risky-step checks to steps.
 - **Assumptions & contingencies** — only user-overridable decisions. NEVER put implementer decisions here; they belong in Approach. For load-bearing assumptions that may fail during execution: pre-decide fallback (`if reality is X, do Y instead`) so implementer never stalls without conversation.
-- **Todo** — final section MUST be `## Todo` (or `## Tasks`), using either checkboxes (`- [ ] ...` / `1. [ ] ...`) or a numbered/bulleted list (`1. ...` / `- ...`) of actionable implementation and verification steps with concrete completion checks. Maintain it in new and revised plans; preserve every approved step and condition.
+- **Todo** — final section MUST be `## Todo` (or `## Tasks`), using either checkboxes (`- [ ] ...` / `1. [ ] ...`) or a numbered/bulleted list (`1. ...` / `- ...`) of actionable implementation and verification steps with concrete completion checks. Maintain it in new and revised plans; preserve every approved step and condition. Keep only plan tasks in that final section. Put milestone headings, shared constraints, and blocker instructions before it.
 
 Cut decision-free material: restated invariants, unaffected behavior, mechanical repetition, narration. Specify what implementer would otherwise invent.
 
