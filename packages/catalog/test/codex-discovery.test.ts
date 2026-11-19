@@ -15,6 +15,33 @@ import { type Model, modelKind, type ModelSpec } from "@oh-my-pi/pi-catalog/type
 import { resolveProviderModelReference } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 
 describe("Codex model discovery", () => {
+	it("discovers GPT-6.2 Astra when both Codex client version fields support it", async () => {
+		const supportsAstra = (version: string | null): boolean => {
+			if (!version || !/^\d+\.\d+\.\d+$/.test(version)) return false;
+			const [major = 0, minor = 0] = version.split(".").map(Number);
+			return major > 0 || (major === 0 && minor >= 169);
+		};
+		const fetchFn: typeof fetch = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				const url = new URL(input instanceof Request ? input.url : input);
+				const queryVersion = url.searchParams.get("client_version");
+				const headerVersion = new Headers(init?.headers).get("version");
+				const models = supportsAstra(queryVersion) && supportsAstra(headerVersion) ? [{ slug: "gpt-6.2-astra" }] : [];
+				return Response.json({ models });
+			},
+			{ preconnect() {} },
+		);
+
+		const result = await fetchCodexModels({ accessToken: "test-token", fetchFn });
+		expect(result?.models.some(model => model.id === "gpt-6.2-astra")).toBe(true);
+
+		const oldResult = await fetchCodexModels({ accessToken: "test-token", clientVersion: "0.159.0", fetchFn });
+		expect(oldResult?.models).toEqual([]);
+
+		const futureResult = await fetchCodexModels({ accessToken: "test-token", clientVersion: "1.0.0", fetchFn });
+		expect(futureResult?.models.some(model => model.id === "gpt-6.2-astra")).toBe(true);
+	});
+
 	it("normalizes optional maximum context windows separately from the default window", async () => {
 		const result = await fetchCodexModels({
 			accessToken: "test-token",
