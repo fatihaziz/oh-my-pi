@@ -175,13 +175,13 @@ describe("InteractiveMode plan review rendering", () => {
 		sharedTempDir?.removeSync();
 	});
 
-	beforeEach(() => {
-		tempDir = TempDir.createSync("@pi-plan-review-");
+	function createSession(extensions: Extension[] = []) {
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected claude-sonnet-4-5 to exist in registry");
 		}
 
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		session = new AgentSession({
 			agent: new Agent({
 				initialState: {
@@ -191,11 +191,19 @@ describe("InteractiveMode plan review rendering", () => {
 					messages: [],
 				},
 			}),
-			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			sessionManager,
 			settings: Settings.isolated(),
 			modelRegistry,
+			extensionRunner: extensions.length
+				? new ExtensionRunner(extensions, new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry)
+				: undefined,
 		});
 		mode = new InteractiveMode(session, "test");
+	}
+
+	beforeEach(() => {
+		tempDir = TempDir.createSync("@pi-plan-review-");
+		createSession();
 	});
 
 	afterEach(async () => {
@@ -227,6 +235,19 @@ describe("InteractiveMode plan review rendering", () => {
 		});
 		await mode.initHooksAndCustomTools();
 		return runner;
+	}
+
+	const previousTodos = [{ name: "Existing work", tasks: [{ content: "Old task", status: "pending" as const }] }];
+	async function seedPreviousGoal(status: "active" | "paused" | "budget-limited" = "active") {
+		const state = await session.goalRuntime.createGoal({ objective: "Existing work" });
+		if (status === "paused") await session.goalRuntime.pauseGoal();
+		if (status === "budget-limited") {
+			session.setGoalModeState({ ...state, goal: { ...state.goal, status, tokenBudget: 1, tokensUsed: 1 } });
+		}
+		mode.goalModeEnabled = status !== "paused";
+		mode.goalModePaused = status === "paused";
+		session.commitTodoPhases(structuredClone(previousTodos));
+		return structuredClone(session.getGoalModeState());
 	}
 
 	it("exits empty plan mode without confirmation", async () => {
@@ -336,7 +357,8 @@ describe("InteractiveMode plan review rendering", () => {
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
 		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 7320, contextWindow: 10000, percent: 73.2 });
-		const clear = vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+		const originSessionId = session.sessionManager.getSessionId();
+		const clear = vi.spyOn(mode, "handleClearCommand");
 		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 		let answered: boolean | undefined;
 		const recorder = planReviewRecorder("remote", (event, ctx) => {
@@ -352,7 +374,7 @@ describe("InteractiveMode plan review rendering", () => {
 		);
 		expect(answered).toBe(true);
 		expect(requested).toMatchObject({
-			sessionId: session.sessionManager.getSessionId(),
+			sessionId: originSessionId,
 			title: "PLAN",
 			planFilePath,
 			planContent,
@@ -387,7 +409,6 @@ describe("InteractiveMode plan review rendering", () => {
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
 		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 9600, contextWindow: 10000, percent: 96 });
-		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 		const refused: boolean[] = [];
 		let stayedOpen = false;
@@ -430,7 +451,6 @@ describe("InteractiveMode plan review rendering", () => {
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
 		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 9600, contextWindow: 10000, percent: 96 });
-		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 		const opened = Promise.withResolvers<PlanReviewRequestedEvent>();
 		let keepAfterMutation: boolean | undefined;
@@ -563,7 +583,6 @@ describe("InteractiveMode plan review rendering", () => {
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
-		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 		const requestedEvents: PlanReviewRequestedEvent[] = [];
 		const resolvedEvents: PlanReviewResolvedEvent[] = [];
@@ -755,7 +774,6 @@ describe("InteractiveMode plan review rendering", () => {
 			(component as PlanReviewOverlay).handleInput("\n");
 			return { hide: vi.fn() } as never;
 		});
-		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 		let remoteAccepted: boolean | undefined;
 		const events = observeExtensionEvents(session, event => {
@@ -973,7 +991,6 @@ describe("InteractiveMode plan review rendering", () => {
 			(component as PlanReviewOverlay).handleInput("\n");
 			return { hide: vi.fn() } as never;
 		});
-		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 		const events = observeExtensionEvents(session);
 
@@ -1115,7 +1132,9 @@ describe("InteractiveMode plan review rendering", () => {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
-		await Bun.write(resolvedPlanPath, "# Plan\n\nbody");
+		await Bun.write(resolvedPlanPath, "# Plan\n\nbody\n\n## Todo\n- Implement the plan.");
+		const previousGoal = await seedPreviousGoal("paused");
+		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
@@ -1140,6 +1159,9 @@ describe("InteractiveMode plan review rendering", () => {
 
 		expect(startSpy).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining("needs detail") }));
 		expect(onInput).toHaveBeenCalledTimes(1);
+		expect(session.getGoalModeState()).toEqual(previousGoal);
+		expect(session.getTodoPhases()).toEqual(previousTodos);
+		expect(prompt.mock.calls.some(isPlanApprovedCall)).toBe(false);
 	});
 
 	it("promotes the reviewed plan path into plan-mode state before refining", async () => {
@@ -1324,9 +1346,13 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(session.isPlanInternalAbortPending).toBe(false);
 	});
 
-	it.each(["execute", "compact", "keep"] as const)(
-		"initializes the edited checklist as one native goal for %s",
-		async choice => {
+	it.each([
+		["execute", "active"],
+		["compact", "budget-limited"],
+		["keep", "paused"],
+	] as const)(
+		"initializes the edited checklist as one native goal for %s, replacing a %s goal",
+		async (choice, status) => {
 			const planFilePath = "local://goal-plan.md";
 			const resolved = resolveLocalUrlToPath(planFilePath, {
 				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
@@ -1342,6 +1368,8 @@ describe("InteractiveMode plan review rendering", () => {
 				objective,
 				"",
 			].join("\n\n");
+			const previousGoal = await seedPreviousGoal(status);
+			const drop = vi.spyOn(session.goalRuntime, "dropGoal");
 			mode.planModeEnabled = true;
 			mode.planModePlanFilePath = planFilePath;
 			vi.spyOn(session, "getEnabledToolNames").mockReturnValue(["read", "todo", "goal"]);
@@ -1350,10 +1378,24 @@ describe("InteractiveMode plan review rendering", () => {
 				return choice;
 			});
 			vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
-			vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 			const sent = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+			const originSessionId = session.sessionManager.getSessionId();
+			if (choice === "execute") {
+				const newSession = session.sessionManager.newSession.bind(session.sessionManager);
+				vi.spyOn(session.sessionManager, "newSession").mockImplementation(async opts => {
+					expect(session.sessionManager.getSessionId()).toBe(originSessionId);
+					expect(drop).toHaveBeenCalledTimes(1);
+					expect(session.getGoalModeState()).toBeUndefined();
+					expect(session.sessionManager.getEntries().at(-1)).toMatchObject({ type: "mode_change", mode: "none" });
+					expect(session.getTodoPhases()).toEqual(previousTodos);
+					return newSession(opts);
+				});
+			}
 			if (choice === "compact") {
 				vi.spyOn(mode, "handleCompactCommand").mockImplementation(async (_instructions, _mode, beforeFlush) => {
+					expect(session.getGoalModeState()).toEqual(previousGoal);
+					expect(session.getTodoPhases()).toEqual(previousTodos);
+					expect(drop).not.toHaveBeenCalled();
 					await beforeFlush?.("ok");
 					expect(session.getGoalModeState()?.goal.objective).toBe(objective);
 					expect(session.getTodoPhases()[0]?.tasks).toHaveLength(2);
@@ -1361,7 +1403,11 @@ describe("InteractiveMode plan review rendering", () => {
 				});
 			}
 			await mode.handlePlanApproval({ planFilePath, planExists: true, title: "Plan" });
+			expect(drop).toHaveBeenCalledTimes(1);
+			expect(session.sessionManager.getSessionId() !== originSessionId).toBe(choice === "execute");
+			expect(session.getGoalModeState()?.goal.id).not.toBe(previousGoal?.goal.id);
 			expect(session.getGoalModeState()?.goal.objective).toBe(objective);
+			expect(session.getTodoPhases()).toHaveLength(1);
 			expect(session.getTodoPhases()[0]?.tasks.map(task => task.content)).toEqual([
 				"Build the feature; inspect the result.",
 				"Verify the feature; confirm the check passes.",
@@ -1402,9 +1448,15 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(session.getTodoPhases()[0]?.tasks.map(task => task.content)).toEqual(expectedTasks);
 	});
 
-	it.each(["missing checklist", "goal disabled", "conflicting goal", "activation failure"])(
+	it.each([
+		["missing checklist", "Plan execution requires a non-empty final"],
+		["goal disabled", "Goal mode is disabled (goal.enabled)"],
+		["activation failure", "goal activation denied"],
+		["tool setup failure", "goal tool setup denied"],
+		["todo setup failure", "todo persistence denied"],
+	] as const)(
 		"does not dispatch an approved plan on %s",
-		async failure => {
+		async (failure, detail) => {
 			const planFilePath = "local://blocked-plan.md";
 			const resolved = resolveLocalUrlToPath(planFilePath, {
 				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
@@ -1413,10 +1465,18 @@ describe("InteractiveMode plan review rendering", () => {
 			const plan =
 				failure === "missing checklist" ? "# Plan\nNo checklist." : "# Plan\n\n## Todo\n- [ ] Execute and verify.";
 			await Bun.write(resolved, plan);
+			const previousGoal = await seedPreviousGoal("paused");
 			if (failure === "goal disabled") cfgGoalEnabled.set(session.settings, false);
-			if (failure === "conflicting goal") await session.goalRuntime.createGoal({ objective: "Existing work" });
-			if (failure === "activation failure")
+			if (failure === "activation failure") {
 				vi.spyOn(session.goalRuntime, "createGoal").mockRejectedValue(new Error("goal activation denied"));
+			} else if (failure === "tool setup failure") {
+				vi.spyOn(session, "setActiveToolsByName").mockRejectedValueOnce(new Error("goal tool setup denied"));
+			} else if (failure === "todo setup failure") {
+				vi.spyOn(session, "commitTodoPhases").mockImplementationOnce(phases => {
+					session.setTodoPhases(phases);
+					throw new Error("todo persistence denied");
+				});
+			}
 			vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
 			mode.planModeEnabled = true;
 			mode.planModePlanFilePath = planFilePath;
@@ -1425,9 +1485,11 @@ describe("InteractiveMode plan review rendering", () => {
 			const error = vi.spyOn(mode, "showError");
 			await mode.handlePlanApproval({ planFilePath, planExists: true, title: "Plan" });
 			expect(sent.mock.calls.filter(isPlanApprovedCall)).toHaveLength(0);
-			expect(error).toHaveBeenCalled();
+			expect(error).toHaveBeenCalledWith(expect.stringContaining(detail));
 			expect(await Bun.file(resolved).text()).toBe(plan);
-			if (failure === "conflicting goal") expect(session.getGoalModeState()?.goal.objective).toBe("Existing work");
+			const rejectedBeforeActivation = failure === "missing checklist" || failure === "goal disabled";
+			expect(session.getGoalModeState()).toEqual(rejectedBeforeActivation ? previousGoal : undefined);
+			expect(session.getTodoPhases()).toEqual(previousTodos);
 		},
 	);
 
@@ -1447,7 +1509,6 @@ describe("InteractiveMode plan review rendering", () => {
 			dialogOptions?.onPlanEdited?.(edited);
 			return "execute";
 		});
-		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 		const promptSpy = vi.spyOn(session, "prompt").mockImplementation(async promptText => {
 			if (typeof promptText === "string" && promptText.startsWith("Plan approved.")) {
 				const persisted = await Bun.file(resolvedPlanPath).text();
@@ -1479,10 +1540,14 @@ describe("InteractiveMode plan review rendering", () => {
 			getSessionId: () => session.sessionManager.getSessionId(),
 		});
 		await Bun.write(resolvedPlanPath, "# Draft plan\n\noriginal body\n");
+		const previousGoal = await seedPreviousGoal("paused");
+		const modeJournal = session.sessionManager.getEntries().filter(entry => entry.type === "mode_change");
+		const drop = vi.spyOn(session.goalRuntime, "dropGoal");
+		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
-		const edited = "# Auto QA\n\nSave the final plan.\n\n## Verify\n\n- run focused tests\n";
+		const edited = "# Auto QA\n\nSave the final plan.\n\n## Todo\n\n- run focused tests\n";
 		const saved = Promise.withResolvers<string>();
 		vi.spyOn(mode, "showStatus").mockImplementation(message => {
 			if (message.startsWith("Saved plan to")) saved.resolve(message);
@@ -1505,13 +1570,19 @@ describe("InteractiveMode plan review rendering", () => {
 		});
 
 		expect(generateTitle).toHaveBeenCalledWith(
-			"# Auto QA\nSave the final plan.\n## Verify\n- run focused tests",
+			"# Auto QA\nSave the final plan.\n## Todo\n- run focused tests",
 			expect.any(String),
 		);
 		expect(await Bun.file(destination).text()).toBe(edited);
 		expect(await saved.promise).toContain("Saved plan to");
 		expect(clear).not.toHaveBeenCalled();
 		expect(mode.planModeEnabled).toBe(true);
+		expect(drop).not.toHaveBeenCalled();
+		expect(session.getGoalModeState()).toEqual(previousGoal);
+		expect(session.getGoalModeState()?.goal).toMatchObject({ id: previousGoal?.goal.id, status: "paused" });
+		expect(session.sessionManager.getEntries().filter(entry => entry.type === "mode_change")).toEqual(modeJournal);
+		expect(session.getTodoPhases()).toEqual(previousTodos);
+		expect(prompt.mock.calls.some(isPlanApprovedCall)).toBe(false);
 	});
 
 	it("carries pre-approval local artifacts into the fresh approve-and-execute session", async () => {
@@ -1534,9 +1605,6 @@ describe("InteractiveMode plan review rendering", () => {
 		vi.spyOn(mode, "showPlanReview").mockImplementation(async (_plan, _title, _options, dialogOptions) => {
 			dialogOptions?.onPlanEdited?.(planContent);
 			return "execute";
-		});
-		vi.spyOn(mode, "handleClearCommand").mockImplementation(async () => {
-			await session.sessionManager.newSession();
 		});
 		let artifactAtPrompt = "";
 		let planAtPrompt = "";
@@ -2017,7 +2085,7 @@ describe("InteractiveMode plan review rendering", () => {
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
 		vi.spyOn(mode, "showPlanReview").mockResolvedValue("execute");
-		const clear = vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+		const clear = vi.spyOn(mode, "handleClearCommand");
 		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 
 		await mode.handlePlanApproval({
@@ -2030,6 +2098,47 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(prompt).toHaveBeenCalledWith(expect.any(String), {
 			synthetic: true,
 		});
+	});
+
+	it("does not dispatch an approved plan when the fresh session is vetoed", async () => {
+		mode.stop();
+		await session.dispose();
+		const veto = vi.fn(async () => ({ cancel: true }));
+		const extension = planReviewExtension("veto", () => {});
+		extension.handlers.set("session_before_switch", [veto]);
+		createSession([extension]);
+		await mode.initHooksAndCustomTools();
+		const planFilePath = "local://PLAN.md";
+		const originSessionId = session.sessionManager.getSessionId();
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => originSessionId,
+			}),
+			"# Plan\n\n## Todo\n- [ ] Execute and verify.",
+		);
+		const previousGoal = await seedPreviousGoal("paused");
+		const drop = vi.spyOn(session.goalRuntime, "dropGoal");
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(mode, "showPlanReview").mockResolvedValue("execute");
+		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const error = vi.spyOn(mode, "showError");
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+
+		expect(veto).toHaveBeenCalledTimes(1);
+		expect(drop).not.toHaveBeenCalled();
+		expect(session.sessionManager.getSessionId()).toBe(originSessionId);
+		expect(session.getGoalModeState()).toEqual(previousGoal);
+		expect(session.getGoalModeState()?.goal).toMatchObject({ id: previousGoal?.goal.id, status: "paused" });
+		expect(session.sessionManager.getEntries().filter(entry => entry.type === "mode_change").at(-1)).toMatchObject({
+			mode: "goal_paused",
+			data: { goal: previousGoal?.goal },
+		});
+		expect(session.getTodoPhases()).toEqual(previousTodos);
+		expect(error).toHaveBeenCalledWith("Plan execution was not dispatched: Could not start a fresh session.");
+		expect(prompt.mock.calls.some(isPlanApprovedCall)).toBe(false);
 	});
 
 	it("executes on the slider-selected tier, surviving #exitPlanMode's model restore", async () => {
@@ -2535,7 +2644,6 @@ describe("InteractiveMode plan review rendering", () => {
 		await mode.handlePlanModeCommand();
 
 		vi.spyOn(mode, "showPlanReview").mockResolvedValue("execute");
-		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 
 		await mode.handlePlanApproval({
@@ -2577,7 +2685,6 @@ describe("InteractiveMode plan review rendering", () => {
 				await mode.handlePlanModeCommand();
 
 				vi.spyOn(mode, "showPlanReview").mockResolvedValue("execute");
-				vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 				const sent = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 
 				await mode.handlePlanApproval({ planFilePath, planExists: true, title: "release-notes-cleanup" });
@@ -2606,7 +2713,6 @@ describe("InteractiveMode plan review rendering", () => {
 		cfgPlanAutosave.set(session.settings, true);
 
 		vi.spyOn(mode, "showPlanReview").mockResolvedValue("execute");
-		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 		const status = vi.spyOn(mode, "showStatus");
 
@@ -2641,7 +2747,6 @@ describe("InteractiveMode plan review rendering", () => {
 		cfgPlanAutosaveDir.set(session.settings, path.join(blocker, "sub"));
 
 		vi.spyOn(mode, "showPlanReview").mockResolvedValue("execute");
-		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 		const promptSpy = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 		const warning = vi.spyOn(mode, "showWarning");
 
@@ -2746,11 +2851,18 @@ describe("InteractiveMode plan review rendering", () => {
 			resolvedPlanPath,
 			"# Plan\n\nCancel mid-compact.\n\n## Todo\n\n- [ ] Implement the plan and confirm the result.\n- [ ] Run the specified verification and confirm it passes.",
 		);
+		const previousGoal = await seedPreviousGoal("paused");
+		const drop = vi.spyOn(session.goalRuntime, "dropGoal");
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
 		vi.spyOn(mode, "showPlanReview").mockResolvedValue("compact");
-		vi.spyOn(mode, "handleCompactCommand").mockResolvedValue("cancelled");
+		vi.spyOn(mode, "handleCompactCommand").mockImplementation(async (_instructions, _mode, beforeFlush) => {
+			await beforeFlush?.("cancelled");
+			expect(session.getGoalModeState()).toEqual(previousGoal);
+			expect(session.getTodoPhases()).toEqual(previousTodos);
+			return "cancelled";
+		});
 		const showWarningSpy = vi.spyOn(mode, "showWarning");
 		const setPlanRefSpy = vi.spyOn(session, "setPlanReferencePath");
 		const markSentSpy = vi.spyOn(session, "markPlanReferenceSent");
@@ -2776,6 +2888,13 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(markSentSpy).not.toHaveBeenCalled();
 		// And — the contract — the plan-approved synthetic prompt was NOT dispatched.
 		expect(promptSpy.mock.calls.some(isPlanApprovedCall)).toBe(false);
+		expect(drop).not.toHaveBeenCalled();
+		expect(session.getGoalModeState()).toEqual(previousGoal);
+		expect(session.sessionManager.getEntries().filter(entry => entry.type === "mode_change").at(-1)).toMatchObject({
+			mode: "goal_paused",
+			data: { goal: previousGoal?.goal, approvedPlanFilePath: planFilePath },
+		});
+		expect(session.getTodoPhases()).toEqual(previousTodos);
 	});
 
 	it("Approve and compact context retains annotations when compaction cancels before dispatch", async () => {

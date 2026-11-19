@@ -7041,20 +7041,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showError("Plan execution requires a non-empty final ## Todo (or ## Tasks) list.");
 			return false;
 		}
-		const goalBlocker = (): string | undefined => {
-			if (!cfgGoalEnabled.get(this.session.settings)) return "Goal mode is disabled (goal.enabled).";
-			const state = this.session.getGoalModeState();
-			if (
-				this.goalModeEnabled ||
-				this.goalModePaused ||
-				(state?.goal && state.goal.status !== "complete" && state.goal.status !== "dropped")
-			)
-				return "An unfinished goal already exists; resume or drop it before approving this plan.";
-			return undefined;
-		};
-		const blocker = goalBlocker();
-		if (blocker) {
-			this.showError(`${blocker} Plan execution was not dispatched.`);
+		const goalDisabled = "Goal mode is disabled (goal.enabled).";
+		if (!cfgGoalEnabled.get(this.session.settings)) {
+			this.showError(`${goalDisabled} Plan execution was not dispatched.`);
 			return false;
 		}
 		const previousPresentation = this.#planModePreviousToolPresentation ?? {
@@ -7062,7 +7051,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			mounted: this.session.getMountedXdevToolNames().filter(name => !isMCPToolName(name)),
 			registered: this.session.getAllToolNames(),
 		};
-		const executionTools = previousPresentation.enabled.includes("read")
+		let executionTools = previousPresentation.enabled.includes("read")
 			? previousPresentation.enabled
 			: [...previousPresentation.enabled, "read"];
 		let executionToolsRestored = false;
@@ -7075,17 +7064,37 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 			executionToolsRestored = true;
 		};
+		const getUnfinishedGoal = (): GoalModeState | undefined => {
+			const state = this.session.getGoalModeState();
+			const status = state?.goal.status;
+			return status === "active" || status === "paused" || status === "budget-limited" ? state : undefined;
+		};
 		let modeChangeRecorded = false;
-		const recordApprovedModeChange = (): void => {
+		const recordApprovedModeChange = (cancelled = false): void => {
 			if (modeChangeRecorded) return;
-			this.sessionManager.appendModeChange("none", { approvedPlanFilePath: options.planFilePath });
+			const previousGoal = cancelled ? getUnfinishedGoal() : undefined;
+			const approvedPlanFilePath = options.planFilePath;
+			// Keep the old goal resumable after plan exit recorded mode "none".
+			if (previousGoal) {
+				this.sessionManager.appendModeChange(previousGoal.enabled ? "goal" : "goal_paused", {
+					approvedPlanFilePath,
+					goal: previousGoal.goal,
+				});
+			} else {
+				this.sessionManager.appendModeChange("none", { approvedPlanFilePath });
+			}
 			modeChangeRecorded = true;
+		};
+		const dropPreviousGoal = async (): Promise<void> => {
+			if (!getUnfinishedGoal()) return;
+			await this.session.goalRuntime.dropGoal();
+			await this.#exitGoalMode({ silent: true, reason: "dropped" });
 		};
 		let goalActivated = false;
 		const activatePlanGoal = async (): Promise<void> => {
 			if (goalActivated) return;
-			const reason = goalBlocker();
-			if (reason) throw new Error(reason);
+			if (!cfgGoalEnabled.get(this.session.settings)) throw new Error(goalDisabled);
+			if (options.preserveContext) await dropPreviousGoal();
 			await this.#enterGoalMode({ objective: checklist.objective, silent: true });
 			const goal = this.session.getGoalModeState();
 			if (!this.goalModeEnabled || !goal?.enabled || goal.goal.objective !== checklist.objective)
@@ -7113,15 +7122,30 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		let compactOutcome: CompactionOutcome | undefined;
 		try {
-			await this.#exitPlanMode({
-				silent: true,
-				paused: false,
-				deferModelRestore: options.compactBeforeExecute === true,
-			});
+			if (options.preserveContext) {
+				await this.#exitPlanMode({
+					silent: true,
+					paused: false,
+					deferModelRestore: options.compactBeforeExecute === true,
+				});
+			}
 
 			if (!options.preserveContext) {
+				const oldSessionId = this.sessionManager.getSessionId();
 				const oldLocalRoot = this.#resolveLocalRoot();
-				await this.handleClearCommand();
+				await this.handleClearCommand(async () => {
+					if (!cfgGoalEnabled.get(this.session.settings)) throw new Error(goalDisabled);
+					await this.#exitPlanMode({ silent: true, paused: false });
+					// Do not restore a goal tool that only the old goal mode had enabled.
+					if (this.#goalToolAddedByMode && getUnfinishedGoal()) {
+						executionTools = executionTools.filter(name => name !== "goal");
+					}
+					// Journal the drop only after /clear passes its veto, before it changes sessions.
+					await dropPreviousGoal();
+				});
+				if (this.sessionManager.getSessionId() === oldSessionId) {
+					throw new Error("Could not start a fresh session.");
+				}
 				const newLocalRoot = this.#resolveLocalRoot();
 				await copyLocalArtifacts(oldLocalRoot, newLocalRoot);
 				const newLocalPath = this.#resolvePlanFilePath(options.planFilePath);
@@ -7159,7 +7183,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					async outcome => {
 						await restoreExecutionTools();
 						this.session.setPlanReferencePath(options.planFilePath);
-						recordApprovedModeChange();
+						recordApprovedModeChange(outcome === "cancelled");
 						await this.#applyDeferredPlanModelTransition(outcome, options.executionModel);
 						if (outcome !== "cancelled") await activatePlanGoal();
 					},
@@ -7181,7 +7205,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// local:// plan remains available if the inline copy becomes unrecoverable.
 		await restoreExecutionTools();
 		this.session.setPlanReferencePath(options.planFilePath);
-		recordApprovedModeChange();
+		recordApprovedModeChange(compactOutcome === "cancelled");
 		try {
 			const autosaved = await autosaveApprovedPlan({
 				settings: this.session.settings,
@@ -9570,10 +9594,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#hidePlanReview();
 	}
 
-	async handleClearCommand(): Promise<void> {
+	async handleClearCommand(beforeSwitch?: () => Promise<void>): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
 		await this.prepareSessionSwitch();
-		await this.#commandController.handleClearCommand();
+		await this.#commandController.handleClearCommand(beforeSwitch);
 	}
 
 	/**

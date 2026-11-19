@@ -12762,10 +12762,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Clears all messages and starts a new session.
 	 * Listeners are preserved and will continue receiving events.
 	 * @param options - Optional initial messages and parent session path
+	 * @param beforeSwitch - Internal teardown after veto checks, while the old session still owns the journal
 	 * @returns true if completed, false if cancelled by hook
 	 */
-	async newSession(options?: NewSessionOptions): Promise<boolean> {
-		const queued = this.#enterSessionTransition(() => this.newSession(options));
+	async newSession(options?: NewSessionOptions, beforeSwitch?: () => Promise<void>): Promise<boolean> {
+		const queued = this.#enterSessionTransition(() => this.newSession(options, beforeSwitch));
 		if (queued) return queued;
 		using _transition = this.#beginSessionTransition();
 		this.#assertVibeSessionTransitionAllowed("start a new session");
@@ -12796,6 +12797,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
+				if (beforeSwitch) {
+					try {
+						await beforeSwitch();
+					} catch (error) {
+						this.#reconnectToAgent();
+						throw error;
+					}
+				}
 				this.#releaseQueuedTtsrReservations();
 				this.agent.reset();
 				this.#prunedTerminalFailure = undefined;

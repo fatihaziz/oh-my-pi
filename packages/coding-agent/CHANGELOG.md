@@ -5,6 +5,7 @@
 ### Fixed
 
 - `/plan <prompt>` pauses an active goal without dropping it or losing the supplied prompt and images.
+- Approving a plan for execution replaces the previous unfinished goal and its checklist. Entering plan mode alone still pauses the goal without dropping it.
 - Plan mode now explains when to use shared rules and milestone gates, and how to report a blocker without closing unfinished tasks.
 
 ## [19.0.0] - 2026-11-18
