@@ -1,4 +1,5 @@
 import type { AssistantMessage, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 
 /**
  * Model-facing text of a tool call the provider stream ended before it could run.
@@ -7,11 +8,22 @@ import type { AssistantMessage, Message, ToolResultMessage } from "@oh-my-pi/pi-
 export const PROVIDER_ERROR_NOT_EXECUTED_TEXT =
 	"Tool call was not executed because the provider stream ended with an error before the tool could run.";
 
+/** Content-filter denials are terminal, even when the provider has no structured stop details. */
+export function isProviderContentBlock(message: AssistantMessage): boolean {
+	if (message.stopReason !== "error") return false;
+	const stopType = message.stopDetails?.type;
+	if (stopType === "content_filter") return true;
+	// Refusal and sensitive already have their own v19 recovery rules.
+	if (stopType === "refusal" || stopType === "sensitive") return false;
+	const id = AIError.classifyMessage(message);
+	return !AIError.is(id, AIError.Flag.AccountPolicy) && AIError.is(id, AIError.Flag.ContentBlocked);
+}
+
 /** Detects API-level provider refusals that are terminal errors, not dialogue to replay. */
 export function isProviderRefusalMessage(message: AssistantMessage): boolean {
 	if (message.stopReason !== "error") return false;
 	const stopType = message.stopDetails?.type;
-	return stopType === "refusal" || stopType === "sensitive";
+	return stopType === "refusal" || stopType === "sensitive" || isProviderContentBlock(message);
 }
 
 /**

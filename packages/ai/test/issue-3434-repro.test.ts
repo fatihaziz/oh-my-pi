@@ -302,4 +302,13 @@ describe("cross-API thinking-block preservation (#3433/#3434)", () => {
 		expect(assistant.reasoning).toBeUndefined();
 		expect(assistant.reasoning_text).toBeUndefined();
 	});
+
+	it("does not demote foreign reasoning into text when history filtering is enabled", () => {
+		const target = deepseekReasoningTarget();
+		const compat = { ...target.compat, filterReasoningHistory: true };
+		const messages = [userMessage("Plan it."), zaiAnthropicMessage("Private reasoning."), userMessage("Continue.")];
+		const assistant = findAssistantMessage(convertMessages({ ...target, compat }, { messages }, compat));
+		expect(assistant?.content).toBe("Done.");
+		expect(JSON.stringify(assistant)).not.toContain("Private reasoning.");
+	});
 });

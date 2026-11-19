@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { AgentMessage, SyntheticToolResultDetails } from "@oh-my-pi/pi-agent-core";
+import {
+	type AgentMessage,
+	filterProviderReplayMessages,
+	type SyntheticToolResultDetails,
+} from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -916,6 +920,22 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		it("keeps a refusal with no tool calls retriable (baseline)", () => {
 			const message = makeRefusal([{ type: "thinking", thinking: "reasoning before refusal" }]);
 			expect(recoveryFor(message, []).isRetryableError(message)).toBe(true);
+		});
+
+		it.each([true, false])("keeps content_filter terminal with structured details=%s", async withDetails => {
+			const message = makeMessage([], model);
+			message.stopDetails = withDetails ? { type: "content_filter" } : undefined;
+			message.errorMessage = "Provider finish_reason: content_filter";
+			const recovery = recoveryFor(message, []);
+			expect(recovery.isClassifierRefusal(message)).toBe(true);
+			expect(recovery.isRetryableError(message)).toBe(false);
+			expect(recovery.isHardErrorFallbackEligible(message)).toBe(false);
+			expect(await recovery.handleRetryableError(message)).toBe(false);
+			expect(filterProviderReplayMessages([message])).toEqual([]);
+
+			message.content = [toolCall("call-1")];
+			expect(recoveryFor(message, [realResult("call-1")]).isRetryableError(message)).toBe(false);
+			expect(recoveryFor(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
 		});
 
 		it("retries a malformed function call whose tool call provably never executed", () => {

@@ -3,6 +3,8 @@ import {
 	AgentBusyError,
 	type AgentMessage,
 	isExcludedFromContext,
+	isProviderContentBlock,
+	isProviderRefusalMessage,
 	isSyntheticToolResultMessage,
 	lastContextIndex,
 	type ThinkingLevel,
@@ -1650,7 +1652,7 @@ export class TurnRecovery {
 	 * Context overflow is NOT retryable (handled by compaction instead).
 	 */
 	isRetryableError(message: AssistantMessage): boolean {
-		if (message.stopReason !== "error") return false;
+		if (message.stopReason !== "error" || isProviderContentBlock(message)) return false;
 		if (this.#isUsagePreflightBlocked(message)) return false;
 		if (AIError.isResponsesRequestBodyReadTimeout(message)) return false;
 		const model = this.#host.model();
@@ -1882,9 +1884,7 @@ export class TurnRecovery {
 
 	/** Checks whether a provider error represents a classifier refusal. */
 	isClassifierRefusal(message: AssistantMessage): boolean {
-		if (message.stopReason !== "error") return false;
-		const stopType = message.stopDetails?.type;
-		return stopType === "refusal" || stopType === "sensitive";
+		return isProviderRefusalMessage(message);
 	}
 
 	#getRetryFallbackResolutionContext(): RetryFallbackResolutionContext {
@@ -2787,6 +2787,7 @@ export class TurnRecovery {
 	async #applyRetryPolicy(message: AssistantMessage, options?: RetryPolicyOptions): Promise<boolean> {
 		const retrySettings = cfgRetry.get(this.#host.settings);
 		if (this.#host.abortInProgress() || this.#host.isDisposed()) return false;
+		if (isProviderContentBlock(message)) return false;
 		// The Fireworks Fast→base degrade is an intrinsic model-selection safety net,
 		// not a retry loop, so it runs even when the user disabled retries: it switches
 		// the model once and lets the base turn proceed.

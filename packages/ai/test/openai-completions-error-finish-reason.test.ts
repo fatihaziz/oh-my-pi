@@ -590,3 +590,30 @@ describe("non-string finish_reason", () => {
 		expect(result.errorMessage).toBe("Provider finish_reason: 42");
 	}, 10_000);
 });
+
+describe("finish_reason: content_filter", () => {
+	it.each(["", "This request was blocked by the provider's content policy."])(
+		"surfaces a terminal content filter with streamed explanation %j",
+		async explanation => {
+			const fetchMock = createSseFetch([
+				...(explanation
+					? [completionChunk({ choices: [{ index: 0, delta: { role: "assistant", content: explanation } }] })]
+					: []),
+				completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: "CONTENT_FILTER" }] }),
+				"[DONE]",
+			]);
+			const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+				apiKey: "test-key",
+				fetch: fetchMock,
+			}).result();
+
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe("Provider finish_reason: content_filter");
+			expect(result.stopDetails).toEqual({ type: "content_filter", ...(explanation ? { explanation } : {}) });
+			const id = AIError.classifyMessage(result);
+			expect(AIError.is(id, AIError.Flag.ContentBlocked)).toBe(true);
+			expect(AIError.retriable(id)).toBe(false);
+		},
+		10_000,
+	);
+});

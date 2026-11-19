@@ -1476,9 +1476,10 @@ const streamOpenAICompletionsOnce = (
 					output.stopReason = "error";
 					output.errorMessage = nativeFinishError;
 					streamFinishedAt ??= Date.now();
-				} else if (choice.finish_reason) {
+				} else if (choice.finish_reason && output.stopDetails?.type !== "content_filter") {
 					const finishReasonResult = mapStopReason(choice.finish_reason);
 					output.stopReason = finishReasonResult.stopReason;
+					if (finishReasonResult.contentFiltered) output.stopDetails = { type: "content_filter" };
 					if (finishReasonResult.errorMessage) {
 						output.errorMessage = finishReasonResult.errorMessage;
 					}
@@ -1883,6 +1884,13 @@ const streamOpenAICompletionsOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			if (output.stopDetails?.type === "content_filter") {
+				const explanation = output.content
+					.map(block => (block.type === "text" ? block.text : ""))
+					.join("")
+					.trim();
+				if (explanation) output.stopDetails.explanation = explanation;
+			}
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = readOpenRouterRawMetadata(capturedErrorResponse);
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
@@ -3049,13 +3057,14 @@ function detectRepetitionStop(choice: ChatCompletionChunk.Choice): string | unde
 function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {
 	stopReason: StopReason;
 	errorMessage?: string;
+	contentFiltered?: true;
 } {
 	if (reason === null) return { stopReason: "stop" };
 	// Some OpenAI-compatible gateways fronting Google Gemini backends emit the
 	// native uppercase finish reasons (`STOP`, `MAX_TOKENS`) instead of the
 	// lowercase OpenAI contract values. Fold case so a clean completion isn't
 	// misclassified as a provider error.
-	const normalized = typeof reason === "string" ? reason.toLowerCase() : reason;
+	const normalized = typeof reason === "string" ? reason.trim().toLowerCase() : reason;
 	switch (normalized) {
 		case "stop":
 		case "end":
@@ -3067,7 +3076,7 @@ function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | str
 		case "tool_calls":
 			return { stopReason: "toolUse" };
 		case "content_filter":
-			return { stopReason: "error", errorMessage: "Provider finish_reason: content_filter" };
+			return { stopReason: "error", errorMessage: "Provider finish_reason: content_filter", contentFiltered: true };
 		case "network_error":
 			return { stopReason: "error", errorMessage: "Provider finish_reason: network_error" };
 		case "error":

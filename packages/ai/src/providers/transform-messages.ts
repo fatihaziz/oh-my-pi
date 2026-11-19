@@ -1222,6 +1222,10 @@ export function transformMessages<TApi extends Api>(
 					// stay byte-identical. A separator baked into the block text would
 					// leak to non-flattening targets: Anthropic/Bedrock reject a
 					// terminal assistant message whose text ends with whitespace.
+					// Explicit history filtering must not leak foreign reasoning as text.
+					if (targetCompat && "filterReasoningHistory" in targetCompat && targetCompat.filterReasoningHistory) {
+						return [];
+					}
 					return {
 						type: "text" as const,
 						text: renderDemotedThinking(model.id, sanitized.thinking),
