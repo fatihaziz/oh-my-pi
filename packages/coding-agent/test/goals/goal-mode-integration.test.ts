@@ -629,6 +629,26 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.mode.planModeEnabled).toBe(false);
 	});
 
+	it("pauses the active goal for a prompted /plan and steers with the supplied image", async () => {
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => true });
+		const sendPlanModeContext = vi.spyOn(harness.session, "sendPlanModeContext").mockResolvedValue();
+		const prompt = vi.spyOn(harness.session, "prompt").mockImplementation(async () => {
+			expect(harness.mode.planModeEnabled).toBe(true);
+			return true;
+		});
+		const images: ImageContent[] = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
+		const text = "[Image #1, 10x10] Plan the live update";
+
+		expect(await harness.mode.handlePlanModeCommand(text, { images, imageLinks: ["file:///shot.png"] })).toBe(true);
+
+		expect(harness.mode.goalModeEnabled).toBe(false);
+		expect(harness.mode.goalModePaused).toBe(true);
+		expect(harness.session.getGoalModeState()?.goal).toMatchObject({ status: "paused", objective: "Ship the release" });
+		expect(sendPlanModeContext).toHaveBeenCalledWith({ deliverAs: "steer" });
+		expect(prompt.mock.calls).toEqual([[text, { streamingBehavior: "steer", images }]]);
+	});
+
 	it("rejects a new /goal objective while paused", async () => {
 		await harness.mode.handleGoalModeCommand("Ship the release");
 		vi.spyOn(harness.mode, "showHookSelector").mockResolvedValue("Pause");

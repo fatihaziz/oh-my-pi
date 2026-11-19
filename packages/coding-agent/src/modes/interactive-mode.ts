@@ -6235,7 +6235,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.planModeEnabled) {
 			return;
 		}
-		if (this.goalModeEnabled || this.goalModePaused) {
+		// A paused goal is inert and stays resumable after the plan.
+		if (this.goalModeEnabled) {
 			this.showWarning("Exit goal mode first.");
 			return;
 		}
@@ -7320,7 +7321,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		initialPrompt?: string,
 		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
 	): Promise<boolean> {
-		if (this.goalModeEnabled || this.goalModePaused) {
+		if (this.goalModeEnabled && !initialPrompt) {
 			this.showWarning("Exit goal mode first.");
 			return false;
 		}
@@ -7354,8 +7355,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Plan mode is disabled. Enable it in settings (plan.enabled).");
 			return false;
 		}
+		if (this.goalModeEnabled) await this.#pauseGoalAction();
 		await this.#enterPlanMode();
-		if (!initialPrompt) return false;
+		if (!this.planModeEnabled || !initialPrompt) return false;
 		if (isKnownSkillCommand(this, initialPrompt)) {
 			await invokeSkillCommandFromText(this, initialPrompt, "steer", {
 				images: input?.images,
