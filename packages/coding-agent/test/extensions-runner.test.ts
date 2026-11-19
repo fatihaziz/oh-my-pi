@@ -4388,7 +4388,8 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("event delivery order", () => {
-		type Handler = (event: { type: string; toolCallId?: string }) => unknown;
+		type HandlerEvent = { type: string; toolCallId?: string; entryId?: string };
+		type Handler = (event: HandlerEvent) => unknown;
 		const inlineExtension = (name: string, handlers: Record<string, Handler>): Extension => {
 			const extensionPath = path.join(extensionsDir, `${name}.ts`);
 			return {
@@ -4397,7 +4398,7 @@ describe("ExtensionRunner", () => {
 				handlers: new Map(
 					Object.entries(handlers).map(([type, handler]) => [
 						type,
-						[async (...args: unknown[]) => handler(args[0] as { type: string; toolCallId?: string })],
+						[async (...args: unknown[]) => handler(args[0] as HandlerEvent)],
 					]),
 				),
 				tools: new Map(),
@@ -4454,6 +4455,51 @@ describe("ExtensionRunner", () => {
 			releaseSlowStart.resolve();
 			await Promise.all([start, end]);
 			expect(seen).toEqual(["slow:start", "observer:start", "observer:end"]);
+		});
+
+		it("delivers todo commits in order while an unrelated observer is held", async () => {
+			const releaseStart = Promise.withResolvers<void>();
+			const releaseFirstTodo = Promise.withResolvers<void>();
+			const seen: string[] = [];
+			const observer = inlineExtension("todo-observer", {
+				tool_execution_start: async () => {
+					seen.push("tool:start");
+					await releaseStart.promise;
+					seen.push("tool:released");
+				},
+				todo_committed: async ({ entryId }) => {
+					seen.push(`todo:${entryId}`);
+					if (entryId !== "first") return;
+					await releaseFirstTodo.promise;
+					throw new Error("first observer failed");
+				},
+			});
+			const runner = new ExtensionRunner(
+				[observer],
+				new ExtensionRuntime(),
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+			const start = runner.emit({ type: "tool_execution_start", toolCallId: "call-1", toolName: "todo", args: {} });
+			const first = runner.emit({ type: "todo_committed", entryId: "first", op: "init" });
+			const second = runner.emit({ type: "todo_committed", entryId: "second", op: "done" });
+			try {
+				const turn = Promise.withResolvers<void>();
+				setImmediate(turn.resolve);
+				await turn.promise;
+				expect(seen).toEqual(["tool:start", "todo:first"]);
+				releaseFirstTodo.resolve();
+				await Promise.all([first, second]);
+				expect(seen).toEqual(["tool:start", "todo:first", "todo:second"]);
+				expect(errors).toEqual([expect.objectContaining({ event: "todo_committed", error: "first observer failed" })]);
+			} finally {
+				releaseFirstTodo.resolve();
+				releaseStart.resolve();
+				await Promise.all([start, first, second]);
+			}
 		});
 
 		it("delivers an event emitted inside a handler at once instead of queueing it behind that handler", async () => {

@@ -640,6 +640,7 @@ export class ExtensionRunner {
 	#toolRegistrationBarrier: Promise<void> | undefined;
 	/** Latest pending delivery per extension; see {@link #reserveDeliveryTurns}. Absent while idle. */
 	#deliveryTails = new Map<Extension, Promise<void>>();
+	#todoDeliveryTails = new Map<Extension, Promise<void>>();
 	#initialized = false;
 	/** Full load order, captured on the first {@link setSuspendedExtensions} call. */
 	#loadOrder: Extension[] | undefined;
@@ -2067,7 +2068,7 @@ export class ExtensionRunner {
 				const handlers = ext.handlers.get(event.type);
 				if (!handlers || handlers.length === 0) continue;
 				const turn = turns?.get(ext);
-				// Todo snapshots must be observed in journal order even if an earlier handler is slow.
+				// Todo delivery waits only for earlier todo notifications, whose handlers still time out.
 				if (event.type === "todo_committed" && turn?.ready) await turn.ready;
 				else if (turn?.ready && !(await awaitDeliveryTurn(turn.ready, turn.deadline, signal)) && !signal?.aborted) {
 					logger.warn("Extension still handling an earlier event; delivering out of order", {
@@ -2148,25 +2149,29 @@ export class ExtensionRunner {
 	 * that handler may be awaiting them (`ctx.newSession()` from `agent_end`),
 	 * and queueing them behind it, or behind a later extension still waiting
 	 * for it, would deadlock until the handler timeout.
+	 *
+	 * Detached todo notifications have their own tail: they must not wait for
+	 * lifecycle observers or overtake earlier commits.
 	 */
 	#reserveDeliveryTurns(
 		extensions: readonly Extension[],
 		type: string,
 		timeoutMs: number,
 	): Map<Extension, DeliveryTurn> | undefined {
+		const todo = type === "todo_committed";
 		const scope = this.#toolRegistrationScope.getStore();
-		// Todo notifications are always detached, so reentrant commits can safely queue too.
-		if (scope && !scope.closed && type !== "todo_committed") return undefined;
+		if (scope && !scope.closed && !todo) return undefined;
+		const tails = todo ? this.#todoDeliveryTails : this.#deliveryTails;
 		const deadline = performance.now() + timeoutMs;
 		let turns: Map<Extension, DeliveryTurn> | undefined;
 		for (const ext of extensions) {
 			if (!ext.handlers.get(type)?.length) continue;
-			const ready = this.#deliveryTails.get(ext);
+			const ready = tails.get(ext);
 			const { promise, resolve } = Promise.withResolvers<void>();
-			this.#deliveryTails.set(ext, promise);
+			tails.set(ext, promise);
 			const release = () => {
 				resolve();
-				if (this.#deliveryTails.get(ext) === promise) this.#deliveryTails.delete(ext);
+				if (tails.get(ext) === promise) tails.delete(ext);
 			};
 			turns ??= new Map();
 			turns.set(ext, { ready, deadline, release });
