@@ -184,6 +184,7 @@ fn preview_section(
 			clipboard,
 			store,
 			None,
+			false,
 		)?;
 		result.op = Some(if matches!(parsed.file_op, Some(FileOp::Rem)) {
 			EngineFileOp::Delete

@@ -18,6 +18,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -296,5 +297,170 @@ describe("read tool column truncation vs hashline snapshot", () => {
 		});
 
 		expect(await fs.readFile(filePath, "utf8")).toBe("first\nlast\n");
+	});
+
+	describe("local:// span replacements over wide clipped rows", () => {
+		const WIDE = new Map([
+			[132, 818],
+			[153, 1266],
+			[191, 776],
+		]);
+
+		function wideRows(): string[] {
+			return Array.from({ length: 300 }, (_, i) => {
+				const n = i + 1;
+				const id = `old-${String(n).padStart(3, "0")}`;
+				const width = WIDE.get(n);
+				if (!width) return id;
+				const tail = ` TAIL-${n}-END`;
+				return `${id} ${"q".repeat(width - id.length - 1 - tail.length)}${tail}`;
+			});
+		}
+
+		function localSession(): { session: ToolSession; root: string } {
+			const session: ToolSession = {
+				...createSession(tmpDir),
+				getSessionId: () => "wide-session",
+				getPlanModeState: () => ({ enabled: true, planFilePath: "local://wide-plan.md" }),
+			};
+			cfgToolsOutputMaxColumns.set(session.settings, 768);
+			const root = resolveLocalRoot({ getArtifactsDir: session.getArtifactsDir, getSessionId: session.getSessionId });
+			return { session, root };
+		}
+
+		async function seed(root: string, name: string, rows = wideRows()): Promise<{ file: string; text: string }> {
+			await fs.mkdir(root, { recursive: true });
+			const file = path.join(root, name);
+			const text = `${rows.join("\n")}\n`;
+			await fs.writeFile(file, text);
+			return { file, text };
+		}
+
+		async function readTag(session: ToolSession, selector: string): Promise<{ tag: string; text: string }> {
+			const text = textOutput(await new ReadTool(session).execute("read-local", { path: selector }));
+			return { tag: extractHeader(text).tag, text };
+		}
+
+		async function run(
+			session: ToolSession,
+			input: string,
+		): Promise<AgentToolResult<{ diff?: string; errorKind?: string }>> {
+			return (await new EditTool(session, "hashline").execute("edit-local", { input })) as AgentToolResult<{
+				diff?: string;
+				errorKind?: string;
+			}>;
+		}
+
+		it("applies a local plan patch with three wide unseen anchors in one call", async () => {
+			const { session, root } = localSession();
+			const { file } = await seed(root, "wide-plan.md");
+			const { tag, text: readText } = await readTag(session, "local://wide-plan.md:1-220");
+			// A file-backed local:// read heads its output with the backing path.
+			const { relPath } = extractHeader(readText);
+			expect(relPath.replaceAll("\\", "/").endsWith("local/wide-plan.md")).toBe(true);
+			expect(tag).toMatch(/^[0-9A-F]{4}$/);
+			for (const n of WIDE.keys()) {
+				const shown = readText.split("\n").find(line => line.startsWith(`${n}:`))!;
+				expect(shown.endsWith("…")).toBe(true);
+				expect(shown).not.toContain(`TAIL-${n}-END`);
+			}
+			const added = Array.from({ length: 300 }, (_, i) => `added-${String(i + 1).padStart(3, "0")}`);
+			const input = [
+				`[local://wide-plan.md#${tag}]`,
+				"PUT 4.=4:",
+				"+new-004",
+				"PUT 132.=132:",
+				"+new-132",
+				"PUT 153.=154:",
+				"+new-153",
+				"+new-154",
+				"PUT 191.=191:",
+				"+new-191",
+				"PUT >212:",
+				...added.map(row => `+${row}`),
+				"",
+			].join("\n");
+			const result = await run(session, input);
+			expect(result.isError).not.toBe(true);
+			const output = textOutput(result);
+
+			const expected = wideRows().flatMap((row, i) => {
+				const n = i + 1;
+				if (n === 4) return ["new-004"];
+				if (n === 132) return ["new-132"];
+				if (n === 153) return ["new-153"];
+				if (n === 154) return ["new-154"];
+				if (n === 191) return ["new-191"];
+				if (n === 212) return [row, ...added];
+				return [row];
+			});
+			expect(await fs.readFile(file, "utf8")).toBe(`${expected.join("\n")}\n`);
+			expect(output).toMatch(new RegExp(`\\[local://wide-plan\\.md#(?!${tag}\\])[0-9A-F]{4}\\]`));
+			expect(output.match(/Warnings:/g)?.length).toBe(1);
+			expect(output.match(/Applied as written:/g)?.length).toBe(1);
+			expect(output).toContain(
+				"Applied as written: local://wide-plan.md replaced original lines 132, 153, 191, which were not displayed in full. The replacement may have removed unseen text.",
+			);
+			expect(output).toContain("Do not resend the patch.");
+			expect(output).not.toContain("154, 191");
+			const diff = result.details?.diff ?? "";
+			for (const n of WIDE.keys()) expect(diff).toContain(`TAIL-${n}-END`);
+		});
+
+		it("keeps every staged file unchanged when a later section fails", async () => {
+			const { session, root } = localSession();
+			const first = await seed(root, "wide-plan.md");
+			const second = await seed(
+				root,
+				"other.md",
+				wideRows().map(row => row.replace("old-", "other-")),
+			);
+			const { tag: firstTag } = await readTag(session, "local://wide-plan.md:1-220");
+			const { tag: secondTag } = await readTag(session, "local://other.md:1-220");
+			const result = await run(
+				session,
+				`[local://wide-plan.md#${firstTag}]\nPUT 132.=132:\n+new-132\n[local://other.md#${secondTag}]\nPUT 999.=999:\n+nope\n`,
+			);
+			expect(result.isError).toBe(true);
+			expect(textOutput(result)).not.toContain("Applied as written");
+			expect(await fs.readFile(first.file, "utf8")).toBe(first.text);
+			expect(await fs.readFile(second.file, "utf8")).toBe(second.text);
+		});
+
+		it("rejects a bodyless cut, an empty PUT, and a span with a short unseen row", async () => {
+			const { session, root } = localSession();
+			const { file, text } = await seed(root, "wide-plan.md");
+			const { tag } = await readTag(session, "local://wide-plan.md:1-220");
+			for (const body of ["CUT 132.=132\n", "PUT 132.=132:\n"]) {
+				const result = await run(session, `[local://wide-plan.md#${tag}]\n${body}`);
+				expect(result.isError).toBe(true);
+				expect(result.details?.errorKind).toBe("unseen_lines");
+				expect(textOutput(result)).not.toContain("Applied as written");
+				expect(await fs.readFile(file, "utf8")).toBe(text);
+			}
+			// A fresh session: the first one's 1-220 read would fuse row 133 into the seen set.
+			const { session: mixedSession } = localSession();
+			const { tag: mixedTag } = await readTag(mixedSession, "local://wide-plan.md:131-132,134-134");
+			const result = await run(mixedSession, `[local://wide-plan.md#${mixedTag}]\nPUT 132.=134:\n+new-132\n`);
+			expect(result.isError).toBe(true);
+			expect(result.details?.errorKind).toBe("unseen_lines");
+			expect(textOutput(result)).not.toContain("Applied as written");
+			expect(await fs.readFile(file, "utf8")).toBe(text);
+		});
+
+		it("rejects a stale tag whose target row changed", async () => {
+			const { session, root } = localSession();
+			const { file } = await seed(root, "wide-plan.md");
+			const { tag } = await readTag(session, "local://wide-plan.md:1-220");
+			const rows = wideRows();
+			rows[131] = `changed-132 ${"z".repeat(900)} CHANGED-TAIL`;
+			const newer = `${rows.join("\n")}\n`;
+			await fs.writeFile(file, newer);
+			const result = await run(session, `[local://wide-plan.md#${tag}]\nPUT 132.=132:\n+new-132\n`);
+			expect(result.isError).toBe(true);
+			expect(result.details?.errorKind).toBe("stale_tag");
+			expect(textOutput(result)).not.toContain("Applied as written");
+			expect(await fs.readFile(file, "utf8")).toBe(newer);
+		});
 	});
 });

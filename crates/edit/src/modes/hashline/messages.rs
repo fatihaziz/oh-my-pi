@@ -941,6 +941,17 @@ pub fn wide_unseen_lines_message(section_path: &str, unseen_lines: &[u32]) -> St
 	)
 }
 
+/// A current-tag `local://` span replacement applied over rows a read cut:
+/// names the original rows whose unseen tails the replacement may have dropped.
+pub fn wide_local_put_warning(section_path: &str, unseen_lines: &[u32]) -> String {
+	let ranges = format_line_ranges(unseen_lines);
+	format!(
+		"Applied as written: {section_path} replaced original lines {ranges}, which were not \
+		 displayed in full. The replacement may have removed unseen text. Review those changes and \
+		 restore anything omitted unintentionally. Do not resend the patch."
+	)
+}
+
 /// No retained read records whether these over-cap anchor lines were shown
 /// whole (process restart or store eviction), so their display may have been
 /// cut.

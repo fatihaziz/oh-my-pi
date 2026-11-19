@@ -16,7 +16,7 @@ use super::{
 	messages::{
 		HEADTAIL_DRIFT_WARNING, RevealedLine, UnseenLinesReveal, path_recovered_from_tag_message,
 		stale_unseen_lines_message, unseen_lines_message, unverified_wide_lines_message,
-		wide_unseen_lines_message,
+		wide_local_put_warning, wide_unseen_lines_message,
 	},
 	mismatch::{
 		MismatchDetails, format_header_only_message, mismatch_error, tag_from_other_file_error,
@@ -427,6 +427,54 @@ fn possibly_cut_anchors(
 	Ok(wide)
 }
 
+/// True when every `unseen` anchor is consumed by a body-backed explicit span
+/// replacement (`PUT N.=M:` with a nonblank body) and the rest of the section
+/// is such replacements or body-backed inserts anchored off `unseen`. Any
+/// cut, block op, register paste, empty replacement or asserted deletion
+/// keeps the whole section strict.
+fn all_unseen_are_span_puts(edits: &[Edit], unseen: &[u32]) -> bool {
+	use super::types::Cursor;
+	let pending: BTreeSet<u32> = unseen.iter().copied().collect();
+	let mut covered = BTreeSet::new();
+	let mut cursor = 0;
+	while let Some(edit) = edits.get(cursor) {
+		match edit {
+			Edit::Insert { replacement: false, cursor: at, .. } => {
+				if let Cursor::BeforeAnchor(anchor) | Cursor::AfterAnchor(anchor) = at
+					&& pending.contains(&anchor.line)
+				{
+					return false;
+				}
+				cursor += 1;
+			},
+			Edit::Insert { replacement: true, .. } => {
+				let op = edit.line_num();
+				let same_op = |next: &&Edit| next.line_num() == op;
+				let mut nonblank = false;
+				while let Some(Edit::Insert { replacement: true, text, .. }) =
+					edits.get(cursor).filter(same_op)
+				{
+					nonblank |= !text.trim().is_empty();
+					cursor += 1;
+				}
+				let mut deleted = false;
+				while let Some(Edit::Delete { anchor, old_assertion: None, .. }) =
+					edits.get(cursor).filter(same_op)
+				{
+					covered.insert(anchor.line);
+					deleted = true;
+					cursor += 1;
+				}
+				if !nonblank || !deleted {
+					return false;
+				}
+			},
+			_ => return false,
+		}
+	}
+	pending.is_subset(&covered)
+}
+
 /// `text` is the content `expected` names.
 ///
 /// When that tag is stale, `current` is the live file: a reply that asks for a
@@ -441,7 +489,8 @@ fn assert_seen_lines(
 	text: &str,
 	current: Option<&str>,
 	max_columns: usize,
-) -> Result<(), EditError> {
+	allow_wide_local_put: bool,
+) -> Result<Option<String>, EditError> {
 	let Some(snapshot) = store.by_content(canonical, text) else {
 		// No retained read (restart, store eviction): the tag still matches the
 		// file, but which rows were displayed whole is unknown. Lines within
@@ -449,7 +498,7 @@ fn assert_seen_lines(
 		// one may have been cut, and replacing it from a cut view drops its tail.
 		let wide = possibly_cut_anchors(section, blocks, text, max_columns)?;
 		if wide.is_empty() {
-			return Ok(());
+			return Ok(None);
 		}
 		return Err(EditError::rejected(
 			Rejection::UnseenLines,
@@ -457,10 +506,10 @@ fn assert_seen_lines(
 		));
 	};
 	let Some(seen) = snapshot.seen_lines else {
-		return Ok(());
+		return Ok(None);
 	};
 	if seen.is_empty() {
-		return Ok(());
+		return Ok(None);
 	}
 	let guarded = guarded_lines(section, blocks)?;
 	let mut unseen = guarded
@@ -469,7 +518,7 @@ fn assert_seen_lines(
 		.filter(|line| !seen.contains(line))
 		.collect::<Vec<_>>();
 	if unseen.is_empty() {
-		return Ok(());
+		return Ok(None);
 	}
 	// A follow-up edit below an earlier shifting edit anchors moved lines at
 	// their new numbers. When the payload carries the anchored content, the
@@ -480,30 +529,36 @@ fn assert_seen_lines(
 		let rescued: BTreeSet<u32> = rescued.into_iter().collect();
 		unseen.retain(|line| !rescued.contains(line));
 		if unseen.is_empty() {
-			return Ok(());
+			return Ok(None);
 		}
 	}
 	let source = snapshot.text.split('\n').collect::<Vec<_>>();
 	let mut revealed = Vec::new();
-	for &line in &unseen {
-		let Some(value) = usize::try_from(line)
+	let is_wide = |line: u32| {
+		usize::try_from(line)
 			.ok()
 			.and_then(|n| n.checked_sub(1))
 			.and_then(|n| source.get(n))
-		else {
-			continue;
-		};
-		if value.chars().count() > SEEN_LINE_REVEAL_MAX_COLUMNS {
-			if let Some(current) = current {
-				return Err(stale_unseen_rejection(
-					section, &unseen, &guarded, expected, canonical, store, text, current, true,
-				));
-			}
-			return Err(EditError::rejected(
-				Rejection::UnseenLines,
-				wide_unseen_lines_message(section.path.as_str(), &unseen),
+			.is_some_and(|value| value.chars().count() > SEEN_LINE_REVEAL_MAX_COLUMNS)
+	};
+	if unseen.iter().any(|&line| is_wide(line)) {
+		if let Some(current) = current {
+			return Err(stale_unseen_rejection(
+				section, &unseen, &guarded, expected, canonical, store, text, current, true,
 			));
 		}
+		// Session scratch drafts take a span replacement over rows the read
+		// cut, with a warning naming them; the rows stay unseen.
+		if allow_wide_local_put
+			&& unseen.iter().all(|&line| is_wide(line))
+			&& all_unseen_are_span_puts(section.edits()?, &unseen)
+		{
+			return Ok(Some(wide_local_put_warning(section.path.as_str(), &unseen)));
+		}
+		return Err(EditError::rejected(
+			Rejection::UnseenLines,
+			wide_unseen_lines_message(section.path.as_str(), &unseen),
+		));
 	}
 	for &line in unseen.iter().take(SEEN_LINE_REVEAL_CAP) {
 		let Some(value) = usize::try_from(line)
@@ -609,6 +664,8 @@ fn record_reply_provenance(
 
 /// `seen_line_guard` enables the displayed-line guard with its column cap
 /// (see [`crate::session::SessionConfig::max_columns`]); `None` disables it.
+/// `allow_wide_local_put` lets a current-tag `local://` span replacement over
+/// over-cap unseen rows apply with a warning instead of a rejection.
 pub(crate) fn apply_with_recovery(
 	section: &PatchSection,
 	canonical: &Path,
@@ -617,6 +674,7 @@ pub(crate) fn apply_with_recovery(
 	clipboard: &mut Clipboard,
 	store: &EditStore,
 	seen_line_guard: Option<usize>,
+	allow_wide_local_put: bool,
 ) -> Result<ApplyResult, EditError> {
 	let expected = section.file_hash.as_deref().unwrap_or_default();
 	let live_matches = file_hash(normalized).eq_ignore_ascii_case(expected);
@@ -660,7 +718,7 @@ pub(crate) fn apply_with_recovery(
 	validate_clipboard_sequence(&resolved, clipboard)?;
 	if live_matches {
 		if let Some(max_columns) = seen_line_guard {
-			assert_seen_lines(
+			if let Some(advisory) = assert_seen_lines(
 				section,
 				&block_resolutions,
 				expected,
@@ -669,7 +727,10 @@ pub(crate) fn apply_with_recovery(
 				normalized,
 				None,
 				max_columns,
-			)?;
+				allow_wide_local_put,
+			)? {
+				resolve_warnings.push(advisory);
+			}
 		}
 		let mut result = apply_edits(normalized, &resolved, ApplyOptions {
 			clipboard:      Some(clipboard),
@@ -709,7 +770,7 @@ pub(crate) fn apply_with_recovery(
 		// check waits for recovery to succeed, so a tag that cannot be
 		// recovered keeps its mismatch reply instead of a reveal of old content.
 		if let (Some(max_columns), Some(snapshot)) = (seen_line_guard, &stored) {
-			assert_seen_lines(
+			let _ = assert_seen_lines(
 				section,
 				&block_resolutions,
 				expected,
@@ -718,6 +779,7 @@ pub(crate) fn apply_with_recovery(
 				&snapshot.text,
 				Some(normalized),
 				max_columns,
+				false,
 			)?;
 		}
 		resolve_warnings.extend(recovered.warnings);
@@ -955,6 +1017,14 @@ fn stage_section(
 			return Err(EditError::apply(format!("MV destination is the same as {}.", section.path)));
 		}
 	}
+	// Session scratch (`local://`) drafts may replace rows a read cut, with a
+	// warning; working-tree files, file ops and parser recoveries stay strict.
+	let allow_wide_local_put = parsed.file_op.is_none()
+		&& parsed.warnings.is_empty()
+		&& files.policy().url_target(&section.path).is_some_and(|url| {
+			url.split_once(':')
+				.is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("local"))
+		});
 	let edits = parsed.edits.as_slice();
 	let mut apply = apply_with_recovery(
 		section,
@@ -964,6 +1034,7 @@ fn stage_section(
 		clipboard,
 		store,
 		seen_line_guard,
+		allow_wide_local_put,
 	)?;
 	// A REM section's cuts only fill registers; the file is deleted whole.
 	if matches!(parsed.file_op, Some(FileOp::Rem)) {
