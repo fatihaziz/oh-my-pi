@@ -1285,7 +1285,7 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(overlayHandle.hide).not.toHaveBeenCalled();
 	});
 
-	it("Refine with no annotations silently aborts approval and returns to the editor", async () => {
+	it("dismisses a review without annotations without injecting a refinement and restores the editor", async () => {
 		const planFilePath = "local://PLAN.md";
 		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
@@ -1295,32 +1295,29 @@ describe("InteractiveMode plan review rendering", () => {
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
-		let streaming = false;
-		Object.defineProperty(session, "isStreaming", {
-			configurable: true,
-			get: () => streaming,
-		});
-		const abortSpy = vi.spyOn(session, "abort").mockImplementation(async () => {
-			streaming = false;
-		});
-		vi.spyOn(mode, "showPlanReview").mockImplementation(async () => {
-			streaming = true;
-			return "refine";
-		});
-		const statusSpy = vi.spyOn(mode, "showStatus");
+		mode.ui.setFocus(mode.editor);
+		const abortSpy = vi.spyOn(session, "abort").mockResolvedValue();
 		const errorSpy = vi.spyOn(mode, "showError");
 		const startSpy = vi.spyOn(mode, "startPendingSubmission");
 		const onInput = vi.fn();
 		mode.onInputCallback = onInput;
 
-		await mode.handlePlanApproval({
-			planFilePath,
-			planExists: true,
-			title: "PLAN",
-		});
+		await mode.handlePlanApproval(
+			{ planFilePath, planExists: true, title: "PLAN" },
+			{
+				onOpened: () => {
+					const overlay = mode.ui.getFocused();
+					if (!(overlay instanceof PlanReviewOverlay)) throw new Error("Plan review did not take focus");
+					expect(overlay.render(80).join("\n")).not.toContain("Refine plan");
+					overlay.handleInput("\x1b");
+				},
+			},
+		);
 
 		expect(abortSpy).toHaveBeenCalledTimes(1);
-		expect(statusSpy).toHaveBeenCalledWith("Refine plan: enter a follow-up prompt.");
+		expect(mode.ui.hasOverlay()).toBe(false);
+		expect(mode.ui.getFocused()).toBe(mode.editor);
+		expect(mode.planModeEnabled).toBe(true);
 		expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("Failed to refine plan"));
 		expect(startSpy).not.toHaveBeenCalled();
 		expect(onInput).not.toHaveBeenCalled();
@@ -1396,7 +1393,7 @@ describe("InteractiveMode plan review rendering", () => {
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
 		vi.spyOn(session, "getEnabledToolNames").mockReturnValue(["read", "todo", "goal"]);
-		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and keep context");
+		vi.spyOn(mode, "showPlanReview").mockResolvedValue("keep");
 		vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
 		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 
@@ -2575,15 +2572,17 @@ describe("InteractiveMode plan review rendering", () => {
 					getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 					getSessionId: () => session.sessionManager.getSessionId(),
 				});
-				await Bun.write(resolvedPlanPath, "# Plan\n\nClean up the release notes.");
+				await Bun.write(resolvedPlanPath, "# Plan\n\n## Todo\n\n- [ ] Clean up the release notes.");
 
 				await mode.handlePlanModeCommand();
 
 				vi.spyOn(mode, "showPlanReview").mockResolvedValue("execute");
 				vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
-				vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+				const sent = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 
 				await mode.handlePlanApproval({ planFilePath, planExists: true, title: "release-notes-cleanup" });
+
+				expect(sent.mock.calls.filter(isPlanApprovedCall)).toHaveLength(1);
 
 				expect(session.sessionManager.getSessionName()).toBe(expected);
 			} finally {
