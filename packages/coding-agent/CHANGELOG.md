@@ -7,6 +7,12 @@
 - `/plan <prompt>` pauses an active goal without dropping it or losing the supplied prompt and images.
 - Approving a plan for execution replaces the previous unfinished goal and its checklist. Entering plan mode alone still pauses the goal without dropping it.
 - Plan mode now explains when to use shared rules and milestone gates, and how to report a blocker without closing unfinished tasks.
+- Plan review offers **Refine plan** before any annotation in the terminal and Tern. Canceling or submitting blank feedback leaves the review open.
+- Plan mode checks decision-relevant external facts before asking preferences or proposing a plan.
+
+### Added
+
+- Extensions receive `todo_committed` after the native todo snapshot becomes visible in the journal. Wrapped `tool_result` events expose whether the call is programmatic, and the SDK exports the native raw-output footer classifier.
 
 ## [19.0.0] - 2026-11-18
 

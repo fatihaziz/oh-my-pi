@@ -1009,20 +1009,23 @@ describe("PlanReviewOverlay", () => {
 		expect(feedback).toContain("Goal");
 	});
 
-	it("offers Refine first and preselected only while the plan has feedback", () => {
+	it("keeps Refine available but preselects it only while the plan has feedback", () => {
 		const onPick = vi.fn();
 		const overlay = new PlanReviewOverlay(
 			SECTION_PLAN,
 			{ promptTitle: "next", options: APPROVAL_OPTIONS, refine: { id: "refine", label: "Refine with notes" } },
 			{ onPick, onCancel: vi.fn(), onPlanEdited: vi.fn() },
 		);
-		expect(render(overlay)).not.toContain("Refine with notes");
+		const initial = render(overlay);
+		expect(initial.indexOf("Approve and execute")).toBeLessThan(initial.indexOf("Refine with notes"));
 		overlay.handleInput(TAB); // -> toc (Overview)
 		overlay.handleInput(DOWN); // -> Goal
 		overlay.handleInput("d"); // delete Goal: feedback now exists
-		expect(render(overlay)).toContain("Refine with notes");
-		overlay.handleInput("u"); // undo: no feedback, no Refine
-		expect(render(overlay)).not.toContain("Refine with notes");
+		const annotated = render(overlay);
+		expect(annotated.indexOf("Refine with notes")).toBeLessThan(annotated.indexOf("Approve and execute"));
+		overlay.handleInput("u");
+		const restored = render(overlay);
+		expect(restored.indexOf("Approve and execute")).toBeLessThan(restored.indexOf("Refine with notes"));
 		overlay.handleInput("d");
 		overlay.handleInput(TAB); // -> body
 		overlay.handleInput(TAB); // -> actions, cursor on Refine

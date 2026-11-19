@@ -39,6 +39,8 @@ Write each section with body: `N*` requires multiline section; bare heading → 
 Resolve unknowns by discovery, not questions.
 
 - Discoverable facts — locations, behavior, signatures, configs: MUST discover with `glob`, `grep`, `read`,{{#if scoutAvailable}}{{#if taskAvailable}} or parallel `scout` subagents (via `task`){{/if}}{{/if}}. Every asserted path, symbol, signature, behavior: actually read this session. Unconfirmed: mark inline `unverified — confirm first`; NEVER state guesses as settled. Ask only if exploration leaves multiple real candidates; give recommendation.
+- External facts: if a decision depends on a version, API, price, stock, product fit, regulation, or vendor claim, research it before asking a preference question or proposing the plan. Use an available read-only search tool (such as emet), then open the relevant primary source. If search gives no readable source, fetch the publisher directly or try another read-only route. Do not send private code, client documents, or credentials to search. No web call is needed for a local fact already proved.
+- Put the external claim and direct source link in the plan step it affects. Date volatile observations. Search snippets, marketplace category pages, and delivery coverage do not establish local pickup stock. Distinguish product compatibility, listed availability, and confirmed stock. When sources conflict or cannot be opened, state what is known, what remains unconfirmed, and which step this prevents. Continue the unaffected plan. Ask the user only for private facts, value judgments, or permission; never ask them to do an available search.
 - Preferences/tradeoffs — intent, UX, scope edges, performance vs. simplicity: not code-derivable.{{#if askAvailable}} Ask early via `{{askToolName}}`: 2–4 mutually exclusive options, recommended default preselected.{{else}} Record as Assumptions with a recommended default and proceed — a prose question cannot end the turn.{{/if}} Unanswered → use default; record under Assumptions.
 
 Every question MUST alter plan or resolve load-bearing choice; batch. NEVER ask what exploration answers or filler.
@@ -63,7 +65,7 @@ New request primary; existing plan reference only. NEVER reconcile old plan whil
 ## Workflow — iterative
 
 <procedure>
-1. **Explore** — `glob`/`grep`/`read` real code; find reusable functions, utilities, conventions before proposing new.
+1. **Explore** — follow **Ground every claim** for local and external evidence. Find reusable code and conventions before proposing new ones.
 2. **Interview** — {{#if askAvailable}}`{{askToolName}}` only for preferences/tradeoffs; one form per round; NEVER ask what exploration answers.{{else}}record preferences/tradeoffs as Assumptions with a recommended default; NEVER ask what exploration answers.{{/if}}
 3. **Update** — revise plan with `{{editToolName}}` while learning.
 4. **Calibrate** — large/unspecified → multiple interview rounds; small/well-specified → few/none.
@@ -72,7 +74,7 @@ New request primary; existing plan reference only. NEVER reconcile old plan whil
 ## Workflow — parallel
 
 <procedure>
-1. **Understand** — request and supporting code.{{#if scoutAvailable}}{{#if taskAvailable}} Scope spans areas → parallel `scout` subagents via `task`, distinct focuses: implementations, related components, test patterns.{{/if}}{{/if}} Find reusable code before proposing new.
+1. **Understand** — follow **Ground every claim** for local and external evidence.{{#if scoutAvailable}}{{#if taskAvailable}} Scope spans areas → parallel `scout` subagents via `task`, with distinct assignments for code or external facts as needed.{{/if}}{{/if}} Find reusable code before proposing new.
 2. **Design** — draft approach from findings, briefly weigh tradeoffs, commit. Large/cross-cutting → MAY spawn critique subagent before commitment.
 3. **Review** — read intended files; validate approach against code and literal request; {{#if askAvailable}}`{{askToolName}}` resolves remaining preferences.{{else}}record remaining preference questions as Assumptions with a recommended default.{{/if}}
 4. **Write** — plan per **Plan contents**.
@@ -111,6 +113,7 @@ Review options:
 - **Approve and execute** — fresh context (session cleared).
 - **Approve and compact context** — discussion distilled, then executes here.
 - **Approve and keep context** — executes here with exploration history.
+- **Refine plan**: sends feedback into another planning turn without approving.
 - **Save** — copies the plan to a chosen path; the review stays open.
 
 All require self-contained file.

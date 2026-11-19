@@ -6636,7 +6636,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		options: readonly PlanReviewOverlayChoice[],
 		dialogOptions?: {
 			helpText?: string;
-			/** Refine, offered while the plan has feedback. */
+			/** Refine with feedback from the editor or existing annotations. */
 			refine?: { id: string; label: string };
 			/** Save with the overlay's current plan text; the review stays open. */
 			onSave?: (content: string) => void;
@@ -8102,8 +8102,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		const contextUsage = this.#getPlanApprovalContextUsage();
 		const keepContextUsage = this.#formatKeepContextUsage(contextUsage);
 		const keepContextDisabled = this.#isKeepContextDisabled(contextUsage);
-		// The overlay offers Refine only while the plan has feedback; an extension may always refine
-		// with its own feedback, so the reported choices keep it.
 		const reviewOptions: PlanReviewOption[] = [
 			{ id: "execute", label: "Approve and execute", disabled: false },
 			{ id: "compact", label: "Approve and compact context", disabled: false },
@@ -8333,7 +8331,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		if (choice === "refine") {
-			// Offered locally only with feedback; a remote refine brings its own (non-blank).
+			// Local Refine collects feedback before settling the review; remote answers supply their own.
 			const refinement = remote?.choice === "refine" ? (remote.feedback ?? "") : feedback;
 			try {
 				if (this.onInputCallback) {

@@ -106,6 +106,7 @@ import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteT
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { TodoOperation } from "@oh-my-pi/pi-tui/tools/todo";
 import type { ApprovalMode } from "../../tools/approval";
 import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
@@ -1525,6 +1526,13 @@ export interface PlanReviewResolvedEvent {
 	by: "local" | "extension";
 }
 
+/** A new todo snapshot is visible in the session journal. Seeds and manual edits have no tool operation. */
+export interface TodoCommittedEvent {
+	type: "todo_committed";
+	entryId: string;
+	op?: TodoOperation;
+}
+
 /**
  * An explicit, idempotent mode transition. Requesting a state that already holds succeeds with
  * `changed: false`. No transition submits a prompt; send one separately (e.g. `pi.sendUserMessage`).
@@ -1632,6 +1640,7 @@ interface ToolResultEventBase {
 	input: Record<string, unknown>;
 	content: (TextContent | ImageContent)[];
 	isError: boolean;
+	readonly programmatic?: boolean;
 }
 
 export interface BashToolResultEvent extends ToolResultEventBase {
@@ -1743,6 +1752,7 @@ export type ExtensionEvent =
 	| RetryFallbackSucceededEvent
 	| TtsrTriggeredEvent
 	| TodoReminderEvent
+	| TodoCommittedEvent
 	| GoalUpdatedEvent
 	| CredentialDisabledEvent
 	| McpNotificationEvent
@@ -1978,6 +1988,7 @@ export interface ExtensionAPI {
 	on(event: "retry_fallback_succeeded", handler: ExtensionHandler<RetryFallbackSucceededEvent>): void;
 	on(event: "ttsr_triggered", handler: ExtensionHandler<TtsrTriggeredEvent>): void;
 	on(event: "todo_reminder", handler: ExtensionHandler<TodoReminderEvent>): void;
+	on(event: "todo_committed", handler: ExtensionHandler<TodoCommittedEvent>): void;
 	on(event: "goal_updated", handler: ExtensionHandler<GoalUpdatedEvent>): void;
 	on(event: "credential_disabled", handler: ExtensionHandler<CredentialDisabledEvent>): void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;

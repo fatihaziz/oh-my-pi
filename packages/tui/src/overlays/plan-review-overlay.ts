@@ -204,7 +204,7 @@ export interface PlanReviewOverlayChoice {
 	readonly disabled?: string;
 }
 
-/** A row of the option list: Refine (while the plan has feedback), an approval choice, or Save. */
+/** A row in the plan review's action list. */
 type OptionEntry =
 	| { readonly kind: "refine"; readonly id: string; readonly label: string }
 	| { readonly kind: "approve"; readonly choice: PlanReviewOverlayChoice }
@@ -367,10 +367,7 @@ export interface PlanReviewOverlayOptions {
 	promptTitle?: string;
 	/** Approval choices, in order; the first enabled one is the native Approve button's click. */
 	options: readonly PlanReviewOverlayChoice[];
-	/**
-	 * Refine: offered while the plan has feedback (annotations, deleted sections), first and preselected
-	 * in the option list and as the native main button; picking it reports `id`.
-	 */
+	/** Refine opens feedback unless annotations or section deletions already supply it. */
 	refine?: { readonly id: string; readonly label: string };
 	/** Trailing footer hint (cancel hint); the overlay prepends dynamic help. */
 	helpText?: string;
@@ -408,7 +405,7 @@ export class PlanReviewOverlay implements Component {
 
 	#choices: readonly PlanReviewOverlayChoice[];
 	#refine: { readonly id: string; readonly label: string } | undefined;
-	/** The plan has annotations or deleted sections: Refine is offered. */
+	/** Annotations or deleted sections supply feedback for direct refinement. */
 	#hasFeedback = false;
 	/** Memoized {@link #entries} for the current {@link #hasFeedback}. */
 	#entryCache: { feedback: boolean; entries: readonly OptionEntry[] } | undefined;
@@ -875,13 +872,14 @@ export class PlanReviewOverlay implements Component {
 		this.#tocBaseLevel = this.#toc.length > 0 ? Math.min(...this.#toc.map(i => this.#sections[i]!.level)) : 1;
 	}
 
-	/** The option list: Refine while the plan has feedback, the approval choices, then Save. */
+	/** Refine leads when annotated; otherwise it follows the approval choices. */
 	#entries(): readonly OptionEntry[] {
 		const feedback = this.#hasFeedback && this.#refine !== undefined;
 		if (this.#entryCache?.feedback === feedback) return this.#entryCache.entries;
 		const entries: OptionEntry[] = [];
 		if (feedback && this.#refine) entries.push({ kind: "refine", ...this.#refine });
 		for (const choice of this.#choices) entries.push({ kind: "approve", choice });
+		if (!feedback && this.#refine) entries.push({ kind: "refine", ...this.#refine });
 		if (this.callbacks.onSave) entries.push({ kind: "save" });
 		this.#entryCache = { feedback, entries };
 		return entries;
@@ -928,12 +926,15 @@ export class PlanReviewOverlay implements Component {
 		}
 	}
 
-	/** Track Refine coming and going: it arrives preselected; when it leaves, the cursor keeps its option. */
+	/** Prefer Refine with feedback; removing feedback restores the approval order. */
 	#setHasFeedback(hasFeedback: boolean): void {
 		if (hasFeedback === this.#hasFeedback) return;
 		this.#hasFeedback = hasFeedback;
 		if (!this.#refine) return;
-		this.#selectedIndex = hasFeedback ? 0 : this.#coerceIndex(Math.max(0, this.#selectedIndex - 1));
+		if (hasFeedback) this.#selectedIndex = 0;
+		else if (this.#selectedIndex <= this.#choices.length) {
+			this.#selectedIndex = this.#coerceIndex(this.#selectedIndex - 1);
+		}
 		this.#hoveredOption = undefined;
 	}
 
@@ -954,9 +955,7 @@ export class PlanReviewOverlay implements Component {
 	}
 
 	/**
-	 * Commit an external answer through the same input-locking path as Enter: an
-	 * enabled approval choice, or Refine (offered or not: the caller brings its own
-	 * feedback). False when nothing was committed.
+	 * Commit an external answer without opening the editor: remote Refine brings its own feedback.
 	 */
 	selectOption(id: string): boolean {
 		if (this.#committed) return false;
@@ -981,8 +980,17 @@ export class PlanReviewOverlay implements Component {
 		const entry = this.#entries()[index];
 		if (!entry || this.#isDisabled(index)) return;
 		if (entry.kind === "save") this.#save();
-		else if (entry.kind === "refine") this.#commit(entry.id, entry.label);
+		else if (entry.kind === "refine") this.#runRefine();
 		else this.#commit(entry.choice.id, entry.choice.label);
+	}
+
+	#runRefine(): void {
+		if (!this.#refine) return;
+		if (this.#hasFeedback) this.#commit(this.#refine.id, this.#refine.label);
+		else {
+			this.#annotating = true;
+			this.#editor.setText("");
+		}
 	}
 
 	#save(): void {
@@ -992,7 +1000,7 @@ export class PlanReviewOverlay implements Component {
 	/** The native main button: Refine while the plan has feedback, else the first enabled approval choice. */
 	#runMainAction(): void {
 		if (this.#hasFeedback && this.#refine) {
-			this.#commit(this.#refine.id, this.#refine.label);
+			this.#runRefine();
 			return;
 		}
 		const choice = this.#choices.find(candidate => candidate.disabled === undefined);
@@ -1001,7 +1009,7 @@ export class PlanReviewOverlay implements Component {
 
 	handleInput(keyData: string): void {
 		if (this.#committed) return;
-		if (keyData.startsWith("\x1b[<") && this.#handleMouse(keyData)) return;
+		if (!this.#annotating && keyData.startsWith("\x1b[<") && this.#handleMouse(keyData)) return;
 		if (this.#annotationChooser) {
 			this.#handleAnnotationChooser(keyData);
 			return;
@@ -1130,6 +1138,10 @@ export class PlanReviewOverlay implements Component {
 	#handleDockKeys(data: string): void {
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
 			this.#runMainAction();
+			return;
+		}
+		if (this.#refine && data === "r") {
+			this.#runRefine();
 			return;
 		}
 		if (matchesKey(data, "left")) {
@@ -1535,10 +1547,13 @@ export class PlanReviewOverlay implements Component {
 		const note = value.trim();
 		const target = this.#annotationTarget;
 		const editing = this.#editingAnnotation;
-		this.#annotating = false;
-		this.#annotationTarget = undefined;
-		this.#editingAnnotation = undefined;
-		this.#editor.setText("");
+		this.#exitAnnotate();
+		if (!target && this.#refine) {
+			if (!note) return;
+			this.callbacks.onFeedbackChange?.(`Refinement feedback on the plan:\n\n${note}`);
+			this.#commit(this.#refine.id, this.#refine.label);
+			return;
+		}
 		if (editing) {
 			const section = this.#sections[editing.sectionIndex];
 			const annotation = section?.annotations[editing.annotationIndex];
@@ -1936,12 +1951,12 @@ export class PlanReviewOverlay implements Component {
 					? `‹${title}›`
 					: `‹${title}› · ${truncateToWidth(target?.context ?? "", Math.max(1, innerWidth - 16), Ellipsis.Unicode)}`;
 			const caption = truncateToWidth(
-				`${theme.fg("dim", "Annotate")} ${theme.fg("accent", location)}`,
+				target ? `${theme.fg("dim", "Annotate")} ${theme.fg("accent", location)}` : "What should change in the plan?",
 				innerWidth,
 				Ellipsis.Unicode,
 			);
 			const hintParts = [
-				`${editorKey("tui.input.submit")} save`,
+				`${editorKey("tui.input.submit")} ${target ? "save" : "submit feedback"}`,
 				`${editorKey("tui.input.newLine")} newline`,
 				`${editorKey("tui.select.cancel")} cancel`,
 			];
@@ -2029,6 +2044,8 @@ export class PlanReviewOverlay implements Component {
 					"footer",
 				),
 			);
+		} else if (this.#annotating && !target) {
+			children.push(...this.#describeFooter());
 		} else if (dock) {
 			children.push(this.#describeDock());
 			children.push(...this.#describeFooter());
@@ -2104,7 +2121,8 @@ export class PlanReviewOverlay implements Component {
 	/**
 	 * The decision dock: the Approve split button (Refine while the plan has
 	 * feedback) whose menu holds every approval choice, the model chip (two or
-	 * more tiers; picking one is a slider move), then Save and Cancel.
+	 * more tiers; picking one is a slider move), then Save and Cancel. An unannotated
+	 * plan shows a separate Refine button so Enter remains approval by default.
 	 */
 	#describeDock(): NativeNode {
 		const refine = this.#hasFeedback && this.#refine !== undefined;
@@ -2137,6 +2155,16 @@ export class PlanReviewOverlay implements Component {
 		const children: NativeNode[] = [
 			node("buttons", { variant: "split", role: "omp.plan.approve" }, [main, more], "approve"),
 		];
+		if (!refine && this.#refine) {
+			children.push(
+				node(
+					"button",
+					{ role: "omp.btn", text: this.#refine.label, icon: "edit", keys: ["r"], actions: { click: "refine" } },
+					undefined,
+					"refine",
+				),
+			);
+		}
 		const slider = this.#slider;
 		if (slider && slider.segments.length >= 2) {
 			const active = slider.segments[this.#sliderIndex]!;
@@ -2197,6 +2225,7 @@ export class PlanReviewOverlay implements Component {
 
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (this.#committed) return;
+		if (this.#annotating && !this.#annotationTarget) return;
 		switch (event.type) {
 			case "docChange":
 				this.#applyDocText(event.text);
@@ -2278,7 +2307,7 @@ export class PlanReviewOverlay implements Component {
 				return;
 			}
 			case "refine":
-				if (this.#hasFeedback && this.#refine) this.#commit(this.#refine.id, this.#refine.label);
+				this.#runRefine();
 				return;
 			case "save":
 				this.#save();
@@ -2436,7 +2465,7 @@ export class PlanReviewOverlay implements Component {
 			const title = sanitizeStatusText(this.#sections[target?.sectionIndex ?? -1]?.title || "Plan preamble");
 			const location = target?.row === null ? `‹${title}›` : `‹${title}› · ${target?.context ?? ""}`;
 			const hints: (NativeHint | undefined)[] = [
-				actionHint("tui.input.submit", "save"),
+				actionHint("tui.input.submit", target ? "save" : "submit feedback"),
 				actionHint("tui.input.newLine", "newline"),
 				actionHint("tui.select.cancel", "cancel"),
 			];
@@ -2449,7 +2478,9 @@ export class PlanReviewOverlay implements Component {
 					{ role: "omp.plan.feedback", gap: "xs" },
 					[
 						keyed(
-							text([span("Note on ", "muted"), span(location, "accent")], { truncate: "end" }),
+							text(target ? [span("Note on ", "muted"), span(location, "accent")] : [span("What should change in the plan?")], {
+								truncate: "end",
+							}),
 							"annotateHead",
 						),
 						this.#editor,
@@ -2471,7 +2502,7 @@ export class PlanReviewOverlay implements Component {
 		});
 		const hints: (NativeHint | undefined)[] = [];
 		if (this.#nativeDock) {
-			// The dock's buttons carry their own keycaps (Enter, Esc); the hints name the rest.
+			// The dock's buttons carry their own keycaps; the hints name the rest.
 			if (this.#slider) hints.push(key(["left", "right"], "model"));
 			if (this.#sidebarShown) {
 				hints.push(upDown("section"), key("d", "delete section"));
@@ -2524,9 +2555,12 @@ export class PlanReviewOverlay implements Component {
 		const bodyContentWidth = sidebarShown ? splitBodyWidth(width, sidebarWidth) : innerWidth;
 
 		const committed = this.#committed;
-		const sliderLines = committed ? [] : this.#renderSliderLines();
+		const draftingRefinement = this.#annotating && !this.#annotationTarget;
+		const sliderLines = committed || draftingRefinement ? [] : this.#renderSliderLines();
 		const submittingLabel = this.#committedLabel ? `${this.#committedLabel} — submitting…` : "Submitting…";
-		const optionLines = committed ? [theme.bold(theme.fg("accent", submittingLabel))] : this.#renderOptionLines();
+		const optionLines = committed
+			? [theme.bold(theme.fg("accent", submittingLabel))]
+			: draftingRefinement ? [] : this.#renderOptionLines();
 		const promptLines = this.#promptTitle ? [theme.bold(theme.fg("accent", this.#promptTitle))] : [];
 		const baseChrome = 4 + promptLines.length + sliderLines.length + optionLines.length;
 		const chooserFooterRows = this.#annotationChooser

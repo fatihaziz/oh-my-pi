@@ -2067,7 +2067,9 @@ export class ExtensionRunner {
 				const handlers = ext.handlers.get(event.type);
 				if (!handlers || handlers.length === 0) continue;
 				const turn = turns?.get(ext);
-				if (turn?.ready && !(await awaitDeliveryTurn(turn.ready, turn.deadline, signal)) && !signal?.aborted) {
+				// Todo snapshots must be observed in journal order even if an earlier handler is slow.
+				if (event.type === "todo_committed" && turn?.ready) await turn.ready;
+				else if (turn?.ready && !(await awaitDeliveryTurn(turn.ready, turn.deadline, signal)) && !signal?.aborted) {
 					logger.warn("Extension still handling an earlier event; delivering out of order", {
 						extensionPath: ext.path,
 						event: event.type,
@@ -2153,7 +2155,8 @@ export class ExtensionRunner {
 		timeoutMs: number,
 	): Map<Extension, DeliveryTurn> | undefined {
 		const scope = this.#toolRegistrationScope.getStore();
-		if (scope && !scope.closed) return undefined;
+		// Todo notifications are always detached, so reentrant commits can safely queue too.
+		if (scope && !scope.closed && type !== "todo_committed") return undefined;
 		const deadline = performance.now() + timeoutMs;
 		let turns: Map<Extension, DeliveryTurn> | undefined;
 		for (const ext of extensions) {

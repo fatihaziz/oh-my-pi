@@ -754,13 +754,17 @@ describe("callSessionTool", () => {
 	it("persists bridged todo mutations to the branch, which a direct toolResult would carry", async () => {
 		let phases: TodoPhase[] = [{ name: "Ship", tasks: [{ content: "Persist", status: "in_progress" }] }];
 		const persisted: TodoPhase[][] = [];
+		const operations: unknown[] = [];
 		const session: ToolSession = {
 			...createSession([]),
 			getTodoPhases: () => phases,
 			setTodoPhases: next => {
 				phases = next;
 			},
-			commitTodoPhases: next => persisted.push(next),
+			commitTodoPhases: (next, op) => {
+				persisted.push(next);
+				operations.push(op);
+			},
 			getToolByName: name => (name === "todo" ? (todoTool as unknown as AgentTool) : undefined),
 		};
 		const todoTool = new TodoTool(session);
@@ -772,6 +776,7 @@ describe("callSessionTool", () => {
 		await callSessionTool("todo", { op: "view" }, { session });
 		await callSessionTool("todo", { op: "done", task: "No such task" }, { session });
 		expect(persisted).toHaveLength(1);
+		expect(operations).toEqual(["done"]);
 	});
 
 	it("persists and summarizes a todo wire alias using the resolved canonical identity", async () => {

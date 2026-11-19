@@ -1330,7 +1330,7 @@ describe("InteractiveMode plan review rendering", () => {
 				onOpened: () => {
 					const overlay = mode.ui.getFocused();
 					if (!(overlay instanceof PlanReviewOverlay)) throw new Error("Plan review did not take focus");
-					expect(overlay.render(80).join("\n")).not.toContain("Refine plan");
+					expect(overlay.render(80).join("\n")).toContain("Refine plan");
 					overlay.handleInput("\x1b");
 				},
 			},
@@ -1344,6 +1344,54 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(startSpy).not.toHaveBeenCalled();
 		expect(onInput).not.toHaveBeenCalled();
 		expect(session.isPlanInternalAbortPending).toBe(false);
+	});
+
+	it("revises from the initial terminal review without approving or replacing the goal", async () => {
+		const planFilePath = "local://refine-plan.md";
+		await Bun.write(resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		}), "# Draft\n\n## Todo\n- [ ] First task\n");
+		const previousGoal = await seedPreviousGoal("paused");
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const onInput = vi.fn();
+		mode.onInputCallback = onInput;
+		const events = observeExtensionEvents(session);
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "Draft" }, {
+			abortTurn: false,
+			onOpened: () => {
+				const overlay = mode.ui.getFocused();
+				if (!(overlay instanceof PlanReviewOverlay)) throw new Error("Plan review did not take focus");
+				for (const key of ["\x1b[B", "\x1b[B", "\x1b[B", "\r"]) overlay.handleInput(key);
+				expect(overlay.render(80).join("\n")).toContain("What should change in the plan?");
+				overlay.handleInput("\x1b");
+				expect(mode.ui.getFocused()).toBe(overlay);
+				expect(overlay.render(48).join("\n")).toContain("Refine plan");
+				for (const key of ["\r", " ", "\r"]) overlay.handleInput(key);
+				expect(mode.ui.getFocused()).toBe(overlay);
+				expect(mode.getPendingPlanReview()).toBeDefined();
+				expect(onInput).not.toHaveBeenCalled();
+				overlay.handleInput("\r");
+				overlay.handleInput("Add a rollback step");
+				overlay.handleInput("\r");
+			},
+		});
+
+		expect(onInput).toHaveBeenCalledTimes(1);
+		expect(onInput).toHaveBeenCalledWith(expect.objectContaining({
+			text: "Refinement feedback on the plan:\n\nAdd a rollback step",
+		}));
+		expect(mode.planModeEnabled).toBe(true);
+		expect(session.getGoalModeState()).toEqual(previousGoal);
+		expect(session.getTodoPhases()).toEqual(previousTodos);
+		expect(prompt).not.toHaveBeenCalled();
+		expect(mode.ui.hasOverlay()).toBe(false);
+		expect(events.filter(event => event.type === "plan_review_resolved")).toEqual([
+			expect.objectContaining({ choice: "refine", by: "local" }),
+		]);
 	});
 
 	it.each([

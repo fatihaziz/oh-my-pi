@@ -1803,6 +1803,23 @@ describe("ExtensionRunner", () => {
 			expect(res.isError).toBe(true);
 		});
 
+		it("preserves the native programmatic flag without inferring it from the call id", async () => {
+			const runner = await runnerFor(`
+				export default function(pi) {
+					pi.on("tool_result", event => ({
+						content: [{ type: "text", text: String(event.programmatic) }],
+					}));
+				}
+			`);
+			const wrapper = new ExtensionToolWrapper(okTool, runner);
+			const nested = await wrapper.execute("ordinary-id", {} as never, undefined, undefined, {
+				programmatic: true,
+			} as AgentToolContext);
+			const direct = await wrapper.execute("eval:ordinary-id", {} as never, undefined, undefined, undefined);
+			expect(firstText(nested)).toBe("true");
+			expect(firstText(direct)).toBe("undefined");
+		});
+
 		it("preserves a tool-reported error through extension rewrites", async () => {
 			const runner = await runnerFor(`
 				export default function(pi) {

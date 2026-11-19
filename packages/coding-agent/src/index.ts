@@ -72,6 +72,7 @@ export type {
 } from "@oh-my-pi/pi-tui/tools/task";
 // Tools (detail types and utilities)
 export * from "./tools";
+export { stripRawOutputArtifactNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 export * from "./tools/hashline-header-path";
 export * from "./utils/github";
 // UI components for extensions
