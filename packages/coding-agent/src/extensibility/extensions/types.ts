@@ -1483,7 +1483,8 @@ export interface ToolApprovalResolvedEvent {
 export type PlanReviewChoice = "execute" | "compact" | "keep" | "refine" | "save";
 /**
  * A choice of the interactive plan review, delivered in order by `plan_review_requested`. The overlay
- * shows `refine` only while the plan has comments; it is always answerable with feedback.
+ * always offers `refine`; without annotations the local pick returns to the chat composer instead of
+ * sending, while `refine` remains answerable with feedback.
  */
 export interface PlanReviewOption {
 	id: PlanReviewChoice;

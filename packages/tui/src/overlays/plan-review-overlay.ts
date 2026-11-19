@@ -367,7 +367,7 @@ export interface PlanReviewOverlayOptions {
 	promptTitle?: string;
 	/** Approval choices, in order; the first enabled one is the native Approve button's click. */
 	options: readonly PlanReviewOverlayChoice[];
-	/** Refine opens feedback unless annotations or section deletions already supply it. */
+	/** The Refine action: commits its id whether or not annotations supply feedback. */
 	refine?: { readonly id: string; readonly label: string };
 	/** Trailing footer hint (cancel hint); the overlay prepends dynamic help. */
 	helpText?: string;
@@ -986,11 +986,7 @@ export class PlanReviewOverlay implements Component {
 
 	#runRefine(): void {
 		if (!this.#refine) return;
-		if (this.#hasFeedback) this.#commit(this.#refine.id, this.#refine.label);
-		else {
-			this.#annotating = true;
-			this.#editor.setText("");
-		}
+		this.#commit(this.#refine.id, this.#refine.label);
 	}
 
 	#save(): void {
@@ -1031,6 +1027,10 @@ export class PlanReviewOverlay implements Component {
 		if (matchesSelectCancel(keyData)) {
 			this.#committed = true;
 			this.callbacks.onCancel();
+			return;
+		}
+		if (this.#refine && keyData === "r") {
+			this.#runRefine();
 			return;
 		}
 		if (this.#nativeDock && isNativeRendering()) {
@@ -1138,10 +1138,6 @@ export class PlanReviewOverlay implements Component {
 	#handleDockKeys(data: string): void {
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
 			this.#runMainAction();
-			return;
-		}
-		if (this.#refine && data === "r") {
-			this.#runRefine();
 			return;
 		}
 		if (matchesKey(data, "left")) {
@@ -1548,12 +1544,6 @@ export class PlanReviewOverlay implements Component {
 		const target = this.#annotationTarget;
 		const editing = this.#editingAnnotation;
 		this.#exitAnnotate();
-		if (!target && this.#refine) {
-			if (!note) return;
-			this.callbacks.onFeedbackChange?.(`Refinement feedback on the plan:\n\n${note}`);
-			this.#commit(this.#refine.id, this.#refine.label);
-			return;
-		}
 		if (editing) {
 			const section = this.#sections[editing.sectionIndex];
 			const annotation = section?.annotations[editing.annotationIndex];
@@ -1704,6 +1694,7 @@ export class PlanReviewOverlay implements Component {
 				);
 				break;
 		}
+		if (this.#refine) parts.push(`${formatKeyHint("r")} refine`);
 		if (this.callbacks.onCopyPlan) parts.push(`${formatKeyHint("c")} copy`);
 		parts.push(`${formatKeyHint("tab")} regions`);
 		if (this.#externalEditorLabel && this.#focus !== "toc") parts.push(`${this.#externalEditorLabel} editor`);
@@ -1942,21 +1933,21 @@ export class PlanReviewOverlay implements Component {
 
 	#renderFooterLines(innerWidth: number, maxChooserRows = Number.POSITIVE_INFINITY): string[] {
 		if (this.#annotationChooser) return this.#renderAnnotationChooserLines(innerWidth, maxChooserRows);
-		if (this.#annotating) {
-			const target = this.#annotationTarget;
-			const section = target ? this.#sections[target.sectionIndex] : undefined;
+		const target = this.#annotationTarget;
+		if (this.#annotating && target) {
+			const section = this.#sections[target.sectionIndex];
 			const title = sanitizeStatusText(section?.title || "Plan preamble");
 			const location =
-				target?.row === null
+				target.row === null
 					? `‹${title}›`
-					: `‹${title}› · ${truncateToWidth(target?.context ?? "", Math.max(1, innerWidth - 16), Ellipsis.Unicode)}`;
+					: `‹${title}› · ${truncateToWidth(target.context ?? "", Math.max(1, innerWidth - 16), Ellipsis.Unicode)}`;
 			const caption = truncateToWidth(
-				target ? `${theme.fg("dim", "Annotate")} ${theme.fg("accent", location)}` : "What should change in the plan?",
+				`${theme.fg("dim", "Annotate")} ${theme.fg("accent", location)}`,
 				innerWidth,
 				Ellipsis.Unicode,
 			);
 			const hintParts = [
-				`${editorKey("tui.input.submit")} ${target ? "save" : "submit feedback"}`,
+				`${editorKey("tui.input.submit")} save`,
 				`${editorKey("tui.input.newLine")} newline`,
 				`${editorKey("tui.select.cancel")} cancel`,
 			];
@@ -2044,8 +2035,6 @@ export class PlanReviewOverlay implements Component {
 					"footer",
 				),
 			);
-		} else if (this.#annotating && !target) {
-			children.push(...this.#describeFooter());
 		} else if (dock) {
 			children.push(this.#describeDock());
 			children.push(...this.#describeFooter());
@@ -2225,7 +2214,6 @@ export class PlanReviewOverlay implements Component {
 
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (this.#committed) return;
-		if (this.#annotating && !this.#annotationTarget) return;
 		switch (event.type) {
 			case "docChange":
 				this.#applyDocText(event.text);
@@ -2460,12 +2448,12 @@ export class PlanReviewOverlay implements Component {
 				),
 			];
 		}
-		if (this.#annotating) {
-			const target = this.#annotationTarget;
-			const title = sanitizeStatusText(this.#sections[target?.sectionIndex ?? -1]?.title || "Plan preamble");
-			const location = target?.row === null ? `‹${title}›` : `‹${title}› · ${target?.context ?? ""}`;
+		const target = this.#annotationTarget;
+		if (this.#annotating && target) {
+			const title = sanitizeStatusText(this.#sections[target.sectionIndex]?.title || "Plan preamble");
+			const location = target.row === null ? `‹${title}›` : `‹${title}› · ${target.context ?? ""}`;
 			const hints: (NativeHint | undefined)[] = [
-				actionHint("tui.input.submit", target ? "save" : "submit feedback"),
+				actionHint("tui.input.submit", "save"),
 				actionHint("tui.input.newLine", "newline"),
 				actionHint("tui.select.cancel", "cancel"),
 			];
@@ -2478,7 +2466,7 @@ export class PlanReviewOverlay implements Component {
 					{ role: "omp.plan.feedback", gap: "xs" },
 					[
 						keyed(
-							text(target ? [span("Note on ", "muted"), span(location, "accent")] : [span("What should change in the plan?")], {
+							text([span("Note on ", "muted"), span(location, "accent")], {
 								truncate: "end",
 							}),
 							"annotateHead",
@@ -2514,6 +2502,7 @@ export class PlanReviewOverlay implements Component {
 			}
 			return hints;
 		}
+		if (this.#refine) hints.push(key("r", "refine"));
 		switch (this.#focus) {
 			case "actions":
 				hints.push(key(["left", "right"], "select"), key("enter", "confirm"));
@@ -2555,12 +2544,11 @@ export class PlanReviewOverlay implements Component {
 		const bodyContentWidth = sidebarShown ? splitBodyWidth(width, sidebarWidth) : innerWidth;
 
 		const committed = this.#committed;
-		const draftingRefinement = this.#annotating && !this.#annotationTarget;
-		const sliderLines = committed || draftingRefinement ? [] : this.#renderSliderLines();
+		const sliderLines = committed ? [] : this.#renderSliderLines();
 		const submittingLabel = this.#committedLabel ? `${this.#committedLabel} — submitting…` : "Submitting…";
 		const optionLines = committed
 			? [theme.bold(theme.fg("accent", submittingLabel))]
-			: draftingRefinement ? [] : this.#renderOptionLines();
+			: this.#renderOptionLines();
 		const promptLines = this.#promptTitle ? [theme.bold(theme.fg("accent", this.#promptTitle))] : [];
 		const baseChrome = 4 + promptLines.length + sliderLines.length + optionLines.length;
 		const chooserFooterRows = this.#annotationChooser

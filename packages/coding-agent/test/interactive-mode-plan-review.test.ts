@@ -13,6 +13,7 @@ import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import type { HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
+import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type {
 	Extension,
@@ -86,7 +87,7 @@ function observeExtensionEvents(session: AgentSession, onEvent?: (event: Extensi
 	};
 	Object.defineProperty(session, "extensionRunner", {
 		configurable: true,
-		get: () => ({ emit }),
+		get: () => ({ emit, hasHandlers: () => false }),
 	});
 	return events;
 }
@@ -1114,8 +1115,12 @@ describe("InteractiveMode plan review rendering", () => {
 		mode.onInputCallback = input => submissions.push(input);
 		const promptSpy = vi.spyOn(session, "prompt");
 
+		mode.editor.setText("Existing draft");
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		// An annotated refinement dispatches its own feedback and leaves the composer draft in place.
+		expect(mode.editor.getExpandedText()).toBe("Existing draft");
 		expect(mode.cancelPendingSubmission()).toBe(true);
+		expect(mode.editor.getExpandedText()).toBe("Existing draft");
 
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 		expect(mode.markPendingSubmissionStarted(submissions[1]!)).toBe(true);
@@ -1157,7 +1162,10 @@ describe("InteractiveMode plan review rendering", () => {
 			title: "PLAN",
 		});
 
-		expect(startSpy).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining("needs detail") }));
+		expect(startSpy).toHaveBeenCalledWith(
+			expect.objectContaining({ text: expect.stringContaining("needs detail") }),
+			{ preserveDraft: true },
+		);
 		expect(onInput).toHaveBeenCalledTimes(1);
 		expect(session.getGoalModeState()).toEqual(previousGoal);
 		expect(session.getTodoPhases()).toEqual(previousTodos);
@@ -1346,52 +1354,91 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(session.isPlanInternalAbortPending).toBe(false);
 	});
 
-	it("revises from the initial terminal review without approving or replacing the goal", async () => {
+	it("returns an unannotated refinement to the composer without submitting, then sends a chat message once", async () => {
 		const planFilePath = "local://refine-plan.md";
-		await Bun.write(resolveLocalUrlToPath(planFilePath, {
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
 			getSessionId: () => session.sessionManager.getSessionId(),
-		}), "# Draft\n\n## Todo\n- [ ] First task\n");
+		});
+		await Bun.write(resolvedPlanPath, "# Draft\n\n## Todo\n- [ ] First task\n");
 		const previousGoal = await seedPreviousGoal("paused");
+		const sessionId = session.sessionManager.getSessionId();
+		const draft = "Existing draft\nwith a second line kept in the composer";
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
+		mode.editor.setText(draft);
+		mode.ui.setFocus(mode.editor);
 		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const startSpy = vi.spyOn(mode, "startPendingSubmission");
 		const onInput = vi.fn();
 		mode.onInputCallback = onInput;
 		const events = observeExtensionEvents(session);
 
-		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "Draft" }, {
-			abortTurn: false,
-			onOpened: () => {
-				const overlay = mode.ui.getFocused();
-				if (!(overlay instanceof PlanReviewOverlay)) throw new Error("Plan review did not take focus");
-				for (const key of ["\x1b[B", "\x1b[B", "\x1b[B", "\r"]) overlay.handleInput(key);
-				expect(overlay.render(80).join("\n")).toContain("What should change in the plan?");
-				overlay.handleInput("\x1b");
-				expect(mode.ui.getFocused()).toBe(overlay);
-				expect(overlay.render(48).join("\n")).toContain("Refine plan");
-				for (const key of ["\r", " ", "\r"]) overlay.handleInput(key);
-				expect(mode.ui.getFocused()).toBe(overlay);
-				expect(mode.getPendingPlanReview()).toBeDefined();
-				expect(onInput).not.toHaveBeenCalled();
-				overlay.handleInput("\r");
-				overlay.handleInput("Add a rollback step");
-				overlay.handleInput("\r");
+		await mode.handlePlanApproval(
+			{ planFilePath, planExists: true, title: "Draft" },
+			{
+				onOpened: () => {
+					const overlay = mode.ui.getFocused();
+					if (!(overlay instanceof PlanReviewOverlay)) throw new Error("Plan review did not take focus");
+					const firstFrame = overlay.render(48).join("\n");
+					expect(firstFrame).toContain("Refine plan");
+					expect(firstFrame).toContain("refine");
+					// The fixture's keep-context row is enabled, so three rows down reach Refine before Save.
+					for (const key of ["\x1b[B", "\x1b[B", "\x1b[B", "\r"]) overlay.handleInput(key);
+					expect(overlay.render(48).join("\n")).toContain("Refine plan — submitting");
+					expect(overlay.render(48).join("\n")).not.toContain("What should change in the plan?");
+				},
 			},
-		});
+		);
 
-		expect(onInput).toHaveBeenCalledTimes(1);
-		expect(onInput).toHaveBeenCalledWith(expect.objectContaining({
-			text: "Refinement feedback on the plan:\n\nAdd a rollback step",
-		}));
+		// The review closed into the existing composer: nothing dispatched, nothing approved, no draft touched.
+		expect(mode.ui.hasOverlay()).toBe(false);
+		expect(mode.ui.getFocused()).toBe(mode.editor);
 		expect(mode.planModeEnabled).toBe(true);
+		expect(mode.planModePlanFilePath).toBe(planFilePath);
+		expect(session.sessionManager.getSessionId()).toBe(sessionId);
+		expect(mode.editor.getExpandedText()).toBe(draft);
+		expect(onInput).not.toHaveBeenCalled();
+		expect(startSpy).not.toHaveBeenCalled();
+		expect(prompt).not.toHaveBeenCalled();
 		expect(session.getGoalModeState()).toEqual(previousGoal);
 		expect(session.getTodoPhases()).toEqual(previousTodos);
-		expect(prompt).not.toHaveBeenCalled();
-		expect(mode.ui.hasOverlay()).toBe(false);
 		expect(events.filter(event => event.type === "plan_review_resolved")).toEqual([
 			expect.objectContaining({ choice: "refine", by: "local" }),
 		]);
+
+		// The ordinary chat handler still owns the composer: the draft is text, not a submission, until Enter.
+		mode.editor.setText("");
+		new InputController(mode).setupEditorSubmitHandler();
+		// Startup enables the composer's submit only after wiring the handler; the fixture skips startup.
+		mode.editor.disableSubmit = false;
+		for (const char of "Add a rollback step") mode.editor.handleInput(char);
+		expect(mode.editor.getExpandedText()).toBe("Add a rollback step");
+		expect(onInput).not.toHaveBeenCalled();
+		expect(startSpy).not.toHaveBeenCalled();
+		expect(prompt).not.toHaveBeenCalled();
+
+		// Enter dispatches through the handler `setupEditorSubmitHandler` installed on the composer.
+		const installed = mode.editor.onSubmit;
+		if (!installed) throw new Error("The composer has no submit handler");
+		let entered = false;
+		let dispatched = Promise.resolve();
+		mode.editor.onSubmit = value => {
+			entered = true;
+			dispatched = Promise.resolve(installed(value));
+			return dispatched;
+		};
+		mode.editor.handleInput("\r");
+		expect(entered).toBe(true);
+		await dispatched;
+		const input = onInput.mock.calls[0]?.[0] as SubmittedUserInput | undefined;
+		expect(input?.text).toBe("Add a rollback step");
+		expect(input?.text).not.toContain("Refinement feedback");
+		expect(onInput).toHaveBeenCalledTimes(1);
+		expect(prompt).not.toHaveBeenCalled();
+		expect(mode.planModeEnabled).toBe(true);
+		expect(session.getGoalModeState()).toEqual(previousGoal);
+		expect(session.getTodoPhases()).toEqual(previousTodos);
 	});
 
 	it.each([

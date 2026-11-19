@@ -113,7 +113,7 @@ Review options:
 - **Approve and execute** — fresh context (session cleared).
 - **Approve and compact context** — discussion distilled, then executes here.
 - **Approve and keep context** — executes here with exploration history.
-- **Refine plan**: sends feedback into another planning turn without approving.
+- **Refine plan**: with feedback, sends it into another planning turn without approving; without feedback, just returns to the composer without submitting.
 - **Save** — copies the plan to a chosen path; the review stays open.
 
 All require self-contained file.

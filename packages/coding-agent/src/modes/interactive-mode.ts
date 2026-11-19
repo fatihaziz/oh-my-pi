@@ -8331,11 +8331,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		if (choice === "refine") {
-			// Local Refine collects feedback before settling the review; remote answers supply their own.
 			const refinement = remote?.choice === "refine" ? (remote.feedback ?? "") : feedback;
+			// Blank feedback closes the review into the composer without submitting anything.
+			if (!refinement.trim()) {
+				closePlanReview();
+				return;
+			}
 			try {
 				if (this.onInputCallback) {
-					const input = this.startPendingSubmission({ text: refinement });
+					// An annotated dispatch leaves the composer draft and attachments intact.
+					const input = this.startPendingSubmission({ text: refinement }, { preserveDraft: true });
 					this.#planReviewAnnotationStateBySubmission.set(input, annotationStateKey);
 					this.onInputCallback(input);
 				} else {
