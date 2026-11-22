@@ -15,6 +15,10 @@ Package-specific references:
 - [MCP server/tool authoring](../../docs/mcp-server-tool-authoring.md)
 - [DEVELOPMENT](./DEVELOPMENT.md)
 
+## Native Antigravity tasks (Windows)
+
+The `agy-acp` agent passes one explicit assignment to `agy.exe acp` in an isolated workspace. An operator model and effort grant is required. The worker checks the advertised selections before prompting and relays permission decisions to the user. Parent tools and history are not forwarded. An isolated workspace is not an operating-system sandbox.
+
 ## Bash visualization
 
 Embedded-shell calls default to Python-like **Pseudo**; switch to **Raw** for the original command. Syntax appears incrementally as the shell compiles it. Active commands retain their colors while inactive code fades; only failures get `×`. Values appear beside each variable's latest observed setter.

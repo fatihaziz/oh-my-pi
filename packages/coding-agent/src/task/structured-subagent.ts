@@ -446,6 +446,14 @@ function preflightPerCallModel(
 		standaloneInvocationKind: workflowRouting ? request.invocationKind : undefined,
 		matchPreferences: structuredClone(getModelMatchPreferences(settings.grantAuthority())),
 	};
+	if (agent.name === "agy-acp") {
+		const allowed = cfgTaskAgentModelOverrides.get(settings.grantAuthority())[agent.name];
+		if (agent.source !== "bundled" || !workflowRouting || typeof allowed !== "string" ||
+			allowed !== perCallModel || !/^agy-acp\/[a-z0-9._-]+:[a-z]+$/i.test(perCallModel)) {
+			fail("Native ACP requires an exact operator-assigned model and effort for agy-acp.");
+		}
+		return grants;
+	}
 	// A cold registry is checked again in the executor once models are loaded.
 	const available = modelRegistry?.getAvailable("all");
 	if (!modelRegistry || !available?.length) return grants;
@@ -519,6 +527,11 @@ export async function resolveEffectiveSubagentPolicy(
 	const spawnPolicy = resolveSpawnPolicy(request.session.getSessionSpawns());
 	const agentName = request.agent?.trim() || spawnPolicy.defaultAgent;
 	const planMode = request.session.getPlanModeState?.()?.enabled === true;
+	if (agentName === "agy-acp" && (cfgTaskDisabledAgents.get(request.session.settings.grantAuthority()).includes(agentName) ||
+		!request.isolation?.requested || planMode || request.steps?.length ||
+		process.env.PI_FOYER === "true" || process.env.FOYER_VERSION || process.env.FOYER_COMPANION_OBSERVER_URL)) {
+		throw new StructuredSubagentError("preflight", "Native ACP requires an enabled isolated worker and a single local assignment.");
+	}
 	assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, agentName);
 
@@ -850,6 +863,7 @@ function buildExecutorOptions(
 	const steps = request.steps?.length ? renderStepPrompts(request.steps, policy.structured) : undefined;
 	return {
 		cwd: session.cwd,
+		acpUI: policy.agentName === "agy-acp" ? session.getToolContext?.()?.ui : undefined,
 		costGate: session.costGate,
 		additionalDirectories: session.additionalDirectories,
 		getApiKey: session.getApiKey,

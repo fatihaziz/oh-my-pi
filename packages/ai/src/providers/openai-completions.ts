@@ -35,7 +35,7 @@ import type {
 	ToolChoice,
 	ToolResultMessage,
 } from "../types";
-import { normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
+import { getHeaderCaseInsensitive, normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { isDemotedThinking, kStreamingLastParseLen } from "../utils/block-symbols";
 import { hasVisibleAssistantContent, withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
@@ -951,6 +951,11 @@ const streamOpenAICompletionsOnce = (
 				activeReasoningEffortFallbackKey = reasoningEffortFallbackKey;
 				const replacedParams = await options?.onPayload?.(params, model);
 				if (replacedParams !== undefined) params = replacedParams as typeof params;
+				if (model.provider === "9router" && getHeaderCaseInsensitive(model.headers, "x-9router-exclude-provider") === "antigravity") {
+					if (typeof params.model !== "string" || /^(?:ag|antigravity)\//i.test(params.model)) {
+						throw new Error("Antigravity generation is excluded by client policy");
+					}
+				}
 				activeRequestParams = params;
 				rawRequestDump = {
 					provider: model.provider,

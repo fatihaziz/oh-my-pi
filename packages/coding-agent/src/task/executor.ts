@@ -64,7 +64,8 @@ import { type OverlayLayers, Settings } from "../config/settings";
 
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { CustomTool } from "../extensibility/custom-tools/types";
-import type { PreparedExtension } from "../extensibility/extensions/types";
+import type { ExtensionUIContext, PreparedExtension } from "../extensibility/extensions/types";
+import { runAgyWorker } from "./agy-acp";
 import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionStateApi } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -461,6 +462,7 @@ export interface ExecutorOptions {
 	/** Parent session whose stored credential affinities seed the child session. */
 	credentialSourceSessionId?: string;
 	worktree?: string;
+	acpUI?: Pick<ExtensionUIContext, "select" | "input">;
 	agent: AgentDefinition;
 	task: string;
 	/**
@@ -4615,6 +4617,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
  */
 export async function runSubprocess(options: ExecutorOptions): Promise<SingleResult> {
 	options.assertSpawnAuthorization?.();
+	if (options.agent.name === "agy-acp") return runAgyWorker(options);
 	const pool = isMainThread() && options.settings ? subagentWorkerPool(options.settings) : undefined;
 	return pool ? runSubprocessPlaced(pool, options, runSubprocessOnThisThread) : runSubprocessOnThisThread(options);
 }
