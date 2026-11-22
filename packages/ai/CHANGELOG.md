@@ -5,6 +5,7 @@
 ### Fixed
 
 - OpenAI-compatible content filters now surface with the provider's explanation when available. Reasoning-history filtering no longer replays foreign reasoning as visible text.
+- Antigravity CLI reports quota retry notices and warning-only terminal responses as HTTP 429 errors instead of successful replies.
 
 ## [19.0.0] - 2026-11-18
 
