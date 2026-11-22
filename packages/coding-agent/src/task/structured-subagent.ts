@@ -465,6 +465,14 @@ function preflightPerCallModel(
 		standaloneInvocationKind: workflowRouting ? request.invocationKind : undefined,
 		matchPreferences: structuredClone(getModelMatchPreferences(settings.grantAuthority())),
 	};
+	if (agent.name === "agy-acp") {
+		const allowed = cfgTaskAgentModelOverrides.get(settings.grantAuthority())[agent.name];
+		if (agent.source !== "bundled" || !workflowRouting || typeof allowed !== "string" ||
+			allowed !== perCallModel || !/^agy-acp\/[a-z0-9._-]+:[a-z]+$/i.test(perCallModel)) {
+			fail("Native ACP requires an exact operator-assigned model and effort for agy-acp.");
+		}
+		return grants;
+	}
 	// A cold registry is checked again in the executor once models are loaded.
 	const available = modelRegistry?.getAvailable("all");
 	if (!modelRegistry || !available?.length) return grants;
@@ -537,6 +545,9 @@ export async function resolveEffectiveSubagentPolicy(
 	});
 	const spawnPolicy = resolveSpawnPolicy(request.session.getSessionSpawns());
 	const agentName = request.agent?.trim() || spawnPolicy.defaultAgent;
+	if (agentName === 'agy-acp' && (cfgTaskDisabledAgents.get(request.session.settings.grantAuthority()).includes(agentName) ||
+		!request.isolation?.requested || request.session.getPlanModeState?.()?.enabled || hostedRuntime() ||
+		externalExecutorForSession(request.session.getSessionFile()))) throw new StructuredSubagentError('preflight','Native Antigravity delegation is disabled or lacks an isolated local workspace');
 	const planMode = request.session.getPlanModeState?.()?.enabled === true;
 	if (agentName !== SEANCE_AGENT_NAME) assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, agentName);
@@ -902,6 +913,7 @@ function buildExecutorOptions(
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
 	return {
 		cwd: session.cwd,
+		acpUI: policy.agentName === 'agy-acp' ? session.getToolContext?.()?.ui : undefined,
 		costGate: session.costGate,
 		additionalDirectories: constrained && policy.agent.filePath ? [path.dirname(path.dirname(policy.agent.filePath))] : session.additionalDirectories,
 		getApiKey: session.getApiKey,

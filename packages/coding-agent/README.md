@@ -15,6 +15,12 @@ Package-specific references:
 - [MCP server/tool authoring](../../docs/mcp-server-tool-authoring.md)
 - [DEVELOPMENT](./DEVELOPMENT.md)
 
+## Native Antigravity tasks (Windows)
+
+The `agy-acp` agent runs the installed `agy.exe acp` in an isolated task workspace. It requires an exact operator-assigned `agy-acp/model:effort` selector and a current dispatch grant. Disabled providers or a disabled agent prevent launch. A new session receives the workspace path, no MCP servers, and only the explicit assignment; no parent history or tool definitions are replayed. ACP permission choices belong to the human. A refused or cancelled turn is not retried on another model.
+
+Workspace isolation preserves file changes. It is not an operating-system sandbox or a guarantee about the CLI's own network traffic.
+
 ## Memory backends
 
 The agent supports three mutually-exclusive memory backends, selected via the `memory.backend` setting (Settings → Memory tab, or `~/.omp/config.yml`):

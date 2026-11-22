@@ -2508,6 +2508,7 @@ export interface SingleResult {
 	description?: string;
 	lastIntent?: string;
 	exitCode: number;
+	acpStopReason?: string;
 	output: string;
 	stderr: string;
 	truncated: boolean;
