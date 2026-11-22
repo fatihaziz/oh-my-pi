@@ -1,8 +1,9 @@
 import { isAbsolute, join } from 'node:path';
 import type { AgentProgress, SingleResult } from '@oh-my-pi/pi-tui/tools/task';
 import type { ExecutorOptions } from './executor';
-import { cfgTaskAgentModelOverrides, cfgTaskDisabledAgents, cfgTaskPerCallModelAllow } from './settings';
+import { cfgTaskDisabledAgents, cfgTaskMaxEffort, cfgTaskPerCallModelAllow, perCallModelEnabled } from './settings';
 import { cfgDisabledProviders } from '../config/model-settings';
+import { THINKING_EFFORTS } from '@oh-my-pi/pi-catalog/effort';
 import { ClientSideConnection, ndJsonStream, PROTOCOL_VERSION, type Client, type SessionConfigOption } from '@oh-my-pi/pi-utils/acp';
 import { spawn } from '@oh-my-pi/pi-utils/ptree';
 import { untilAborted } from '@oh-my-pi/pi-utils';
@@ -80,21 +81,26 @@ export async function superviseAcp(command: readonly string[], job: AcpAssignmen
 
 export async function runAgyWorker(options: ExecutorOptions): Promise<SingleResult> {
 	const authorize = () => {
-		const authority = options.settings?.grantAuthority();
-		const grant = options.perCallModelGrants?.assertAuthorization ?? options.assertSpawnAuthorization;
-		if (!authority || !grant || cfgDisabledProviders.get(authority).some(p => p === 'google-antigravity' || p === 'antigravity-cli') ||
-			cfgTaskDisabledAgents.get(authority).includes('agy-acp')) throw new Error('Antigravity worker dispatch is disabled');
-		const assigned = cfgTaskAgentModelOverrides.get(authority)['agy-acp'];
-		if (typeof assigned !== 'string' || options.perCallModelGrants?.standaloneSelector !== assigned ||
-			!(options.modelOverride === assigned || (Array.isArray(options.modelOverride) && options.modelOverride.length === 1 && options.modelOverride[0] === assigned))) {
-			throw new Error('Native ACP worker has no matching operator model grant');
-		}
+		const settings = options.settings, grants = options.perCallModelGrants;
+		if (!settings || !grants?.assertAuthorization || grants.agentName !== 'agy-acp' ||
+			grants.agentSource !== 'bundled' || !grants.standaloneInvocationKind ||
+			!perCallModelEnabled(settings, grants.standaloneInvocationKind)) throw new Error('Antigravity worker dispatch is disabled');
+		const authority = settings.grantAuthority();
+		const assigned = grants.standaloneSelector;
+		if (!assigned || !(options.modelOverride === assigned || (Array.isArray(options.modelOverride) &&
+			options.modelOverride.length === 1 && options.modelOverride[0] === assigned))) throw new Error('Native ACP worker has no matching per-spawn grant');
 		const identity = assigned.slice(0, assigned.lastIndexOf(':'));
-		for (const settings of [authority, options.settings!]) {
-			const allow = cfgTaskPerCallModelAllow.get(settings);
+		if (!/^agy-acp\/gemini-4-(?:argon|neon|hydrogen)$/.test(identity)) throw new Error('ACP worker model must be Argon, Neon or Hydrogen');
+		const effort = assigned.slice(assigned.lastIndexOf(':')+1);
+		for (const policy of [authority, settings]) {
+			if (cfgTaskDisabledAgents.get(policy).includes('agy-acp') || cfgDisabledProviders.get(policy).some(p =>
+				p === 'google-antigravity' || p === 'antigravity-cli')) throw new Error('Antigravity worker dispatch is disabled');
+			const index = THINKING_EFFORTS.findIndex(level => level === effort);
+			if (index < 0 || index > THINKING_EFFORTS.indexOf(cfgTaskMaxEffort.get(policy))) throw new Error('Unsupported ACP effort or effort above task ceiling');
+			const allow = cfgTaskPerCallModelAllow.get(policy);
 			if (allow.length && !allow.includes(identity)) throw new Error('ACP selector excluded by task model allowlist');
 		}
-		grant();
+		grants.assertAuthorization();
 	};
 	authorize();
 	const workspace = options.worktree, brief = options.assignment;

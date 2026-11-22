@@ -447,10 +447,8 @@ function preflightPerCallModel(
 		matchPreferences: structuredClone(getModelMatchPreferences(settings.grantAuthority())),
 	};
 	if (agent.name === "agy-acp") {
-		const allowed = cfgTaskAgentModelOverrides.get(settings.grantAuthority())[agent.name];
-		if (agent.source !== "bundled" || !workflowRouting || typeof allowed !== "string" ||
-			allowed !== perCallModel || !/^agy-acp\/[a-z0-9._-]+:[a-z]+$/i.test(perCallModel)) {
-			fail("Native ACP requires an exact operator-assigned model and effort for agy-acp.");
+		if (agent.source !== "bundled" || !workflowRouting || !/^agy-acp\/[a-z0-9._-]+:[a-z]+$/.test(perCallModel)) {
+			fail("Native ACP requires a workflow-authorized agy-acp/model:effort selector.");
 		}
 		return grants;
 	}

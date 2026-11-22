@@ -42,7 +42,7 @@ function buildAgentContent(def: EmbeddedAgentDef): string {
 }
 
 const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
-	{ fileName: 'agy-acp.md', frontmatter: {name:'agy-acp', description:'Delegate an explicit brief to native Antigravity in an isolated workspace. Requires exact model and effort.', tools:[]}, template:'' },
+	{ fileName: 'agy-acp.md', frontmatter: {name:'agy-acp', description:'Delegate an explicit brief to native Antigravity in an isolated workspace. The router selects the model and effort per spawn.', tools:[]}, template:'' },
 	{ fileName: "scout.md", template: scoutMd },
 	{ fileName: "reviewer.md", template: reviewerMd },
 	{ fileName: "security-reviewer.md", template: securityReviewerMd },

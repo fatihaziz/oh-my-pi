@@ -17,7 +17,7 @@ Package-specific references:
 
 ## Native Antigravity tasks (Windows)
 
-The `agy-acp` agent passes one explicit assignment to `agy.exe acp` in an isolated workspace. An operator model and effort grant is required. The worker checks the advertised selections before prompting and relays permission decisions to the user. Parent tools and history are not forwarded. An isolated workspace is not an operating-system sandbox.
+The `agy-acp` agent passes one explicit assignment to `agy.exe acp` in an isolated workspace. Omit `model` to let the router choose an available Argon, Neon or Hydrogen model and effort for this spawn. The worker checks the grant and the CLI's advertised selections before sending the brief. It does not fall back to another model. Parent tools and history are not forwarded. An isolated workspace is not an operating-system sandbox.
 
 ## Bash visualization
 
