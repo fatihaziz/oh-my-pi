@@ -351,6 +351,13 @@ export const getModelsConfigSchemaBundle = once(() => {
 		type: '"ollama" | "llama.cpp" | "lm-studio" | "openai-models-list" | "proxy" | "litellm" | "apple-foundation-models"',
 		"timeoutMs?": "number",
 		/**
+		 * Lifetime of this endpoint's cached `/models` snapshot, in milliseconds.
+		 * Defaults to one day. Set a shorter window for a gateway whose route set
+		 * changes while it runs (a local router), so a new session discovers the
+		 * current catalog instead of keeping the previous day's rows.
+		 */
+		"cacheTtlMs?": "number",
+		/**
 		 * Defaults to `true`. Set `false` to fetch the model list from
 		 * `{baseUrl}/models` without injecting `/v1` — for gateways that root
 		 * their OpenAI-compatible surface at a versioned path (e.g.
@@ -388,6 +395,12 @@ export const getModelsConfigSchemaBundle = once(() => {
 			(typeof value.timeoutMs !== "number" || value.timeoutMs <= 0 || !Number.isFinite(value.timeoutMs))
 		) {
 			return ctx.mustBe("timeoutMs a positive finite number");
+		}
+		if (
+			value.cacheTtlMs !== undefined &&
+			(typeof value.cacheTtlMs !== "number" || value.cacheTtlMs <= 0 || !Number.isFinite(value.cacheTtlMs))
+		) {
+			return ctx.mustBe("cacheTtlMs a positive finite number");
 		}
 		return true;
 	});

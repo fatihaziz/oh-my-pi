@@ -1979,6 +1979,14 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(ProviderDiscoverySchema.allows({ type: "llama.cpp", timeoutMs: Number.NaN })).toBe(false);
 		expect(ProviderDiscoverySchema.allows({ type: "llama.cpp", timeoutMs: "30000" as any })).toBe(false);
 	});
+	test("ProviderDiscoverySchema validates cacheTtlMs", () => {
+		expect(ProviderDiscoverySchema.allows({ type: "openai-models-list", cacheTtlMs: 300_000 })).toBe(true);
+		expect(ProviderDiscoverySchema.allows({ type: "ollama", cacheTtlMs: 1 })).toBe(true);
+		expect(ProviderDiscoverySchema.allows({ type: "openai-models-list", cacheTtlMs: 0 })).toBe(false);
+		expect(ProviderDiscoverySchema.allows({ type: "openai-models-list", cacheTtlMs: -1 })).toBe(false);
+		expect(ProviderDiscoverySchema.allows({ type: "openai-models-list", cacheTtlMs: Number.NaN })).toBe(false);
+		expect(ProviderDiscoverySchema.allows({ type: "openai-models-list", cacheTtlMs: "300000" })).toBe(false);
+	});
 	test("ProviderDiscoverySchema restricts injectV1 to openai-models-list", () => {
 		expect(ProviderDiscoverySchema.allows({ type: "openai-models-list", injectV1: false })).toBe(true);
 		expect(ProviderDiscoverySchema.allows({ type: "openai-models-list", injectV1: true })).toBe(true);

@@ -359,6 +359,7 @@ Must define at least one of:
 ### Discovery
 
 - `discovery.timeoutMs` overrides that provider's runtime HTTP probe timeout in milliseconds. It must be a positive finite number.
+- `discovery.cacheTtlMs` overrides how long that provider's `/models` snapshot stays fresh, in milliseconds; the default is one day. Set a shorter window for a gateway whose route set changes while it runs, such as a local router, so a new session discovers the current catalog instead of reusing the previous day's rows. It must be a positive finite number.
 - Without an override, Ollama and llama.cpp loopback probes use short endpoint-specific budgets (150–250 ms); remote/LAN probes use 10 s. Generic model-list and proxy probes default to 10 s.
 - `discovery` requires provider-level `api`, except `discovery.type: proxy` (per-model wire auto-detected).
 

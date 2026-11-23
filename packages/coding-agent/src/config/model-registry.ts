@@ -2806,7 +2806,10 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 	): Promise<ConfiguredModelDiscoveryResult> {
 		const cacheProviderId = this.#configuredDiscoveryCacheProviderId(providerConfig);
-		const cached = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
+		// A gateway whose route set changes while it runs (a local router) opts into a
+		// shorter window; catalog sources keep the day-long default.
+		const cacheTtlMs = providerConfig.discovery.cacheTtlMs ?? 24 * 60 * 60 * 1000;
+		const cached = readModelCache<Api>(cacheProviderId, cacheTtlMs, Date.now, this.#cacheDbPath);
 		const cacheOlderThanConfig = cached !== null && this.#isDiscoveryCacheOlderThanModelsConfig(cached.updatedAt);
 		const bypassFreshCache = providerConfig.discovery.type === "llama.cpp" && strategy === "online-if-uncached";
 		const effectiveStrategy =
@@ -2870,7 +2873,7 @@ export class ModelRegistry {
 			restoreCachedHeaders: cachedHeaderResolver ? () => ({ resolveHeaders: cachedHeaderResolver }) : undefined,
 			cacheDbPath: this.#cacheDbPath,
 			cacheProviderId,
-			cacheTtlMs: 24 * 60 * 60 * 1000,
+			cacheTtlMs,
 			fetchDynamicModels,
 		});
 		const result = await manager.refresh(effectiveStrategy);
