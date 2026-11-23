@@ -1,0 +1,34 @@
+diff a/packages/coding-agent/src/task/executor.ts b/packages/coding-agent/src/task/executor.ts	(rejected hunks)
+@@ -49,7 +49,7 @@ import { type OverlayLayers, Settings } from "../config/settings";
+ 
+ import type { ToolPathWithSource } from "../extensibility/custom-tools";
+ import type { CustomTool } from "../extensibility/custom-tools/types";
+-import type { PreparedExtension } from "../extensibility/extensions/types";
++import type { ExtensionUIContext, PreparedExtension } from "../extensibility/extensions/types";
+ import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
+ import type { HindsightSessionState } from "../hindsight/state";
+ import type { LocalProtocolOptions } from "../internal-urls";
+@@ -112,6 +112,7 @@ import { TextTap } from "../job-widgets/text-tap";
+ import { TOOLS_SOURCE_ID } from "../job-widgets/types";
+ import { attributeSubagentError } from "./error-attribution";
+ import { externalExecutorForAgent, externalExecutorForSession } from "./external-executor";
++import { runAgyWorker } from './agy-acp';
+ import type { ParentServices } from "./worker-services";
+ import { generateTaskLabel } from "./label";
+ import { resolveAgentPrewalkDefault } from "./prewalk";
+@@ -417,6 +418,7 @@ export interface ExecutorOptions {
+ 	/** Parent session whose stored credential affinities seed the child session. */
+ 	credentialSourceSessionId?: string;
+ 	worktree?: string;
++	acpUI?: Pick<ExtensionUIContext, "select" | "input">;
+ 	agent: AgentDefinition;
+ 	task: string;
+ 	assignment?: string;
+@@ -4287,6 +4289,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
+  */
+ export async function runSubprocess(options: ExecutorOptions): Promise<SingleResult> {
+ 	options.assertSpawnAuthorization?.();
++	if (options.agent.name === 'agy-acp') return runAgyWorker(options);
+ 	const external = externalExecutorForSession(options.sessionFile);
+ 	if (external) return external.start(options);
+ 	const {
