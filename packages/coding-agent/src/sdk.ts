@@ -4400,7 +4400,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// a mid-session model switch re-decides it. Prompt and agent (description
 		// pruning) must agree: every prompt rebuild re-syncs the agent's pruning.
 		const resolveInlineToolDescriptors = (): boolean =>
-			shouldInlineToolDescriptors(cfgInlineToolDescriptors.get(settings), (agent?.state.model ?? model)?.id);
+			shouldInlineToolDescriptors(
+				cfgInlineToolDescriptors.get(settings),
+				(agent?.state.model ?? model)?.id,
+				(agent?.state.model ?? model)?.provider,
+			);
 		// Latest memory backend instructions rendered for advisor system prompts.
 		// Populated by the initial rebuildSystemPrompt below (before the session is
 		// constructed) and refreshed on every later rebuild via
@@ -4569,7 +4573,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					.filter(mapping => xdevPromptDocs?.catalog.has(mapping.name))
 					.map(mapping => mapping.name),
 			);
-			if (projection.mappings.length > 0 || projection.hasOmittedMappings) {
+			// Antigravity's account tier refuses a request carrying the generated route
+			// docs, so an antigravity-cli session keeps its tools but omits them.
+			const antigravityCli = (agent?.state.model ?? model)?.provider === "antigravity-cli";
+			if (!antigravityCli && (projection.mappings.length > 0 || projection.hasOmittedMappings)) {
 				appendParts.push(
 					prompt
 						.render(mcpXdevGuidanceTemplate, {

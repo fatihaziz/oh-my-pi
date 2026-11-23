@@ -14,6 +14,7 @@ import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 export function shouldInlineToolDescriptors(
 	setting: "auto" | "on" | "off" | undefined,
 	modelId: string | undefined,
+	provider?: string,
 ): boolean {
 	switch (setting ?? "auto") {
 		case "on":
@@ -21,6 +22,10 @@ export function shouldInlineToolDescriptors(
 		case "off":
 			return false;
 		default:
+			// Antigravity's account tier refuses a request carrying the generated
+			// descriptor block, so those models keep descriptors in their tool
+			// schemas. Explicit on/off above still wins.
+			if (provider === "antigravity-cli") return false;
 			return modelId !== undefined && classifyModel("", modelId, { lenient: true }).class === "gemini";
 	}
 }

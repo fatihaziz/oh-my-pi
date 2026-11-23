@@ -21,6 +21,14 @@ describe("shouldInlineToolDescriptors", () => {
 		expect(shouldInlineToolDescriptors("auto", undefined)).toBe(false);
 	});
 
+	test("auto keeps descriptors out of the prompt for the Antigravity CLI provider", () => {
+		expect(shouldInlineToolDescriptors("auto", "gemini-4-neon", "antigravity-cli")).toBe(false);
+		expect(shouldInlineToolDescriptors("auto", "gemini-4-hydrogen", "antigravity-cli")).toBe(false);
+		// Explicit user choices still win.
+		expect(shouldInlineToolDescriptors("on", "gemini-4-neon", "antigravity-cli")).toBe(true);
+		// Other providers keep the Gemini policy.
+		expect(shouldInlineToolDescriptors("auto", "gemini-4-neon", "google")).toBe(true);
+	});
 	test("undefined setting defaults to auto", () => {
 		expect(shouldInlineToolDescriptors(undefined, "gemini-3-pro")).toBe(true);
 		expect(shouldInlineToolDescriptors(undefined, "claude-opus-4-8")).toBe(false);
