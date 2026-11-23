@@ -5,6 +5,7 @@
 ### Fixed
 
 - Antigravity CLI replaces fingerprint-matched identity and tool catalog phrases that Google Cloud Code Assist rejects with 429 RESOURCE_EXHAUSTED, so Gemini 4 models answer instead of retrying a quota error.
+- Fixed Antigravity CLI (`antigravity-cli`) sessions failing with `RESOURCE_EXHAUSTED` (429): those models now send a compact prompt without the default instruction text, the MCP/xd route docs, or eval prelude guidance, and a mid-session switch onto or off the provider rebuilds the prompt before the next request.
 - `/plan <prompt>` pauses an active goal without dropping it or losing the supplied prompt and images.
 - Approving a plan for execution replaces the previous unfinished goal and its checklist. Entering plan mode alone still pauses the goal without dropping it.
 - Plan mode now explains when to use shared rules and milestone gates, and how to report a blocker without closing unfinished tasks.

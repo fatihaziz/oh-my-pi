@@ -295,6 +295,7 @@ import {
 	buildSystemPrompt as buildSystemPromptInternal,
 	cfgSystemPromptInputs,
 	composeAppendPrompt,
+	isAntigravityCliProvider,
 	loadProjectContextFiles as loadContextFilesInternal,
 	projectSystemPromptToolMetadata,
 	withoutAgentsMd,
@@ -4463,6 +4464,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			xdev,
 		): Promise<BuildSystemPromptResult> => {
 			const promptCwd = sessionManager.getCwd();
+			// The provider decides the prompt profile, so a switch onto or off an
+			// antigravity-cli model re-renders the same way a model change does.
+			const antigravityCli = isAntigravityCliProvider((agent?.state.model ?? model)?.provider);
 			let activeRepoContext = initialActiveRepoContext;
 			// Re-discover rules and context files from disk on every session-scoped
 			// rebuild. The rule buckets are otherwise frozen at
@@ -4575,7 +4579,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 			// Antigravity's account tier refuses a request carrying the generated route
 			// docs, so an antigravity-cli session keeps its tools but omits them.
-			const antigravityCli = (agent?.state.model ?? model)?.provider === "antigravity-cli";
 			if (!antigravityCli && (projection.mappings.length > 0 || projection.hasOmittedMappings)) {
 				appendParts.push(
 					prompt
@@ -4591,7 +4594,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						.trim(),
 				);
 			}
-			if (serverInstructions && serverInstructions.size > 0) {
+			if (!antigravityCli && serverInstructions && serverInstructions.size > 0) {
 				appendParts.push(
 					"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
 				);
@@ -4697,6 +4700,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				evalPreludes: toolSession.getAdvertisedEvalPreludes?.(),
 				model: getActiveModelString(),
 				includeModelInPrompt: cfgIncludeModelInPrompt.get(settings),
+				antigravityCli,
 				personality: agentKind === "sub" ? "none" : cfgPersonality.get(settings),
 				subagent: agentKind === "sub",
 				renderMermaid: tuiTranscript && cfgTuiRenderMermaid.get(settings),
