@@ -46,6 +46,12 @@ export function committedTodoPhases(result: AgentToolResult): TodoPhase[] | unde
 	return phases;
 }
 
+export function committedTodoOperation(details: unknown): TodoOperation | undefined {
+	if (!isRecord(details)) return undefined;
+	const { op } = details;
+	return TodoOp.allows(op) && op !== "view" ? op : undefined;
+}
+
 // =============================================================================
 // Schema
 // =============================================================================

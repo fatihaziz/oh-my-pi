@@ -280,8 +280,8 @@ import {
 } from "../tools/resolve";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
-import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { committedTodoOperation, committedTodoPhases, USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
+import type { TodoOperation, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { currentThreadId, isMainThread } from "../thread/identity";
 import { registerLocalSession } from "../thread/session-directory";
@@ -4599,6 +4599,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (wasFresh && cache && key) {
 			cache.keys.add(key);
 			cache.anchor = this.#persistedMessageKeysAnchor();
+		}
+		if (message.role === "toolResult" && message.toolName === "todo" && this.#extensionRunner?.hasHandlers("todo_committed")) {
+			const op = committedTodoOperation(message.details);
+			if (op && committedTodoPhases(message)) this.#notifyTodoCommitted(entryId, op);
 		}
 		return entryId;
 	}
@@ -12007,9 +12011,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/** Replace the list from outside the `todo` tool: update the cache and record a `user_todo_edit` entry so reloads keep it. */
-	commitTodoPhases(phases: TodoPhase[]): void {
+	commitTodoPhases(phases: TodoPhase[], op?: TodoOperation): void {
 		this.#todo.setPhases(phases);
-		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
+		const entryId = this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
+		this.#notifyTodoCommitted(entryId, op);
+	}
+
+	#notifyTodoCommitted(entryId: string, op?: TodoOperation): void {
+		const runner = this.#extensionRunner;
+		if (!runner?.hasHandlers("todo_committed") || !this.sessionManager.getEntry(entryId)) return;
+		void runner.emit({ type: "todo_committed", entryId, ...(op ? { op } : {}) }).catch(error => {
+			logger.warn("Todo commit extension notification failed", { entryId, error });
+		});
 	}
 
 	/** Active item labels accepted by this pooled turn's incremental yield tool. */
@@ -12762,10 +12775,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Clears all messages and starts a new session.
 	 * Listeners are preserved and will continue receiving events.
 	 * @param options - Optional initial messages and parent session path
+	 * @param beforeSwitch - Internal teardown after veto checks, while the old session still owns the journal
 	 * @returns true if completed, false if cancelled by hook
 	 */
-	async newSession(options?: NewSessionOptions): Promise<boolean> {
-		const queued = this.#enterSessionTransition(() => this.newSession(options));
+	async newSession(options?: NewSessionOptions, beforeSwitch?: () => Promise<void>): Promise<boolean> {
+		const queued = this.#enterSessionTransition(() => this.newSession(options, beforeSwitch));
 		if (queued) return queued;
 		using _transition = this.#beginSessionTransition();
 		this.#assertVibeSessionTransitionAllowed("start a new session");
@@ -12796,6 +12810,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
+				if (beforeSwitch) {
+					try {
+						await beforeSwitch();
+					} catch (error) {
+						this.#reconnectToAgent();
+						throw error;
+					}
+				}
 				this.#releaseQueuedTtsrReservations();
 				this.agent.reset();
 				this.#prunedTerminalFailure = undefined;

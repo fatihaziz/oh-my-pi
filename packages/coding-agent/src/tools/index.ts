@@ -76,7 +76,7 @@ import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
 import { SecurityScanTool } from "./security-scan";
 import { supportsExternalThinking, ThinkTool } from "./think";
-import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { TodoOperation, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TodoTool } from "./todo";
 import { WriteTool } from "./write";
 import { WaitTool } from "./wait";
@@ -517,7 +517,7 @@ export interface ToolSession {
 	 * toolResult entry; callers that produce none (the eval bridge, Cursor sync)
 	 * use this so branch rehydration agrees with the in-memory list.
 	 */
-	commitTodoPhases?: (phases: TodoPhase[]) => void;
+	commitTodoPhases?: (phases: TodoPhase[], op?: TodoOperation) => void;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
 	/** The `i` intent the model wrote on a tool call of the current turn, by call ID. */

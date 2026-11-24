@@ -29,6 +29,14 @@ describe("plan-mode re-entry prompt", () => {
 	});
 });
 
+it.each([false, true])("asks for read-only external evidence in both workflows (iterative=%s)", iterative => {
+	const loaded = render({ iterative, reentry: true });
+	expect(loaded).toContain("research it before asking a preference question or proposing the plan");
+	expect(loaded).toContain("open the relevant primary source");
+	expect(loaded).toContain("follow **Ground every claim** for local and external evidence");
+	expect(loaded).toContain("what remains unconfirmed");
+});
+
 describe("plan-mode-active tool availability", () => {
 	it("omits ask-tool directives when ask is unavailable", () => {
 		const withoutAsk = render({ askAvailable: false, iterative: true });

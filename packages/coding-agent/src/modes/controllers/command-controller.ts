@@ -1351,7 +1351,11 @@ export class CommandController {
 		}
 	}
 
-	async #runNewSessionFlow(options?: NewSessionOptions, label: string = "New session started"): Promise<void> {
+	async #runNewSessionFlow(
+		options?: NewSessionOptions,
+		label: string = "New session started",
+		beforeSwitch?: () => Promise<void>,
+	): Promise<void> {
 		this.ctx.clearTransientSessionUi();
 
 		if (this.ctx.session.isCompacting) {
@@ -1360,7 +1364,7 @@ export class CommandController {
 				await Bun.sleep(10);
 			}
 		}
-		if (!(await this.ctx.session.newSession(options))) return;
+		if (!(await this.ctx.session.newSession(options, beforeSwitch))) return;
 		// A focused subagent view keeps its own history: return to the main session
 		// first so the transcript below cannot rebuild from the subagent's surviving
 		// conversation, then drop any turn-scoped anchors (coalescing timers,
@@ -1381,8 +1385,8 @@ export class CommandController {
 		this.ctx.ui.requestRender(true, { clearScrollback: true });
 	}
 
-	async handleClearCommand(): Promise<void> {
-		await this.#runNewSessionFlow();
+	async handleClearCommand(beforeSwitch?: () => Promise<void>): Promise<void> {
+		await this.#runNewSessionFlow(undefined, undefined, beforeSwitch);
 	}
 
 	async handleFreshCommand(): Promise<void> {

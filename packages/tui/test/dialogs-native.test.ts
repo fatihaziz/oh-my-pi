@@ -860,6 +860,7 @@ describe("dialogs under a native surface", () => {
 		expect(dock.node.p).toEqual({ role: "omp.plan.dock", gap: "sm", align: "center" });
 		expect(dock.node.c?.filter(isNode).map(child => child.key ?? child.k)).toEqual([
 			"approve",
+			"refine",
 			"model",
 			"spacer",
 			"save",
@@ -889,6 +890,12 @@ describe("dialogs under a native surface", () => {
 				},
 			},
 		]);
+		expect(find(dock.node, node => node.key === "refine")?.node.p).toMatchObject({
+			text: "Refine plan",
+			icon: "edit",
+			keys: ["r"],
+			actions: { click: "refine" },
+		});
 		expect(find(dock.node, node => node.key === "model")?.node.p).toMatchObject({
 			role: "omp.plan.model",
 			text: "Sonnet",
@@ -907,6 +914,74 @@ describe("dialogs under a native surface", () => {
 		overlay.handleNativeEvent({ type: "action", key: `${dock.path}/approve/more`, act: "compact", mods: [] });
 		expect(onPick).toHaveBeenCalledWith("compact");
 	});
+
+	it.each([48, 100])(
+		"plan review: an unannotated dock shows a standalone Refine and picks it without an editor on %i columns",
+		async cols => {
+			const longPlan = `# Plan\n\n${Array.from(
+				{ length: 24 },
+				(_, i) => `## Section ${i + 1}\n\nStep ${i + 1} keeps the body long enough to scroll.\n`,
+			).join("\n")}`;
+			const start = async () => {
+				const onPick = vi.fn();
+				const overlay = new PlanReviewOverlay(
+					longPlan,
+					{
+						options: PLAN_CHOICES,
+						refine: { id: "refine", label: "Refine plan" },
+						slider: {
+							segments: [
+								{ label: "default", detail: "Sonnet" },
+								{ label: "slow", detail: "Opus" },
+							],
+							index: 0,
+							onChange: () => undefined,
+						},
+					},
+					{ onPick, onCancel: vi.fn(), onSave: vi.fn() },
+				);
+				const h = await TspHarness.start(tui => {
+					tui.showOverlay(overlay, { fullscreen: true, width: "100%", maxHeight: "100%" });
+					tui.setFocus(overlay);
+				}, { cols });
+				return { h, onPick };
+			};
+			const refineButton = (h: TspHarness) =>
+				h.find(node => node.k === "button" && node.p?.text === "Refine plan");
+			const editor = (h: TspHarness) => h.find(node => node.k === "editor");
+
+			const clicked = await start();
+			try {
+				const { h, onPick } = clicked;
+				expect(refineButton(h)?.p).toMatchObject({ keys: ["r"], icon: "edit", actions: { click: "refine" } });
+				expect(h.find(node => node.k === "button" && node.p?.text === "Approve")?.p).toMatchObject({
+					keys: ["enter"],
+					variant: "primary",
+				});
+				expect(h.find(node => node.k === "menu" && node.p?.title === "Approve options")).toBeDefined();
+				expect(h.find(node => node.k === "button" && node.p?.text === "Save")).toBeDefined();
+				expect(h.find(node => node.k === "editor")).toBeUndefined();
+				h.event({ ev: "action", sf: h.terminal.surface!, id: refineButton(h)!.id, act: "refine" });
+				expect(onPick.mock.calls).toEqual([["refine"]]);
+				expect(editor(h)).toBeUndefined();
+				expect(h.errors).toEqual([]);
+			} finally {
+				clicked.h.stop();
+			}
+
+			const keyed = await start();
+			try {
+				const { h, onPick } = keyed;
+				h.terminal.send("r");
+				h.flush();
+				expect(onPick.mock.calls).toEqual([["refine"]]);
+				expect(editor(h)).toBeUndefined();
+				expect(h.errors).toEqual([]);
+			} finally {
+				keyed.h.stop();
+			}
+		},
+	);
 
 	it("plan review: under the dock Enter approves, ←/→ pick the model and Esc cancels", () => {
 		const onPick = vi.fn();

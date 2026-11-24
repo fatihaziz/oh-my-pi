@@ -106,6 +106,7 @@ import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteT
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { TodoOperation } from "@oh-my-pi/pi-tui/tools/todo";
 import type { ApprovalMode } from "../../tools/approval";
 import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
@@ -1244,6 +1245,7 @@ export interface BeforeSubagentSpawnEvent {
 	requestedModel?: string;
 	/** Stable per-spawn key for deterministic selection, when the caller supplies one. */
 	spawnKey?: string;
+	readonly spawnLabel?: string;
 	/** Final resolved child input, absent when an old persisted session cannot supply it. */
 	readonly assignment?: string;
 	readonly context?: string;
@@ -1481,7 +1483,8 @@ export interface ToolApprovalResolvedEvent {
 export type PlanReviewChoice = "execute" | "compact" | "keep" | "refine" | "save";
 /**
  * A choice of the interactive plan review, delivered in order by `plan_review_requested`. The overlay
- * shows `refine` only while the plan has comments; it is always answerable with feedback.
+ * always offers `refine`; without annotations the local pick returns to the chat composer instead of
+ * sending, while `refine` remains answerable with feedback.
  */
 export interface PlanReviewOption {
 	id: PlanReviewChoice;
@@ -1523,6 +1526,13 @@ export interface PlanReviewResolvedEvent {
 	sessionId: string;
 	choice: PlanReviewChoice | undefined;
 	by: "local" | "extension";
+}
+
+/** A new todo snapshot is visible in the session journal. Seeds and manual edits have no tool operation. */
+export interface TodoCommittedEvent {
+	type: "todo_committed";
+	entryId: string;
+	op?: TodoOperation;
 }
 
 /**
@@ -1632,6 +1642,7 @@ interface ToolResultEventBase {
 	input: Record<string, unknown>;
 	content: (TextContent | ImageContent)[];
 	isError: boolean;
+	readonly programmatic?: boolean;
 }
 
 export interface BashToolResultEvent extends ToolResultEventBase {
@@ -1743,6 +1754,7 @@ export type ExtensionEvent =
 	| RetryFallbackSucceededEvent
 	| TtsrTriggeredEvent
 	| TodoReminderEvent
+	| TodoCommittedEvent
 	| GoalUpdatedEvent
 	| CredentialDisabledEvent
 	| McpNotificationEvent
@@ -1978,6 +1990,7 @@ export interface ExtensionAPI {
 	on(event: "retry_fallback_succeeded", handler: ExtensionHandler<RetryFallbackSucceededEvent>): void;
 	on(event: "ttsr_triggered", handler: ExtensionHandler<TtsrTriggeredEvent>): void;
 	on(event: "todo_reminder", handler: ExtensionHandler<TodoReminderEvent>): void;
+	on(event: "todo_committed", handler: ExtensionHandler<TodoCommittedEvent>): void;
 	on(event: "goal_updated", handler: ExtensionHandler<GoalUpdatedEvent>): void;
 	on(event: "credential_disabled", handler: ExtensionHandler<CredentialDisabledEvent>): void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;

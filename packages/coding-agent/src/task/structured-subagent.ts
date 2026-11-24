@@ -683,6 +683,7 @@ async function applySpawnHook(
 			patterns: Object.freeze([...(policy.modelOverride ?? [])]) as unknown as string[],
 			requestedModel: policy.perCallModelGrants?.standaloneSelector,
 			spawnKey,
+			spawnLabel: request.identity?.label,
 			assignment: request.assignment.trim(),
 			context: request.context?.trim() || undefined,
 			requirements:
