@@ -121,7 +121,12 @@ export async function runShellCommand(
 	try {
 		if (process.platform === "win32") {
 			let output = "";
-			const result = await executeShell({ command, cwd, timeoutMs }, (err, chunk) => {
+			// executeShell merges stdout and stderr into one callback stream.
+			// Redirect the whole command's stderr so config values (often API
+			// keys) cannot be contaminated by compiler warnings or diagnostics.
+			// The newline before `}` keeps trailing `#` comments inside the group.
+			const stdoutOnlyCommand = `{ ${command}\n} 2>/dev/null`;
+			const result = await executeShell({ command: stdoutOnlyCommand, cwd, timeoutMs }, (err, chunk) => {
 				if (!err) output += chunk;
 			});
 			if (result.timedOut || result.exitCode !== 0) return undefined;

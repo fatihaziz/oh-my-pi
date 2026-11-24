@@ -41,6 +41,14 @@ function stdoutFileCommand(file: string): string {
 	const script = `const fs=require("node:fs");process.stdout.write(fs.readFileSync(${JSON.stringify(file)}, "utf8").trim());`;
 	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
 }
+/** Command that writes a diagnostic to stderr and a clean token to stdout. */
+function stdoutWithStderrCommand(token: string): string {
+	if (process.platform !== "win32") {
+		return `printf 'diagnostic\\n' >&2; printf %s ${shellQuote(token)}`;
+	}
+	const script = `process.stderr.write("diagnostic\\n");process.stdout.write(${JSON.stringify(token)});`;
+	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
+}
 
 /** Minimal successful chat-completions SSE stream for the openai-completions provider. */
 function okChatCompletionStream(): Response {
@@ -494,6 +502,14 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 		invalidateAllCommandConfigs();
 		expect(await resolveConfigValue(config)).toBe("rotated");
+	});
+
+	test("config !command resolves stdout only, excluding stderr diagnostics", async () => {
+		const config = `!${stdoutWithStderrCommand("stdout-only-key")}`;
+		const value = await resolveConfigValue(config);
+		expect(value).toBe("stdout-only-key");
+		expect(value).not.toContain("diagnostic");
+		expect(value).not.toMatch(/[\r\n]/);
 	});
 
 	test("deduplicates concurrent resolution of the same command", async () => {
